@@ -1,7 +1,9 @@
 #include <iostream> //TODO
 #include <fstream>
+#include <cmath>
 #include <numbers>
 #include <numeric>
+#include <stdexcept>
 
 #include "nlohmann/json.hpp"
 #include "sphericart.hpp"
@@ -63,6 +65,59 @@ void MACE::compute_node_energies_forces(
     reverse_A0(num_nodes, node_types, num_neigh, neigh_types, xyz, r);
 }
 
+void MACE::compute_node_energies_forces_field(
+    const int num_nodes,
+    std::span<const int> node_types,
+    std::span<const int> num_neigh,
+    std::span<const int> neigh_indices,
+    std::span<const int> neigh_types,
+    std::span<const double> xyz,
+    std::span<const double> r,
+    std::span<const double> electric_field)
+{
+    node_energies.resize(num_nodes);
+    std::fill(node_energies.begin(), node_energies.end(), 0.0);
+    node_forces.resize(xyz.size());
+    std::fill(node_forces.begin(), node_forces.end(), 0.0);
+
+    if (has_zbl)
+        zbl.compute_ZBL(
+            num_nodes, node_types, num_neigh, neigh_types,
+            atomic_numbers, r, xyz, node_energies, node_forces);
+
+    compute_Y(xyz);
+
+    compute_R0(num_nodes, node_types, num_neigh, neigh_types, r);
+    compute_A0(num_nodes, node_types, num_neigh, neigh_types);
+    compute_A0_scaled(num_nodes, node_types, num_neigh, neigh_types, r);
+    compute_M0(num_nodes, node_types);
+    compute_H1_product(num_nodes);
+    compute_field_H1(num_nodes, electric_field);
+    compute_H1_linear_up(num_nodes);
+
+    compute_R1(num_nodes, node_types, num_neigh, neigh_types, r);
+    compute_Phi1(num_nodes, num_neigh, neigh_indices);
+    compute_A1(num_nodes);
+    compute_A1_scaled(num_nodes, node_types, num_neigh, neigh_types, r);
+    compute_M1(num_nodes, node_types);
+    compute_H2(num_nodes, node_types);
+
+    compute_readouts(num_nodes, node_types);
+
+    reverse_H2(num_nodes, node_types, false);
+    reverse_M1(num_nodes, node_types);
+    reverse_A1_scaled(num_nodes, node_types, num_neigh, neigh_types, xyz, r, false);
+    reverse_A1(num_nodes);
+    reverse_Phi1(num_nodes, num_neigh, neigh_indices, xyz, r, false, false);
+    reverse_H1_linear_up(num_nodes);
+    reverse_field_H1(num_nodes, electric_field);
+
+    reverse_H1_product(num_nodes);
+    reverse_M0(num_nodes, node_types);
+    reverse_A0_scaled(num_nodes, node_types, num_neigh, neigh_types, xyz, r);
+    reverse_A0(num_nodes, node_types, num_neigh, neigh_types, xyz, r);
+}
+
 void MACE::compute_R0(
     const int num_nodes,
     std::span<const int> node_types,
@@ -87,6 +142,183 @@ void MACE::compute_R0(
             ij += 1;
         }
     }
+}
+
+void MACE::compute_field_H1(
+    const int num_nodes,
+    std::span<const double> electric_field)
+{
+    if (!has_field_coupling)
+        return;
+
+    if (L_max != 1 || num_LM != 4)
+        throw std::runtime_error("MACEField H1 coupling currently requires L_max == 1.");
+
+    if (electric_field.size() != 3 && electric_field.size() != 3*num_nodes)
+        throw std::runtime_error("MACEField electric_field must have shape (3,) or (num_nodes, 3).");
+
+    const int hidden_size = num_LM*num_channels;
+    if (H1.size() != num_nodes*hidden_size)
+        throw std::runtime_error("MACEField H1 buffer size does not match num_nodes.");
+
+    const int channel_pairs = num_channels*num_channels;
+    if (field_feats_weight.size() != 2*channel_pairs
+        || field_linear_weight.size() != 2*channel_pairs)
+        throw std::runtime_error("MACEField field coupling weights do not match num_channels.");
+
+    H1_pre_field = H1;
+    std::vector<double> delta_scalar(num_nodes*num_channels, 0.0);
+    std::vector<double> delta_vector(num_nodes*num_channels*3, 0.0);
+    std::vector<double> linear_scalar(num_nodes*num_channels, 0.0);
+    std::vector<double> linear_vector(num_nodes*num_channels*3, 0.0);
+
+    const double inv_sqrt_3 = 1.0/std::sqrt(3.0);
+    const auto h1_index = [this](int i, int lm, int k) {
+        return (i*num_LM + lm)*num_channels + k;
+    };
+    const auto vector_index = [this](int i, int k, int component) {
+        return (i*num_channels + k)*3 + component;
+    };
+
+    for (int i=0; i<num_nodes; ++i) {
+        const double* field_i = electric_field.data() + (electric_field.size() == 3 ? 0 : 3*i);
+
+        for (int u=0; u<num_channels; ++u) {
+            const double scalar_in = H1_pre_field[h1_index(i, 0, u)];
+            double vector_dot_field = 0.0;
+            for (int component=0; component<3; ++component)
+                vector_dot_field += -H1_pre_field[h1_index(i, 1+component, u)]*field_i[component];
+
+            for (int w=0; w<num_channels; ++w) {
+                const int weight_index = u*num_channels + w;
+                const double scalar_to_vector_weight =
+                    field_feats_scalar_to_vector_path_weight
+                    * field_feats_weight[weight_index]
+                    * inv_sqrt_3;
+                const double vector_to_scalar_weight =
+                    field_feats_vector_to_scalar_path_weight
+                    * field_feats_weight[channel_pairs + weight_index]
+                    * inv_sqrt_3;
+
+                for (int component=0; component<3; ++component)
+                    delta_vector[vector_index(i, w, component)] +=
+                        scalar_to_vector_weight*scalar_in*field_i[component];
+
+                delta_scalar[i*num_channels + w] += vector_to_scalar_weight*vector_dot_field;
+            }
+        }
+
+        for (int u=0; u<num_channels; ++u) {
+            const double scalar_in = delta_scalar[i*num_channels + u];
+            for (int w=0; w<num_channels; ++w) {
+                const int weight_index = u*num_channels + w;
+                linear_scalar[i*num_channels + w] +=
+                    field_linear_scalar_path_weight
+                    * field_linear_weight[weight_index]
+                    * scalar_in;
+                for (int component=0; component<3; ++component)
+                    linear_vector[vector_index(i, w, component)] +=
+                        field_linear_vector_path_weight
+                        * field_linear_weight[channel_pairs + weight_index]
+                        * delta_vector[vector_index(i, u, component)];
+            }
+        }
+
+        for (int k=0; k<num_channels; ++k) {
+            H1[h1_index(i, 0, k)] =
+                H1_pre_field[h1_index(i, 0, k)] - linear_scalar[i*num_channels + k];
+            for (int component=0; component<3; ++component)
+                H1[h1_index(i, 1+component, k)] =
+                    H1_pre_field[h1_index(i, 1+component, k)]
+                    + linear_vector[vector_index(i, k, component)];
+        }
+    }
+}
+
+void MACE::reverse_field_H1(
+    const int num_nodes,
+    std::span<const double> electric_field)
+{
+    if (!has_field_coupling)
+        return;
+
+    if (electric_field.size() != 3 && electric_field.size() != 3*num_nodes)
+        throw std::runtime_error("MACEField electric_field must have shape (3,) or (num_nodes, 3).");
+
+    const int hidden_size = num_LM*num_channels;
+    if (H1_adj.size() != num_nodes*hidden_size || H1_pre_field.size() != num_nodes*hidden_size)
+        throw std::runtime_error("MACEField reverse_field_H1 requires H1_adj and saved pre-field H1 buffers.");
+
+    const int channel_pairs = num_channels*num_channels;
+    const bool global_field = electric_field.size() == 3;
+    electric_field_adj.assign(electric_field.size(), 0.0);
+
+    std::vector<double> delta_scalar_adj(num_nodes*num_channels, 0.0);
+    std::vector<double> delta_vector_adj(num_nodes*num_channels*3, 0.0);
+    std::vector<double> H1_pre_adj = H1_adj;
+
+    const double inv_sqrt_3 = 1.0/std::sqrt(3.0);
+    const auto h1_index = [this](int i, int lm, int k) {
+        return (i*num_LM + lm)*num_channels + k;
+    };
+    const auto vector_index = [this](int i, int k, int component) {
+        return (i*num_channels + k)*3 + component;
+    };
+
+    for (int i=0; i<num_nodes; ++i) {
+        const double* field_i = electric_field.data() + (global_field ? 0 : 3*i);
+        double* field_adj_i = electric_field_adj.data() + (global_field ? 0 : 3*i);
+
+        // Reverse field_linear. H1_post = H1_pre - field_linear(delta).
+        for (int u=0; u<num_channels; ++u) {
+            for (int w=0; w<num_channels; ++w) {
+                const int weight_index = u*num_channels + w;
+                delta_scalar_adj[i*num_channels + u] +=
+                    -field_linear_scalar_path_weight
+                    * field_linear_weight[weight_index]
+                    * H1_adj[h1_index(i, 0, w)];
+                for (int component=0; component<3; ++component)
+                    delta_vector_adj[vector_index(i, u, component)] +=
+                        field_linear_vector_path_weight
+                        * field_linear_weight[channel_pairs + weight_index]
+                        * H1_adj[h1_index(i, 1+component, w)];
+            }
+        }
+
+        // Reverse field_feats scalar->vector and vector->scalar paths.
+        for (int u=0; u<num_channels; ++u) {
+            const double scalar_in = H1_pre_field[h1_index(i, 0, u)];
+            for (int w=0; w<num_channels; ++w) {
+                const int weight_index = u*num_channels + w;
+                const double scalar_to_vector_weight =
+                    field_feats_scalar_to_vector_path_weight
+                    * field_feats_weight[weight_index]
+                    * inv_sqrt_3;
+                const double vector_to_scalar_weight =
+                    field_feats_vector_to_scalar_path_weight
+                    * field_feats_weight[channel_pairs + weight_index]
+                    * inv_sqrt_3;
+                const double scalar_delta_adj = delta_scalar_adj[i*num_channels + w];
+
+                for (int component=0; component<3; ++component) {
+                    const double vector_delta_adj =
+                        delta_vector_adj[vector_index(i, w, component)];
+                    H1_pre_adj[h1_index(i, 0, u)] +=
+                        vector_delta_adj*scalar_to_vector_weight*field_i[component];
+                    field_adj_i[component] +=
+                        vector_delta_adj*scalar_to_vector_weight*scalar_in;
+
+                    H1_pre_adj[h1_index(i, 1+component, u)] +=
+                        -scalar_delta_adj*vector_to_scalar_weight*field_i[component];
+                    field_adj_i[component] +=
+                        -scalar_delta_adj*vector_to_scalar_weight
+                        * H1_pre_field[h1_index(i, 1+component, u)];
+                }
+            }
+        }
+    }
+
+    H1_adj = std::move(H1_pre_adj);
 }
 
 void MACE::compute_R1(
@@ -446,6 +678,118 @@ void MACE::reverse_H1(
                 0.0,            // const double beta
                 M0_adj_il,      // double *c
                 num_channels);  // const MKL_INT ldc
+        }
+    }
+}
+
+void MACE::compute_H1_product(
+    const int num_nodes)
+{
+    H1.resize(M0.size());
+    for (int i=0; i<num_nodes; ++i) {
+        for (int l=0; l<=L_max; ++l) {
+            const auto M0_il = M0.data()+(i*num_LM+l*l)*num_channels;
+            const auto weights_l = H1_product_weights.data()+l*num_channels*num_channels;
+            auto H1_il = H1.data()+(i*num_LM+l*l)*num_channels;
+            cblas_dgemm(
+                CblasRowMajor,
+                CblasNoTrans,
+                CblasNoTrans,
+                2*l+1,
+                num_channels,
+                num_channels,
+                1.0,
+                M0_il,
+                num_channels,
+                weights_l,
+                num_channels,
+                0.0,
+                H1_il,
+                num_channels);
+        }
+    }
+}
+
+void MACE::compute_H1_linear_up(
+    const int num_nodes)
+{
+    auto H1_before_linear_up = H1;
+    for (int i=0; i<num_nodes; ++i) {
+        for (int l=0; l<=L_max; ++l) {
+            const auto H1_in_il = H1_before_linear_up.data()+(i*num_LM+l*l)*num_channels;
+            const auto weights_l = H1_linear_up_weights.data()+l*num_channels*num_channels;
+            auto H1_il = H1.data()+(i*num_LM+l*l)*num_channels;
+            cblas_dgemm(
+                CblasRowMajor,
+                CblasNoTrans,
+                CblasNoTrans,
+                2*l+1,
+                num_channels,
+                num_channels,
+                1.0,
+                H1_in_il,
+                num_channels,
+                weights_l,
+                num_channels,
+                0.0,
+                H1_il,
+                num_channels);
+        }
+    }
+}
+
+void MACE::reverse_H1_linear_up(
+    const int num_nodes)
+{
+    auto H1_adj_before_linear_up = H1_adj;
+    for (int i=0; i<num_nodes; ++i) {
+        for (int l=0; l<=L_max; ++l) {
+            const auto H1_adj_il = H1_adj_before_linear_up.data()+(i*num_LM+l*l)*num_channels;
+            const auto weights_l = H1_linear_up_weights.data()+l*num_channels*num_channels;
+            auto H1_pre_adj_il = H1_adj.data()+(i*num_LM+l*l)*num_channels;
+            cblas_dgemm(
+                CblasRowMajor,
+                CblasNoTrans,
+                CblasTrans,
+                2*l+1,
+                num_channels,
+                num_channels,
+                1.0,
+                H1_adj_il,
+                num_channels,
+                weights_l,
+                num_channels,
+                0.0,
+                H1_pre_adj_il,
+                num_channels);
+        }
+    }
+}
+
+void MACE::reverse_H1_product(
+    const int num_nodes)
+{
+    M0_adj.resize(M0.size());
+    for (int i=0; i<num_nodes; ++i) {
+        for (int l=0; l<=L_max; ++l) {
+            const auto H1_adj_il = H1_adj.data()+(i*num_LM+l*l)*num_channels;
+            const auto weights_l = H1_product_weights.data()+l*num_channels*num_channels;
+            auto M0_adj_il = M0_adj.data()+(i*num_LM+l*l)*num_channels;
+            cblas_dgemm(
+                CblasRowMajor,
+                CblasNoTrans,
+                CblasTrans,
+                2*l+1,
+                num_channels,
+                num_channels,
+                1.0,
+                H1_adj_il,
+                num_channels,
+                weights_l,
+                num_channels,
+                0.0,
+                M0_adj_il,
+                num_channels);
         }
     }
 }
@@ -973,6 +1317,89 @@ void MACE::load_from_json(
 
     // H1
     H1_weights = file["H1_weights"].get<std::vector<double>>();
+    H1_product_weights = file.value("H1_product_weights", std::vector<double>{});
+    H1_linear_up_weights = file.value("H1_linear_up_weights", std::vector<double>{});
+
+    // MACEField H1 coupling
+    has_field_coupling = file.value("has_field_coupling", false);
+    field_feats_scalar_to_vector_path_weight = 0.0;
+    field_feats_vector_to_scalar_path_weight = 0.0;
+    field_linear_scalar_path_weight = 0.0;
+    field_linear_vector_path_weight = 0.0;
+    if (has_field_coupling) {
+        auto field_couplings = file["field_couplings"];
+        if (field_couplings.size() != 1)
+            throw std::runtime_error("MACEField JSON must contain exactly one field coupling.");
+        auto coupling = field_couplings[0];
+        if (coupling["field_feats_irreps_in1"].get<std::string>() != "128x0e+128x1o"
+            || coupling["field_feats_irreps_in2"].get<std::string>() != "1x1o"
+            || coupling["field_feats_irreps_out"].get<std::string>() != "128x0e+128x1o"
+            || coupling["field_linear_irreps_in"].get<std::string>() != "128x0e+128x1o"
+            || coupling["field_linear_irreps_out"].get<std::string>() != "128x0e+128x1o")
+            throw std::runtime_error("Unsupported MACEField field coupling irreps.");
+        if (num_channels != 128 || L_max != 1)
+            throw std::runtime_error("MACEField JSON field coupling currently requires 128 channels and L_max == 1.");
+        if (H1_product_weights.size() != H1_weights.size()
+            || H1_linear_up_weights.size() != H1_weights.size())
+            throw std::runtime_error("MACEField JSON must contain split H1 product and linear_up weights.");
+
+        field_feats_weight = coupling["field_feats_weight"].get<std::vector<double>>();
+        field_feats_output_mask = coupling["field_feats_output_mask"].get<std::vector<double>>();
+        field_linear_weight = coupling["field_linear_weight"].get<std::vector<double>>();
+        field_linear_bias = coupling["field_linear_bias"].get<std::vector<double>>();
+        field_linear_output_mask = coupling["field_linear_output_mask"].get<std::vector<double>>();
+
+        const int channel_pairs = num_channels*num_channels;
+        if (field_feats_weight.size() != 2*channel_pairs
+            || field_linear_weight.size() != 2*channel_pairs
+            || field_feats_output_mask.size() != 4*num_channels
+            || field_linear_output_mask.size() != 4*num_channels
+            || !field_linear_bias.empty())
+            throw std::runtime_error("MACEField JSON field coupling tensor sizes are unsupported.");
+        for (double mask_value : field_feats_output_mask)
+            if (mask_value != 1.0)
+                throw std::runtime_error("Unsupported MACEField field_feats output mask.");
+        for (double mask_value : field_linear_output_mask)
+            if (mask_value != 1.0)
+                throw std::runtime_error("Unsupported MACEField field_linear output mask.");
+
+        auto field_feats_instructions = coupling["field_feats_instructions"];
+        if (field_feats_instructions.size() != 2)
+            throw std::runtime_error("MACEField field_feats must contain exactly two instructions.");
+        for (const auto& instruction : field_feats_instructions) {
+            if (instruction["connection_mode"].get<std::string>() != "uvw")
+                throw std::runtime_error("MACEField field_feats only supports uvw instructions.");
+            auto path_shape = instruction["path_shape"].get<std::vector<int>>();
+            if (path_shape != std::vector<int>{num_channels, 1, num_channels})
+                throw std::runtime_error("Unsupported MACEField field_feats path shape.");
+            const int i_in1 = instruction["i_in1"].get<int>();
+            const int i_in2 = instruction["i_in2"].get<int>();
+            const int i_out = instruction["i_out"].get<int>();
+            if (i_in1 == 0 && i_in2 == 0 && i_out == 1)
+                field_feats_scalar_to_vector_path_weight = instruction["path_weight"].get<double>();
+            else if (i_in1 == 1 && i_in2 == 0 && i_out == 0)
+                field_feats_vector_to_scalar_path_weight = instruction["path_weight"].get<double>();
+            else
+                throw std::runtime_error("Unsupported MACEField field_feats instruction.");
+        }
+
+        auto field_linear_instructions = coupling["field_linear_instructions"];
+        if (field_linear_instructions.size() != 2)
+            throw std::runtime_error("MACEField field_linear must contain exactly two instructions.");
+        for (const auto& instruction : field_linear_instructions) {
+            auto path_shape = instruction["path_shape"].get<std::vector<int>>();
+            if (path_shape != std::vector<int>{num_channels, num_channels})
+                throw std::runtime_error("Unsupported MACEField field_linear path shape.");
+            const int i_in = instruction["i_in"].get<int>();
+            const int i_out = instruction["i_out"].get<int>();
+            if (i_in == 0 && i_out == 0)
+                field_linear_scalar_path_weight = instruction["path_weight"].get<double>();
+            else if (i_in == 1 && i_out == 1)
+                field_linear_vector_path_weight = instruction["path_weight"].get<double>();
+            else
+                throw std::runtime_error("Unsupported MACEField field_linear instruction.");
+        }
+    }
 
     // Phi1
     Phi1_l = file["Phi1_l"].get<std::vector<int>>();

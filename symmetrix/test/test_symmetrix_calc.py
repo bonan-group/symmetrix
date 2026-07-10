@@ -4,12 +4,14 @@
 import pytest
 
 import os
+import json
 import time
 from pathlib import Path
 
 import numpy as np
 
 from ase.atoms import Atoms
+from ase.build import bulk
 from ase.stress import full_3x3_to_voigt_6_stress
 
 try:
@@ -135,6 +137,170 @@ def test_symmetrix_vs_pytorch(mace_foundation_model, use_kokkos):
     assert np.allclose(atoms_s.get_potential_energy(), atoms_p.get_potential_energy(), atol=0.001)
     assert np.allclose(atoms_s.get_forces(), atoms_p.get_forces(), atol=0.002)
     assert np.allclose(atoms_s.get_stress(), atoms_p.get_stress(), atol=0.003)
+
+
+@pytest.fixture(scope="module")
+def macefield_model_path():
+    model_path = Path("/home/bonan/appdir/mace-field/MACEField-MH-0-omat-dielectric.model")
+    if not model_path.exists():
+        pytest.skip(f"MACEField example model is not available: {model_path}")
+    return model_path
+
+
+@pytest.mark.skipif(mace is None, reason="mace-field is not available")
+def test_macefield_ase_api_matches_pytorch(macefield_model_path):
+    atoms = bulk("AlN", "wurtzite", a=3.112, c=4.982)
+    atoms.info["electric_field"] = np.array([0.01, 0.0, 0.0])
+
+    atoms_sym = atoms.copy()
+    atoms_torch = atoms.copy()
+
+    calc_sym = Symmetrix(
+        macefield_model_path,
+        species=[7, 13],
+        head="mp-dielectric",
+        use_kokkos=True,
+        dtype="float64",
+    )
+    calc_torch = MACECalculator(
+        model_paths=[str(macefield_model_path)],
+        model_type="MACEField",
+        head="mp-dielectric",
+        device="cpu",
+        default_dtype="float64",
+    )
+
+    atoms_sym.calc = calc_sym
+    atoms_torch.calc = calc_torch
+
+    assert {"polarization", "becs", "polarizability"}.issubset(calc_sym.implemented_properties)
+    assert np.allclose(atoms_sym.get_potential_energy(), atoms_torch.get_potential_energy(), atol=1e-6)
+    assert np.allclose(atoms_sym.get_forces(), atoms_torch.get_forces(), atol=1e-6)
+    assert np.allclose(atoms_sym.get_stress(), atoms_torch.get_stress(), atol=1e-6)
+
+    for key in ["polarization", "becs", "polarizability"]:
+        assert key in calc_sym.results
+        assert np.allclose(calc_sym.results[key], calc_torch.results[key], atol=1e-6)
+
+    assert calc_sym.results["polarization"].shape == (3,)
+    assert calc_sym.results["becs"].shape == (len(atoms), 9)
+    assert calc_sym.results["polarizability"].shape == (9,)
+
+
+@pytest.mark.skipif(mace is None, reason="mace-field is not available")
+def test_macefield_electric_field_changes_cached_results(macefield_model_path):
+    atoms = bulk("AlN", "wurtzite", a=3.112, c=4.982)
+    atoms.calc = Symmetrix(
+        macefield_model_path,
+        species=[7, 13],
+        head="mp-dielectric",
+        use_kokkos=True,
+        dtype="float64",
+    )
+
+    atoms.info["electric_field"] = np.array([0.0, 0.0, 0.0])
+    energy_zero = atoms.get_potential_energy()
+    forces_zero = atoms.get_forces()
+
+    atoms.info["electric_field"][0] = 0.01
+    energy_field = atoms.get_potential_energy()
+    forces_field = atoms.get_forces()
+
+    assert not np.isclose(energy_zero, energy_field, rtol=0.0, atol=1e-8)
+    assert not np.allclose(forces_zero, forces_field)
+
+
+@pytest.mark.skipif(mace is None, reason="mace-field is not available")
+def test_macefield_ref_electric_field_matches_pytorch(macefield_model_path):
+    atoms = bulk("AlN", "wurtzite", a=3.112, c=4.982)
+    atoms.info["REF_electric_field"] = np.array([0.0, 0.01, 0.0])
+
+    atoms_sym = atoms.copy()
+    atoms_torch = atoms.copy()
+
+    calc_sym = Symmetrix(
+        macefield_model_path,
+        species=[7, 13],
+        head="mp-dielectric",
+        use_kokkos=True,
+        dtype="float64",
+    )
+    calc_torch = MACECalculator(
+        model_paths=[str(macefield_model_path)],
+        model_type="MACEField",
+        head="mp-dielectric",
+        device="cpu",
+        default_dtype="float64",
+    )
+
+    atoms_sym.calc = calc_sym
+    atoms_torch.calc = calc_torch
+
+    assert np.allclose(atoms_sym.get_potential_energy(), atoms_torch.get_potential_energy(), atol=1e-6)
+    assert np.allclose(atoms_sym.get_forces(), atoms_torch.get_forces(), atol=1e-6)
+
+
+@pytest.mark.skipif(mace is None, reason="mace-field is not available")
+def test_macefield_native_json_ase_energy_forces_match_pytorch(macefield_model_path, tmp_path):
+    from symmetrix.extract_mace_data import extract_mace_data
+
+    json_path = tmp_path / "macefield.json"
+    json_path.write_text(json.dumps(extract_mace_data(
+        macefield_model_path,
+        species=[7, 13],
+        head="mp-dielectric",
+    )))
+
+    atoms = bulk("AlN", "wurtzite", a=3.112, c=4.982)
+    atoms.info["electric_field"] = np.array([0.01, 0.0, 0.0])
+
+    atoms_sym = atoms.copy()
+    atoms_torch = atoms.copy()
+    atoms_sym.calc = Symmetrix(json_path, use_kokkos=False, dtype="float64")
+    atoms_torch.calc = MACECalculator(
+        model_paths=[str(macefield_model_path)],
+        model_type="MACEField",
+        head="mp-dielectric",
+        device="cpu",
+        default_dtype="float64",
+    )
+
+    assert np.allclose(atoms_sym.get_potential_energy(), atoms_torch.get_potential_energy(), atol=1e-3)
+    assert np.allclose(atoms_sym.get_forces(), atoms_torch.get_forces(), atol=2e-3)
+
+
+def test_plain_mace_model_uses_native_symmetrix_path(monkeypatch, tmp_path):
+    class PlainTorchModel:
+        pass
+
+    class DummyEvaluator:
+        r_cut = 3.0
+
+    def fake_torch_load(*args, **kwargs):
+        return PlainTorchModel()
+
+    monkeypatch.setattr("torch.load", fake_torch_load)
+    monkeypatch.setattr("symmetrix.symmetrix_calc.symmetrix.MACE", lambda filename: DummyEvaluator())
+
+    calc = Symmetrix(tmp_path / "plain.model", use_kokkos=False)
+
+    assert calc._macefield_calculator is None
+    assert calc.evaluator.r_cut == 3.0
+    assert calc.implemented_properties == ["energy", "free_energy", "energies", "forces", "stress"]
+
+
+def test_unloadable_torch_model_preserves_load_error(monkeypatch, tmp_path):
+    def fake_native_loader(filename):
+        raise RuntimeError("not native json")
+
+    def fake_torch_load(*args, **kwargs):
+        raise ValueError("checkpoint cannot be unpickled")
+
+    monkeypatch.setattr("symmetrix.symmetrix_calc.symmetrix.MACE", fake_native_loader)
+    monkeypatch.setattr("torch.load", fake_torch_load)
+
+    with pytest.raises(ValueError, match="checkpoint cannot be unpickled"):
+        Symmetrix(tmp_path / "broken.model", use_kokkos=False)
 
 
 def do_grad_test(atoms, calc, check, ax=None, label=None, plot_factor=1.0):

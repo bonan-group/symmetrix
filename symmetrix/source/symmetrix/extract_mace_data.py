@@ -67,8 +67,19 @@ def extract_mace_data(model, species, head=None, num_spline_points=256):
 
     ### ----- CHECK FOR COMPATIBILITY -----
 
+    is_macefield = (
+        type(model).__name__ == "MACEField"
+        or (hasattr(model, "field_feats") and hasattr(model, "field_linear"))
+    )
+
     if len(model.interactions) != 2:
         raise RuntimeError("Currently, symmetrix only supports two-layer MACE models.")
+
+    if is_macefield:
+        if not hasattr(model, "field_feats") or not hasattr(model, "field_linear"):
+            raise RuntimeError("MACEField models must have field_feats and field_linear modules.")
+        if len(model.field_feats) != 1 or len(model.field_linear) != 1:
+            raise RuntimeError("Currently, symmetrix only supports MACEField models with one field coupling.")
 
     from mace.modules.blocks import RealAgnosticInteractionBlock, RealAgnosticDensityInteractionBlock
     if (not isinstance(model.interactions[0], RealAgnosticInteractionBlock)
@@ -98,6 +109,47 @@ def extract_mace_data(model, species, head=None, num_spline_points=256):
         simplified.bias = linear.bias
         return simplified
 
+    def serialize_instruction(instruction):
+        serialized = {}
+        for name in (
+            "i_in",
+            "i_in1",
+            "i_in2",
+            "i_out",
+            "connection_mode",
+            "has_weight",
+            "path_weight",
+            "path_shape",
+        ):
+            if hasattr(instruction, name):
+                value = getattr(instruction, name)
+                if isinstance(value, tuple):
+                    value = list(value)
+                serialized[name] = value
+        return serialized
+
+    def serialize_field_coupling(field_feats, field_linear):
+        return {
+            "field_feats_irreps_in1": str(field_feats.irreps_in1),
+            "field_feats_irreps_in2": str(field_feats.irreps_in2),
+            "field_feats_irreps_out": str(field_feats.irreps_out),
+            "field_feats_instructions": [
+                serialize_instruction(instruction)
+                for instruction in field_feats.instructions
+            ],
+            "field_feats_weight": field_feats.weight.numpy(force=True).tolist(),
+            "field_feats_output_mask": field_feats.output_mask.numpy(force=True).tolist(),
+            "field_linear_irreps_in": str(field_linear.irreps_in),
+            "field_linear_irreps_out": str(field_linear.irreps_out),
+            "field_linear_instructions": [
+                serialize_instruction(instruction)
+                for instruction in field_linear.instructions
+            ],
+            "field_linear_weight": field_linear.weight.numpy(force=True).tolist(),
+            "field_linear_bias": field_linear.bias.numpy(force=True).tolist(),
+            "field_linear_output_mask": field_linear.output_mask.numpy(force=True).tolist(),
+        }
+
     ### ----- BASIC MODEL INFO -----
 
     num_channels = model.node_embedding.linear.irreps_out.count("0e")
@@ -109,6 +161,31 @@ def extract_mace_data(model, species, head=None, num_spline_points=256):
     output['r_cut'] = r_cut
     output['l_max'] = l_max
     output['L_max'] = L_max
+    output['model_type'] = "MACEField" if is_macefield else "MACE"
+    output['has_field_coupling'] = is_macefield
+    output['field_couplings'] = []
+
+    if is_macefield:
+        field_feats = model.field_feats[0]
+        field_linear = model.field_linear[0]
+        expected_hidden_dim = ((L_max + 1) ** 2) * num_channels
+        if field_feats.irreps_in1.dim != expected_hidden_dim:
+            raise RuntimeError(
+                "MACEField field_feats.0 input irreps do not match the extracted H1 layout.")
+        if str(field_feats.irreps_in2) != "1x1o":
+            raise RuntimeError("Currently, symmetrix only supports MACEField electric-field irreps '1x1o'.")
+        if field_feats.irreps_out != field_linear.irreps_in:
+            raise RuntimeError("MACEField field_feats.0 output irreps must match field_linear.0 input irreps.")
+        if field_linear.irreps_out != field_feats.irreps_in1:
+            raise RuntimeError("MACEField field_linear.0 output irreps must match field_feats.0 input irreps.")
+        if field_linear.irreps_out.dim != expected_hidden_dim:
+            raise RuntimeError(
+                "MACEField field_linear.0 output irreps do not match the extracted H1 layout.")
+        if not torch.all(field_feats.output_mask == 1):
+            raise RuntimeError("Currently, symmetrix only supports MACEField field_feats.0 output masks of all ones.")
+        if not torch.all(field_linear.output_mask == 1):
+            raise RuntimeError("Currently, symmetrix only supports MACEField field_linear.0 output masks of all ones.")
+        output['field_couplings'] = [serialize_field_coupling(field_feats, field_linear)]
 
     ### ----- ATOMIC NUMBERS AND ENERGIES -----
 
@@ -316,6 +393,9 @@ def extract_mace_data(model, species, head=None, num_spline_points=256):
     for l in range(L_max+1):
         H1_weights[l,:,:] = weights_0[l,:,:] @ weights_1[l,:,:]
     output["H1_weights"] = H1_weights.flatten().tolist()
+    if is_macefield:
+        output["H1_product_weights"] = weights_0.flatten().tolist()
+        output["H1_linear_up_weights"] = weights_1.flatten().tolist()
 
     ### ----- Phi1 -----
 
