@@ -6,7 +6,6 @@ work for the U. S. Government, and is not subject to copyright.
 """
 import json
 import logging
-import copy
 from tempfile import NamedTemporaryFile
 import numpy as np
 
@@ -43,7 +42,7 @@ class Symmetrix(Calculator):
         Calculator.__init__(self, **kwargs)
         if dtype not in ["float32", "float64"]:
             raise ValueError(f"Unsupported dtype '{dtype}'. Supported dtypes are 'float64' and 'float32'.")
-        self._macefield_info = None
+        self._macefield_electric_field = None
         self._electric_field = kwargs.get("electric_field", None)
         self._model_has_field_coupling = self._json_has_field_coupling(model_file)
 
@@ -86,6 +85,7 @@ class Symmetrix(Calculator):
         self.cutoff = self.evaluator.r_cut
         self.implemented_properties = list(type(self).implemented_properties)
         if self._has_native_field_coupling():
+            self.implemented_properties.append('node_energy')
             self.implemented_properties.extend(self._macefield_response_properties)
 
     def _json_has_field_coupling(self, model_file):
@@ -125,7 +125,11 @@ class Symmetrix(Calculator):
             and not state
             and (
                 not hasattr(self, "atoms")
-                or not equal(self._macefield_info, getattr(atoms, "info", {}), atol=tol)
+                or not equal(
+                    self._macefield_electric_field,
+                    self._resolve_electric_field(atoms),
+                    atol=tol,
+                )
             )
         ):
             state.append("info")
@@ -137,7 +141,15 @@ class Symmetrix(Calculator):
             and getattr(self.evaluator, "has_field_coupling", False)
         )
 
-    def _resolve_electric_field(self, atoms=None, require_graph=False):
+    @property
+    def electric_field(self):
+        return self._electric_field
+
+    @electric_field.setter
+    def electric_field(self, value):
+        self._electric_field = value
+
+    def _resolve_electric_field(self, atoms=None):
         if atoms is None:
             atoms = self.atoms
 
@@ -153,12 +165,13 @@ class Symmetrix(Calculator):
         field = np.asarray(field, dtype=float)
         if field.shape == (3,):
             return field
-        if field.shape != (len(atoms), 3):
-            raise ValueError("electric_field must have shape (3,) or (natoms, 3).")
-        if require_graph:
-            raise PropertyNotImplementedError(
-                "MACEField response properties require a graph-level electric_field with shape (3,).")
-        return field
+        if field.shape == (1, 3):
+            return field.reshape(3)
+        if field.shape == (len(atoms), 3):
+            raise ValueError(
+                "MACEField ASE electric_field must be a graph-level electric_field "
+                "with shape (3,) or (1, 3); per-atom fields are not supported.")
+        raise ValueError("electric_field must have shape (3,) or (1, 3).")
 
     def _mace_inputs(self, atoms):
         ase_atomic_numbers = atoms.get_atomic_numbers().tolist()
@@ -263,16 +276,18 @@ class Symmetrix(Calculator):
 
         num_nodes, node_types, num_neigh, j_list, neigh_types, xyz, r, i_list = self._mace_inputs(self.atoms)
         if self._has_native_field_coupling():
-            electric_field = self._resolve_electric_field(
-                require_graph=any(prop in properties for prop in self._macefield_response_properties))
+            electric_field = self._resolve_electric_field()
             self._compute_macefield(self.atoms, electric_field)
-            self._macefield_info = copy.deepcopy(getattr(self.atoms, "info", {}))
+            self._macefield_electric_field = np.array(electric_field, copy=True)
         else:
             self.evaluator.compute_node_energies_forces(
                 num_nodes, node_types, num_neigh, j_list, neigh_types, xyz.flatten(), r)
 
         self.results['energy'] = self.results['free_energy'] = np.sum(self.evaluator.node_energies)
         self.results['energies'] = np.asarray(self.evaluator.node_energies)
+        if 'node_energy' in self.implemented_properties:
+            atomic_energies = np.asarray(self.evaluator.atomic_energies)
+            self.results['node_energy'] = self.results['energies'] - atomic_energies[np.asarray(node_types, dtype=int)]
 
         pair_forces = np.asarray(self.evaluator.node_forces).reshape((-1, 3))
         pair_forces = pair_forces[:len(i_list), :]  # currently, `evaluator.node_forces` is a container

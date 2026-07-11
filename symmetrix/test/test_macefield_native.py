@@ -169,6 +169,15 @@ def test_native_field_energy_forces_match_ase_macefield(macefield_full_json_path
     assert np.allclose(native_forces, expected_forces, atol=2e-3)
 
 
+def test_native_exposes_atomic_energies_for_node_energy(macefield_full_json_path):
+    evaluator = native_symmetrix.MACE(str(macefield_full_json_path))
+
+    atomic_energies = np.asarray(evaluator.atomic_energies, dtype=np.float64)
+
+    assert atomic_energies.shape == (len(evaluator.atomic_numbers),)
+    assert np.all(np.isfinite(atomic_energies))
+
+
 def test_native_electric_field_hessian_matches_field_adjoint_finite_difference(macefield_full_json_path):
     atoms = bulk("AlN", "wurtzite", a=3.112, c=4.982)
     electric_field = np.array([0.01, -0.02, 0.03], dtype=np.float64)
