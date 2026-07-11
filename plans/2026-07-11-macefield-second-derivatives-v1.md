@@ -8,9 +8,9 @@ This plan assumes the existing native JSON field path remains the base: libsymme
 
 ## Current Status
 
-As of the current worktree state, the ASE-facing baseline is implemented for converted MACEField JSON. Direct PyTorch MACEField checkpoints are rejected, graph-level field semantics are enforced for response properties, native polarization is exposed from the serial evaluator field adjoint, and BECs plus polarizability are available as central finite differences of native raw polarization. This finite-difference implementation is intentionally a baseline and oracle harness; it is not the final analytic fixed-graph second-derivative implementation described in Tasks 4 through 7.
+As of the current worktree state, the ASE-facing baseline is implemented for converted MACEField JSON. Direct PyTorch MACEField checkpoints are rejected, graph-level field semantics are enforced for response properties, native polarization is exposed from the serial evaluator field adjoint, polarizability uses a native serial graph-field analytic directional derivative of electric_field_adj, and BECs use the native serial graph-field derivative of forces. Finite differences remain as tests and oracle harnesses, not as the production response path.
 
-The remaining core work is to replace the finite-difference BEC and polarizability path with native directional second derivatives through the serial C++ kernels. Kokkos-requested field JSON is currently routed back to the serial native field path so field coupling is not silently ignored.
+The core ASE response path is now native for polarization, polarizability, and BECs. Kokkos-requested field JSON is currently routed back to the serial native field path so field coupling is not silently ignored.
 
 ## Implementation Plan
 
@@ -28,7 +28,7 @@ The remaining core work is to replace the finite-difference BEC and polarizabili
 
 - [ ] 4. Add a serial directional-derivative framework for forward-over-reverse response derivatives.
   Introduce tangent buffers beside the existing primal and adjoint buffers in libsymmetrix/source/mace.hpp:115, covering the tensors that already participate in the field-aware forward and reverse pass. The driver should seed one direction at a time in either Cartesian positions or graph electric field, run the normal primal calculation, run the normal reverse calculation, and propagate tangent-adjoints through the reverse pass to obtain directional changes in electric_field_adj. This keeps the response implementation local to the serial evaluator and avoids adding a general automatic differentiation dependency.
-  Status: Pending. This is the main next phase needed to replace the finite-difference baseline.
+  Status: Done for graph electric-field seeds. Polarizability reads dot electric_field_adj, and BECs read dot forces through the equivalent mixed derivative dForce/dField.
 
 - [ ] 5. Implement and test the field-coupling block's second-derivative rules first.
   The field block is isolated enough to be a clean proving ground: compute_field_H1 saves H1_pre_field at libsymmetrix/source/mace.cpp:169, applies the scalar-vector and vector-scalar field paths at libsymmetrix/source/mace.cpp:183, and reverse_field_H1 propagates adjoints through the same paths at libsymmetrix/source/mace.cpp:238. Add tangent propagation for compute_field_H1 and tangent-adjoint propagation for reverse_field_H1, then compare H1, H1_adj, electric_field_adj, and their directional derivatives against PyTorch autograd using the existing standalone field-transform fixtures in symmetrix/test/test_macefield_native.py:78 and symmetrix/test/test_macefield_native.py:97.
@@ -36,11 +36,11 @@ The remaining core work is to replace the finite-difference BEC and polarizabili
 
 - [ ] 6. Extend geometric and interaction kernels with the second-order ingredients needed for BECs.
   Position-seeded response derivatives require second derivatives wherever the current force path differentiates geometry-dependent quantities. Add spline second derivatives for radial functions beside compute_R0 and compute_R1, use sphericart Hessian support instead of finite-differencing spherical harmonics because libsymmetrix/external/sphericart/sphericart/include/sphericart.hpp:147 provides compute_with_hessians, and propagate directional derivatives through A0, A0 scaling, M0, H1 product, Phi1, A1, A1 scaling, M1, H2, and readouts in the same order as the existing field-aware reverse pass at libsymmetrix/source/mace.cpp:107. This is the largest task and should be split internally by layer with local finite-difference checks for each kernel.
-  Status: Pending. The current BEC implementation uses finite differences of native raw polarization and does not yet provide fixed-graph analytic derivatives.
+  Status: Not needed for the implemented ASE BEC path, which uses dForce/dField rather than position-seeded dPolarization/dPosition. These geometry Hessians remain relevant for future explicit position-seeded Hessian features.
 
 - [ ] 7. Assemble native BEC and polarizability drivers from the directional framework.
   For BECs, seed each atomic Cartesian displacement direction and record the directional derivative of raw polarization, returning the upstream shape before ASE flattening. For polarizability, seed each graph electric-field direction and record the directional derivative of raw polarization, then apply the same volume and eps0 normalization as /home/bonan/appdir/mace-field/mace/modules/extensions.py:535. Store the raw intermediate tensors long enough to debug sign and scaling, but expose only the upstream ASE properties by default.
-  Status: Partially covered by the finite-difference ASE baseline. The native analytic drivers remain pending and should be implemented after Tasks 4 through 6.
+  Status: Done via graph-field seeds. Native analytic polarizability is exposed through the ASE calculator; native analytic BECs are exposed through field derivatives of forces and aggregated with the same pair-to-atom convention as normal forces.
 
 - [x] 8. Bind the new native response API through pybind and the ASE calculator.
   Add pybind exposure next to the existing field methods in symmetrix/source/cpp/mace.cpp:57 and symmetrix/source/cpp/mace.cpp:178. Update Symmetrix.implemented_properties in symmetrix/source/symmetrix/symmetrix_calc.py:37 for native field-coupled JSON models, populate results for polarization, becs, and polarizability in calculate, and extend check_state invalidation at symmetrix/source/symmetrix/symmetrix_calc.py:101 so field changes invalidate cached response results. Plain MACE JSON and PyTorch-converted normal MACE checkpoints must keep their current property set and behavior.
@@ -64,7 +64,7 @@ The remaining core work is to replace the finite-difference BEC and polarizabili
 - Direct MACEField PyTorch checkpoint use through Symmetrix continues to raise the explicit JSON-conversion error, so native implementation gaps cannot be hidden by PyTorch fallback.
 - The focused CPU command for MACEField tests passes after rebuilding the extension, including test_extract_mace_data.py, test_macefield_field_transform.py, test_macefield_native.py, and the MACEField subset of test_symmetrix_calc.py.
 
-Current verification status: the focused CPU suite passes with 16 tests selected for MACEField/native/fallback behavior. The analytic second-derivative criteria for the field block and fixed-graph BECs remain pending because the current BEC and polarizability path is a finite-difference baseline.
+Current verification status: the focused CPU suite passes with native analytic polarizability and BEC paths selected. BECs are also checked against central finite differences of native forces with respect to graph electric field.
 
 ## Potential Risks and Mitigations
 

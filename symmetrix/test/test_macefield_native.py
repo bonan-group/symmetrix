@@ -169,6 +169,126 @@ def test_native_field_energy_forces_match_ase_macefield(macefield_full_json_path
     assert np.allclose(native_forces, expected_forces, atol=2e-3)
 
 
+def test_native_electric_field_hessian_matches_field_adjoint_finite_difference(macefield_full_json_path):
+    atoms = bulk("AlN", "wurtzite", a=3.112, c=4.982)
+    electric_field = np.array([0.01, -0.02, 0.03], dtype=np.float64)
+
+    evaluator = native_symmetrix.MACE(str(macefield_full_json_path))
+    atomic_numbers = atoms.get_atomic_numbers().tolist()
+    mace_atomic_numbers = evaluator.atomic_numbers
+    i_list, j_list, r, xyz = neighbor_list("ijdD", atoms, evaluator.r_cut)
+    num_nodes = len(atoms)
+    node_types = np.asarray([mace_atomic_numbers.index(atomic_numbers[i]) for i in range(num_nodes)], dtype=np.int32)
+    num_neigh = np.asarray(np.bincount(j_list, minlength=num_nodes), dtype=np.int32)
+    neigh_types = np.asarray([mace_atomic_numbers.index(atomic_numbers[j]) for j in j_list], dtype=np.int32)
+    neigh_indices = np.asarray(j_list, dtype=np.int32)
+
+    evaluator.compute_electric_field_hessian(
+        num_nodes,
+        node_types,
+        num_neigh,
+        neigh_indices,
+        neigh_types,
+        xyz.reshape(-1),
+        r,
+        electric_field,
+    )
+    actual = np.asarray(evaluator.electric_field_hessian, dtype=np.float64).reshape(3, 3)
+
+    step = 1e-4
+    expected = np.zeros((3, 3))
+    for component in range(3):
+        field_plus = electric_field.copy()
+        field_minus = electric_field.copy()
+        field_plus[component] += step
+        field_minus[component] -= step
+        evaluator.compute_node_energies_forces_field(
+            num_nodes,
+            node_types,
+            num_neigh,
+            neigh_indices,
+            neigh_types,
+            xyz.reshape(-1),
+            r,
+            field_plus,
+        )
+        adj_plus = np.asarray(evaluator.electric_field_adj, dtype=np.float64)
+        evaluator.compute_node_energies_forces_field(
+            num_nodes,
+            node_types,
+            num_neigh,
+            neigh_indices,
+            neigh_types,
+            xyz.reshape(-1),
+            r,
+            field_minus,
+        )
+        adj_minus = np.asarray(evaluator.electric_field_adj, dtype=np.float64)
+        expected[:, component] = (adj_plus - adj_minus) / (2.0*step)
+
+    assert np.allclose(actual, expected, atol=2e-6, rtol=2e-5)
+
+
+def test_native_electric_field_force_derivative_matches_force_finite_difference(macefield_full_json_path):
+    atoms = bulk("AlN", "wurtzite", a=3.112, c=4.982)
+    electric_field = np.array([0.01, -0.02, 0.03], dtype=np.float64)
+
+    evaluator = native_symmetrix.MACE(str(macefield_full_json_path))
+    atomic_numbers = atoms.get_atomic_numbers().tolist()
+    mace_atomic_numbers = evaluator.atomic_numbers
+    i_list, j_list, r, xyz = neighbor_list("ijdD", atoms, evaluator.r_cut)
+    num_nodes = len(atoms)
+    node_types = np.asarray([mace_atomic_numbers.index(atomic_numbers[i]) for i in range(num_nodes)], dtype=np.int32)
+    num_neigh = np.asarray(np.bincount(j_list, minlength=num_nodes), dtype=np.int32)
+    neigh_types = np.asarray([mace_atomic_numbers.index(atomic_numbers[j]) for j in j_list], dtype=np.int32)
+    neigh_indices = np.asarray(j_list, dtype=np.int32)
+
+    evaluator.compute_electric_field_force_derivative(
+        num_nodes,
+        node_types,
+        num_neigh,
+        neigh_indices,
+        neigh_types,
+        xyz.reshape(-1),
+        r,
+        electric_field,
+    )
+    actual = np.asarray(evaluator.electric_field_force_derivative, dtype=np.float64).reshape(3, -1, 3)
+
+    step = 1e-4
+    expected = np.zeros_like(actual)
+    for component in range(3):
+        field_plus = electric_field.copy()
+        field_minus = electric_field.copy()
+        field_plus[component] += step
+        field_minus[component] -= step
+        evaluator.compute_node_energies_forces_field(
+            num_nodes,
+            node_types,
+            num_neigh,
+            neigh_indices,
+            neigh_types,
+            xyz.reshape(-1),
+            r,
+            field_plus,
+        )
+        forces_plus = np.asarray(evaluator.node_forces, dtype=np.float64).reshape((-1, 3))[: len(i_list)]
+        evaluator.compute_node_energies_forces_field(
+            num_nodes,
+            node_types,
+            num_neigh,
+            neigh_indices,
+            neigh_types,
+            xyz.reshape(-1),
+            r,
+            field_minus,
+        )
+        forces_minus = np.asarray(evaluator.node_forces, dtype=np.float64).reshape((-1, 3))[: len(i_list)]
+        expected[component] = (forces_plus - forces_minus) / (2.0*step)
+
+    assert np.allclose(actual[:, : len(i_list)], expected[:, : len(i_list)], atol=2e-6, rtol=2e-5)
+
+
 def _compact_field_coupling_from_json(path):
     data = json.loads(Path(path).read_text())
     coupling = data["field_couplings"][0]

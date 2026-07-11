@@ -184,14 +184,6 @@ class Symmetrix(Calculator):
         )
         return num_nodes, i_list, j_list, xyz
 
-    def _raw_polarization(self, atoms, electric_field):
-        self._compute_macefield(atoms, electric_field)
-        field_adj = np.asarray(self.evaluator.electric_field_adj, dtype=float)
-        if field_adj.shape != (3,):
-            raise PropertyNotImplementedError(
-                "MACEField response properties require a graph-level electric_field with shape (3,).")
-        return -field_adj
-
     def _calculate_macefield_responses(self, electric_field, properties):
         volume = self.atoms.get_volume()
         raw_polarization = -np.asarray(self.evaluator.electric_field_adj, dtype=float)
@@ -201,43 +193,70 @@ class Symmetrix(Calculator):
 
         self.results['polarization'] = raw_polarization / volume
 
-        needs_restore = False
+        field_derivatives_computed = False
+        force_derivatives_computed = False
+
+        def compute_field_derivatives(include_forces=False):
+            nonlocal field_derivatives_computed, force_derivatives_computed
+            if include_forces and force_derivatives_computed:
+                return
+            if field_derivatives_computed and not include_forces:
+                return
+            num_nodes, node_types, num_neigh, j_list, neigh_types, xyz, r, _ = self._mace_inputs(self.atoms)
+            if include_forces:
+                self.evaluator.compute_electric_field_force_derivative(
+                    num_nodes,
+                    node_types,
+                    num_neigh,
+                    j_list,
+                    neigh_types,
+                    xyz.flatten(),
+                    r,
+                    np.asarray(electric_field, dtype=float).flatten(),
+                )
+                field_derivatives_computed = True
+                force_derivatives_computed = True
+            else:
+                self.evaluator.compute_electric_field_hessian(
+                    num_nodes,
+                    node_types,
+                    num_neigh,
+                    j_list,
+                    neigh_types,
+                    xyz.flatten(),
+                    r,
+                    np.asarray(electric_field, dtype=float).flatten(),
+                )
+                field_derivatives_computed = True
+
         if 'polarizability' in properties:
-            field_step = 1e-4
-            polarizability = np.zeros((3, 3))
-            for component in range(3):
-                field_plus = np.array(electric_field, copy=True)
-                field_minus = np.array(electric_field, copy=True)
-                field_plus[component] += field_step
-                field_minus[component] -= field_step
-                polarizability[:, component] = (
-                    self._raw_polarization(self.atoms, field_plus)
-                    - self._raw_polarization(self.atoms, field_minus)
-                ) / (2.0*field_step)
+            compute_field_derivatives(include_forces='becs' in properties)
+            polarizability = -np.asarray(self.evaluator.electric_field_hessian, dtype=float).reshape(3, 3)
             self.results['polarizability'] = (polarizability / volume / self._macefield_eps0).reshape(9)
-            needs_restore = True
 
         if 'becs' in properties:
-            position_step = 1e-4
+            compute_field_derivatives(include_forces=True)
+            num_nodes, _, _, j_list, _, xyz, _, i_list = self._mace_inputs(self.atoms)
+            pair_derivatives = np.asarray(
+                self.evaluator.electric_field_force_derivative,
+                dtype=float,
+            ).reshape(3, -1, 3)[:, :len(i_list), :]
             becs = np.zeros((len(self.atoms), 3, 3))
-            positions = self.atoms.positions.copy()
-            for atom_index in range(len(self.atoms)):
-                for component in range(3):
-                    atoms_plus = self.atoms.copy()
-                    atoms_minus = self.atoms.copy()
-                    atoms_plus.positions = positions.copy()
-                    atoms_minus.positions = positions.copy()
-                    atoms_plus.positions[atom_index, component] += position_step
-                    atoms_minus.positions[atom_index, component] -= position_step
-                    becs[atom_index, :, component] = (
-                        self._raw_polarization(atoms_plus, electric_field)
-                        - self._raw_polarization(atoms_minus, electric_field)
-                    ) / (2.0*position_step)
+            for field_component in range(3):
+                for cartesian in range(3):
+                    becs[:, field_component, cartesian] = (
+                        np.bincount(
+                            j_list,
+                            weights=pair_derivatives[field_component, :, cartesian],
+                            minlength=num_nodes,
+                        )
+                        - np.bincount(
+                            i_list,
+                            weights=pair_derivatives[field_component, :, cartesian],
+                            minlength=num_nodes,
+                        )
+                    )
             self.results['becs'] = becs.reshape(len(self.atoms), 9)
-            needs_restore = True
-
-        if needs_restore:
-            self._compute_macefield(self.atoms, electric_field)
 
     def calculate(self, atoms=None, properties=['energy'], system_changes=all_changes):
         Calculator.calculate(self, atoms, properties, system_changes)

@@ -118,6 +118,725 @@ void MACE::compute_node_energies_forces_field(
     reverse_A0(num_nodes, node_types, num_neigh, neigh_types, xyz, r);
 }
 
+void MACE::compute_electric_field_hessian(
+    const int num_nodes,
+    std::span<const int> node_types,
+    std::span<const int> num_neigh,
+    std::span<const int> neigh_indices,
+    std::span<const int> neigh_types,
+    std::span<const double> xyz,
+    std::span<const double> r,
+    std::span<const double> electric_field)
+{
+    if (not has_field_coupling)
+        throw std::invalid_argument("MACE::compute_electric_field_hessian requires field coupling.");
+    if (electric_field.size() != 3)
+        throw std::invalid_argument("MACE::compute_electric_field_hessian requires a graph-level electric field.");
+
+    node_energies.resize(num_nodes);
+    std::fill(node_energies.begin(), node_energies.end(), 0.0);
+    node_forces.resize(xyz.size());
+    std::fill(node_forces.begin(), node_forces.end(), 0.0);
+
+    compute_Y(xyz);
+    compute_R0(num_nodes, node_types, num_neigh, neigh_types, r);
+    compute_A0(num_nodes, node_types, num_neigh, neigh_types);
+    compute_A0_scaled(num_nodes, node_types, num_neigh, neigh_types, r);
+    compute_M0(num_nodes, node_types);
+    compute_H1_product(num_nodes);
+    compute_field_H1(num_nodes, electric_field);
+    compute_H1_linear_up(num_nodes);
+    compute_R1(num_nodes, node_types, num_neigh, neigh_types, r);
+    compute_Phi1(num_nodes, num_neigh, neigh_indices);
+    compute_A1(num_nodes);
+    compute_A1_scaled(num_nodes, node_types, num_neigh, neigh_types, r);
+    compute_M1(num_nodes, node_types);
+    compute_H2(num_nodes, node_types);
+    compute_readouts(num_nodes, node_types);
+
+    electric_field_hessian.assign(9, 0.0);
+    electric_field_force_derivative.assign(3*xyz.size(), 0.0);
+
+    const int channel_pairs = num_channels*num_channels;
+    const double inv_sqrt_3 = 1.0/std::sqrt(3.0);
+    const auto h1_index = [this](int i, int lm, int k) {
+        return (i*num_LM + lm)*num_channels + k;
+    };
+    const auto vector_index = [this](int i, int k, int component) {
+        return (i*num_channels + k)*3 + component;
+    };
+
+    auto A1_scale_factors = std::vector<double>(num_nodes, 1.0);
+    if (A1_scaled) {
+        int ij = 0;
+        for (int i=0; i<num_nodes; ++i) {
+            const int type_i = node_types[i];
+            for (int j=0; j<num_neigh[i]; ++j) {
+                const int type_j = neigh_types[ij];
+                const int type_ij = (type_i <= type_j)
+                    ? type_i*(2*atomic_numbers.size()-type_i-1)/2 + type_j
+                    : type_j*(2*atomic_numbers.size()-type_j-1)/2 + type_i;
+                A1_scale_factors[i] += A1_splines[type_ij].evaluate(r[ij]);
+                ij += 1;
+            }
+        }
+    }
+
+    auto A0_scale_factors = std::vector<double>(num_nodes, 1.0);
+    if (A0_scaled) {
+        int ij = 0;
+        for (int i=0; i<num_nodes; ++i) {
+            const int type_i = node_types[i];
+            for (int j=0; j<num_neigh[i]; ++j) {
+                const int type_j = neigh_types[ij];
+                const int type_ij = (type_i <= type_j)
+                    ? type_i*(2*atomic_numbers.size()-type_i-1)/2 + type_j
+                    : type_j*(2*atomic_numbers.size()-type_j-1)/2 + type_i;
+                A0_scale_factors[i] += A0_splines[type_ij].evaluate(r[ij]);
+                ij += 1;
+            }
+        }
+    }
+
+    int num_lme_local = 0;
+    std::vector<int> num_e(l_max+1,0);
+    for (auto l : Phi1_l) {
+        num_lme_local += 2*l+1;
+        num_e[l] += 1;
+    }
+
+    for (int seed=0; seed<3; ++seed) {
+        auto H1_dot = std::vector<double>(H1.size(), 0.0);
+        auto delta_scalar_dot = std::vector<double>(num_nodes*num_channels, 0.0);
+        auto delta_vector_dot = std::vector<double>(num_nodes*num_channels*3, 0.0);
+        auto linear_scalar_dot = std::vector<double>(num_nodes*num_channels, 0.0);
+        auto linear_vector_dot = std::vector<double>(num_nodes*num_channels*3, 0.0);
+
+        for (int i=0; i<num_nodes; ++i) {
+            for (int u=0; u<num_channels; ++u) {
+                const double scalar_in = H1_pre_field[h1_index(i, 0, u)];
+                const double vector_in = H1_pre_field[h1_index(i, 1+seed, u)];
+                for (int w=0; w<num_channels; ++w) {
+                    const int weight_index = u*num_channels + w;
+                    delta_vector_dot[vector_index(i, w, seed)] +=
+                        field_feats_scalar_to_vector_path_weight
+                        * field_feats_weight[weight_index]
+                        * inv_sqrt_3
+                        * scalar_in;
+                    delta_scalar_dot[i*num_channels + w] +=
+                        -field_feats_vector_to_scalar_path_weight
+                        * field_feats_weight[channel_pairs + weight_index]
+                        * inv_sqrt_3
+                        * vector_in;
+                }
+            }
+            for (int u=0; u<num_channels; ++u) {
+                for (int w=0; w<num_channels; ++w) {
+                    const int weight_index = u*num_channels + w;
+                    linear_scalar_dot[i*num_channels + w] +=
+                        field_linear_scalar_path_weight
+                        * field_linear_weight[weight_index]
+                        * delta_scalar_dot[i*num_channels + u];
+                    for (int component=0; component<3; ++component) {
+                        linear_vector_dot[vector_index(i, w, component)] +=
+                            field_linear_vector_path_weight
+                            * field_linear_weight[channel_pairs + weight_index]
+                            * delta_vector_dot[vector_index(i, u, component)];
+                    }
+                }
+            }
+            for (int k=0; k<num_channels; ++k) {
+                H1_dot[h1_index(i, 0, k)] = -linear_scalar_dot[i*num_channels + k];
+                for (int component=0; component<3; ++component)
+                    H1_dot[h1_index(i, 1+component, k)] =
+                        linear_vector_dot[vector_index(i, k, component)];
+            }
+        }
+
+        auto H1_dot_before_linear_up = H1_dot;
+        std::fill(H1_dot.begin(), H1_dot.end(), 0.0);
+        for (int i=0; i<num_nodes; ++i) {
+            for (int l=0; l<=L_max; ++l) {
+                const auto H1_dot_in_il = H1_dot_before_linear_up.data()+(i*num_LM+l*l)*num_channels;
+                const auto weights_l = H1_linear_up_weights.data()+l*num_channels*num_channels;
+                auto H1_dot_il = H1_dot.data()+(i*num_LM+l*l)*num_channels;
+                cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                            2*l+1, num_channels, num_channels,
+                            1.0, H1_dot_in_il, num_channels,
+                            weights_l, num_channels,
+                            0.0, H1_dot_il, num_channels);
+            }
+        }
+
+        auto Phi1r_dot = std::vector<double>(Phi1r.size(), 0.0);
+        auto Phi1_dot = std::vector<double>(Phi1.size(), 0.0);
+        int ij = 0;
+        for (int i=0; i<num_nodes; ++i) {
+            auto Phi1r_dot_i = Phi1r_dot.data()+i*num_lelm1lm2*num_channels;
+            for (int j=0; j<num_neigh[i]; ++j) {
+                auto R1_ij = R1.data()+ij*spl_set_1[0]->num_splines;
+                auto Y_ij = Y.data()+ij*num_lm;
+                auto H1_dot_ij = H1_dot.data()+neigh_indices[ij]*num_LM*num_channels;
+                int lelm1lm2 = 0;
+                for (int lel1l2=0; lel1l2<Phi1_l.size(); ++lel1l2) {
+                    const int l1 = Phi1_l1[lel1l2];
+                    const int l2 = Phi1_l2[lel1l2];
+                    auto R1_ij_lel1l2 = R1_ij+lel1l2*num_channels;
+                    for (int lm1=l1*l1; lm1<=l1*(l1+2); ++lm1) {
+                        const double Y_ij_lm1 = Y_ij[lm1];
+                        for (int lm2=l2*l2; lm2<=l2*(l2+2); ++lm2) {
+                            auto H1_dot_ij_lm2 = H1_dot_ij+lm2*num_channels;
+                            auto Phi1r_dot_i_lelm1lm2 = Phi1r_dot_i+lelm1lm2*num_channels;
+                            for (int k=0; k<num_channels; ++k)
+                                Phi1r_dot_i_lelm1lm2[k] +=
+                                    R1_ij_lel1l2[k] * Y_ij_lm1 * H1_dot_ij_lm2[k];
+                            lelm1lm2 += 1;
+                        }
+                    }
+                }
+                ij += 1;
+            }
+        }
+        for (int i=0; i<num_nodes; ++i) {
+            auto Phi1_dot_i = Phi1_dot.data()+i*num_lme*num_channels;
+            auto Phi1r_dot_i = Phi1r_dot.data()+i*num_lelm1lm2*num_channels;
+            for (int p=0; p<Phi1_clebsch_gordan.size(); ++p) {
+                const double C = Phi1_clebsch_gordan[p];
+                auto Phi1_dot_i_lme = Phi1_dot_i+Phi1_lme[p]*num_channels;
+                auto Phi1r_dot_i_lelm1lm2 = Phi1r_dot_i+Phi1_lelm1lm2[p]*num_channels;
+                for (int k=0; k<num_channels; ++k)
+                    Phi1_dot_i_lme[k] += C * Phi1r_dot_i_lelm1lm2[k];
+            }
+        }
+
+        auto A1_dot = std::vector<double>(A1.size(), 0.0);
+        for (int i=0; i<num_nodes; ++i) {
+            auto Phi1_dot_il = Phi1_dot.data()+i*num_lme_local*num_channels;
+            auto A1_dot_il = A1_dot.data()+i*num_lm*num_channels;
+            for (int l=0; l<=l_max; ++l) {
+                cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                            2*l+1, num_channels, num_e[l]*num_channels,
+                            1.0, Phi1_dot_il, num_e[l]*num_channels,
+                            A1_weights[l].data(), num_channels,
+                            0.0, A1_dot_il, num_channels);
+                Phi1_dot_il += (2*l+1)*num_e[l]*num_channels;
+                A1_dot_il += (2*l+1)*num_channels;
+            }
+        }
+        if (A1_scaled) {
+            for (int i=0; i<num_nodes; ++i) {
+                auto A1_dot_i = A1_dot.data()+i*num_lm*num_channels;
+                for (int lmk=0; lmk<num_lm*num_channels; ++lmk)
+                    A1_dot_i[lmk] /= A1_scale_factors[i];
+            }
+        }
+
+        auto M1_dot = std::vector<double>(M1.size(), 0.0);
+        auto M1_grad_dot = std::vector<double>(M1_grad.size(), 0.0);
+        for (int i=0; i<num_nodes; ++i) {
+            auto A1_i = A1.data()+i*num_lm*num_channels;
+            auto A1_dot_i = A1_dot.data()+i*num_lm*num_channels;
+            auto M1_grad_dot_i = M1_grad_dot.data()+i*num_channels*num_lm;
+            auto x = std::vector<double>(num_lm);
+            auto x_dot = std::vector<double>(num_lm);
+            for (int k=0; k<num_channels; ++k) {
+                cblas_dcopy(num_lm, A1_i+k, num_channels, x.data(), 1);
+                cblas_dcopy(num_lm, A1_dot_i+k, num_channels, x_dot.data(), 1);
+                auto [f, g, g_dot] =
+                    P1[node_types[i]*num_channels+k].evaluate_gradient_directional(x, x_dot);
+                M1_dot[i*num_channels+k] = cblas_ddot(num_lm, g.data(), 1, x_dot.data(), 1);
+                cblas_dcopy(num_lm, g_dot.data(), 1, M1_grad_dot_i+k, num_channels);
+            }
+        }
+
+        auto H2_dot = std::vector<double>(H2.size(), 0.0);
+        for (int i=0; i<num_nodes; ++i) {
+            auto H2_dot_i = H2_dot.data()+i*num_channels;
+            auto H1_dot_i = H1_dot.data()+i*num_LM*num_channels;
+            cblas_dgemv(CblasRowMajor, CblasTrans,
+                        num_channels, num_channels,
+                        1.0, H2_weights_for_H1[node_types[i]].data(), num_channels,
+                        H1_dot_i, 1,
+                        0.0, H2_dot_i, 1);
+            auto M1_dot_i = M1_dot.data()+i*num_channels;
+            cblas_dgemv(CblasRowMajor, CblasTrans,
+                        num_channels, num_channels,
+                        1.0, H2_weights_for_M1.data(), num_channels,
+                        M1_dot_i, 1,
+                        1.0, H2_dot_i, 1);
+        }
+
+        auto H1_adj_local = std::vector<double>(H1.size(), 0.0);
+        auto H1_adj_dot = std::vector<double>(H1.size(), 0.0);
+        auto H2_adj_local = std::vector<double>(H2.size(), 0.0);
+        auto H2_adj_dot = std::vector<double>(H2.size(), 0.0);
+        for (int i=0; i<num_nodes; ++i) {
+            for (int k=0; k<num_channels; ++k)
+                H1_adj_local[i*num_LM*num_channels+k] = readout_1_weights[k];
+            auto x = std::vector<double>(H2.begin()+i*num_channels, H2.begin()+(i+1)*num_channels);
+            auto x_dot = std::vector<double>(H2_dot.begin()+i*num_channels, H2_dot.begin()+(i+1)*num_channels);
+            auto [f, g, g_dot] = readout_2->evaluate_gradient_directional(x, x_dot);
+            for (int k=0; k<num_channels; ++k) {
+                H2_adj_local[i*num_channels+k] = g[k];
+                H2_adj_dot[i*num_channels+k] = g_dot[k];
+            }
+        }
+
+        auto M1_adj_local = std::vector<double>(M1.size(), 0.0);
+        auto M1_adj_dot = std::vector<double>(M1.size(), 0.0);
+        for (int i=0; i<num_nodes; ++i) {
+            auto H2_adj_i = H2_adj_local.data()+i*num_channels;
+            auto H2_adj_dot_i = H2_adj_dot.data()+i*num_channels;
+            auto H1_adj_i = H1_adj_local.data()+i*num_LM*num_channels;
+            auto H1_adj_dot_i = H1_adj_dot.data()+i*num_LM*num_channels;
+            cblas_dgemv(CblasRowMajor, CblasNoTrans,
+                        num_channels, num_channels,
+                        1.0, H2_weights_for_H1[node_types[i]].data(), num_channels,
+                        H2_adj_i, 1,
+                        1.0, H1_adj_i, 1);
+            cblas_dgemv(CblasRowMajor, CblasNoTrans,
+                        num_channels, num_channels,
+                        1.0, H2_weights_for_H1[node_types[i]].data(), num_channels,
+                        H2_adj_dot_i, 1,
+                        1.0, H1_adj_dot_i, 1);
+            auto M1_adj_i = M1_adj_local.data()+i*num_channels;
+            auto M1_adj_dot_i = M1_adj_dot.data()+i*num_channels;
+            cblas_dgemv(CblasRowMajor, CblasNoTrans,
+                        num_channels, num_channels,
+                        1.0, H2_weights_for_M1.data(), num_channels,
+                        H2_adj_i, 1,
+                        0.0, M1_adj_i, 1);
+            cblas_dgemv(CblasRowMajor, CblasNoTrans,
+                        num_channels, num_channels,
+                        1.0, H2_weights_for_M1.data(), num_channels,
+                        H2_adj_dot_i, 1,
+                        0.0, M1_adj_dot_i, 1);
+        }
+
+        auto A1_adj_local = std::vector<double>(A1.size(), 0.0);
+        auto A1_adj_dot = std::vector<double>(A1.size(), 0.0);
+        for (int i=0; i<num_nodes; ++i) {
+            auto M1_adj_i = M1_adj_local.data()+i*num_channels;
+            auto M1_adj_dot_i = M1_adj_dot.data()+i*num_channels;
+            for (int lm=0; lm<num_lm; ++lm) {
+                auto A1_adj_ilm = A1_adj_local.data()+(i*num_lm+lm)*num_channels;
+                auto A1_adj_dot_ilm = A1_adj_dot.data()+(i*num_lm+lm)*num_channels;
+                auto M1_grad_ilm = M1_grad.data()+(i*num_lm+lm)*num_channels;
+                auto M1_grad_dot_ilm = M1_grad_dot.data()+(i*num_lm+lm)*num_channels;
+                for (int k=0; k<num_channels; ++k) {
+                    A1_adj_ilm[k] = M1_grad_ilm[k] * M1_adj_i[k];
+                    A1_adj_dot_ilm[k] =
+                        M1_grad_dot_ilm[k] * M1_adj_i[k]
+                        + M1_grad_ilm[k] * M1_adj_dot_i[k];
+                }
+            }
+        }
+        if (A1_scaled) {
+            int ij_scale = 0;
+            for (int i=0; i<num_nodes; ++i) {
+                const int type_i = node_types[i];
+                auto A1_i = A1.data()+i*num_lm*num_channels;
+                auto A1_dot_i = A1_dot.data()+i*num_lm*num_channels;
+                auto A1_adj_i = A1_adj_local.data()+i*num_lm*num_channels;
+                auto A1_adj_dot_i = A1_adj_dot.data()+i*num_lm*num_channels;
+                double dA1_dot_A1_dot = 0.0;
+                for (int lmk=0; lmk<num_lm*num_channels; ++lmk) {
+                    dA1_dot_A1_dot +=
+                        A1_adj_dot_i[lmk] * A1_i[lmk]
+                        + A1_adj_i[lmk] * A1_dot_i[lmk];
+                }
+                for (int j=0; j<num_neigh[i]; ++j) {
+                    const int type_j = neigh_types[ij_scale];
+                    const int type_ij = (type_i <= type_j)
+                        ? type_i*(2*atomic_numbers.size()-type_i-1)/2 + type_j
+                        : type_j*(2*atomic_numbers.size()-type_j-1)/2 + type_i;
+                    auto [f,d] = A1_splines[type_ij].evaluate_deriv(r[ij_scale]);
+                    auto xyz_ij = xyz.data()+ij_scale*3;
+                    auto force_deriv_ij =
+                        electric_field_force_derivative.data()+seed*xyz.size()+ij_scale*3;
+                    force_deriv_ij[0] += dA1_dot_A1_dot/A1_scale_factors[i]*d*xyz_ij[0]/r[ij_scale];
+                    force_deriv_ij[1] += dA1_dot_A1_dot/A1_scale_factors[i]*d*xyz_ij[1]/r[ij_scale];
+                    force_deriv_ij[2] += dA1_dot_A1_dot/A1_scale_factors[i]*d*xyz_ij[2]/r[ij_scale];
+                    ij_scale += 1;
+                }
+            }
+            for (int i=0; i<num_nodes; ++i) {
+                auto A1_adj_i = A1_adj_local.data()+i*num_lm*num_channels;
+                auto A1_adj_dot_i = A1_adj_dot.data()+i*num_lm*num_channels;
+                for (int lmk=0; lmk<num_lm*num_channels; ++lmk) {
+                    A1_adj_i[lmk] /= A1_scale_factors[i];
+                    A1_adj_dot_i[lmk] /= A1_scale_factors[i];
+                }
+            }
+        }
+
+        auto dPhi1_local = std::vector<double>(Phi1.size(), 0.0);
+        auto dPhi1_dot = std::vector<double>(Phi1.size(), 0.0);
+        for (int i=0; i<num_nodes; ++i) {
+            auto A1_adj_il = A1_adj_local.data()+i*num_lm*num_channels;
+            auto A1_adj_dot_il = A1_adj_dot.data()+i*num_lm*num_channels;
+            auto dPhi1_il = dPhi1_local.data()+i*num_lme_local*num_channels;
+            auto dPhi1_dot_il = dPhi1_dot.data()+i*num_lme_local*num_channels;
+            for (int l=0; l<=l_max; ++l) {
+                cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                            2*l+1, num_e[l]*num_channels, num_channels,
+                            1.0, A1_adj_il, num_channels,
+                            A1_weights[l].data(), num_channels,
+                            0.0, dPhi1_il, num_e[l]*num_channels);
+                cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                            2*l+1, num_e[l]*num_channels, num_channels,
+                            1.0, A1_adj_dot_il, num_channels,
+                            A1_weights[l].data(), num_channels,
+                            0.0, dPhi1_dot_il, num_e[l]*num_channels);
+                A1_adj_il += (2*l+1)*num_channels;
+                A1_adj_dot_il += (2*l+1)*num_channels;
+                dPhi1_il += (2*l+1)*num_e[l]*num_channels;
+                dPhi1_dot_il += (2*l+1)*num_e[l]*num_channels;
+            }
+        }
+
+        auto dPhi1r_local = std::vector<double>(Phi1r.size(), 0.0);
+        auto dPhi1r_dot = std::vector<double>(Phi1r.size(), 0.0);
+        for (int i=0; i<num_nodes; ++i) {
+            auto dPhi1r_i = dPhi1r_local.data()+i*num_lelm1lm2*num_channels;
+            auto dPhi1r_dot_i = dPhi1r_dot.data()+i*num_lelm1lm2*num_channels;
+            auto dPhi1_i = dPhi1_local.data()+i*num_lme*num_channels;
+            auto dPhi1_dot_i = dPhi1_dot.data()+i*num_lme*num_channels;
+            for (int p=0; p<Phi1_clebsch_gordan.size(); ++p) {
+                const double C = Phi1_clebsch_gordan[p];
+                auto dPhi1r_i_lelm1lm2 = dPhi1r_i+Phi1_lelm1lm2[p]*num_channels;
+                auto dPhi1r_dot_i_lelm1lm2 = dPhi1r_dot_i+Phi1_lelm1lm2[p]*num_channels;
+                auto dPhi1_i_lme = dPhi1_i+Phi1_lme[p]*num_channels;
+                auto dPhi1_dot_i_lme = dPhi1_dot_i+Phi1_lme[p]*num_channels;
+                for (int k=0; k<num_channels; ++k) {
+                    dPhi1r_i_lelm1lm2[k] += C * dPhi1_i_lme[k];
+                    dPhi1r_dot_i_lelm1lm2[k] += C * dPhi1_dot_i_lme[k];
+                }
+            }
+        }
+
+        ij = 0;
+        for (int i=0; i<num_nodes; ++i) {
+            auto dPhi1r_i = dPhi1r_local.data()+i*num_lelm1lm2*num_channels;
+            auto dPhi1r_dot_i = dPhi1r_dot.data()+i*num_lelm1lm2*num_channels;
+            for (int j=0; j<num_neigh[i]; ++j) {
+                auto R1_ij = R1.data()+ij*spl_set_1[0]->num_splines;
+                auto R1_deriv_ij = R1_deriv.data()+ij*spl_set_1[0]->num_splines;
+                auto Y_ij = Y.data()+ij*num_lm;
+                auto Y_grad_ij = Y_grad.data()+ij*3*num_lm;
+                auto H1_ij = H1.data()+neigh_indices[ij]*num_LM*num_channels;
+                auto H1_dot_ij = H1_dot.data()+neigh_indices[ij]*num_LM*num_channels;
+                auto H1_adj_ij = H1_adj_local.data()+neigh_indices[ij]*num_LM*num_channels;
+                auto H1_adj_dot_ij = H1_adj_dot.data()+neigh_indices[ij]*num_LM*num_channels;
+                auto xyz_ij = xyz.data()+ij*3;
+                auto force_deriv_ij = electric_field_force_derivative.data()+seed*xyz.size()+ij*3;
+                int lelm1lm2 = 0;
+                for (int lel1l2=0; lel1l2<Phi1_l.size(); ++lel1l2) {
+                    const int l1 = Phi1_l1[lel1l2];
+                    const int l2 = Phi1_l2[lel1l2];
+                    auto R1_ij_lel1l2 = R1_ij+lel1l2*num_channels;
+                    auto R1_deriv_ij_lel1l2 = R1_deriv_ij+lel1l2*num_channels;
+                    for (int lm1=l1*l1; lm1<=l1*(l1+2); ++lm1) {
+                        const double Y_ij_lm1 = Y_ij[lm1];
+                        const double Y_grad_ij_x_lm1 = Y_grad_ij[0*num_lm+lm1];
+                        const double Y_grad_ij_y_lm1 = Y_grad_ij[1*num_lm+lm1];
+                        const double Y_grad_ij_z_lm1 = Y_grad_ij[2*num_lm+lm1];
+                        for (int lm2=l2*l2; lm2<=l2*(l2+2); ++lm2) {
+                            auto H1_ij_lm2 = H1_ij+lm2*num_channels;
+                            auto H1_dot_ij_lm2 = H1_dot_ij+lm2*num_channels;
+                            auto H1_adj_ij_lm2 = H1_adj_ij+lm2*num_channels;
+                            auto H1_adj_dot_ij_lm2 = H1_adj_dot_ij+lm2*num_channels;
+                            auto dPhi1r_i_lelm1lm2 = dPhi1r_i+lelm1lm2*num_channels;
+                            auto dPhi1r_dot_i_lelm1lm2 = dPhi1r_dot_i+lelm1lm2*num_channels;
+                            for (int k=0; k<num_channels; ++k) {
+                                const double force_factor_x =
+                                    xyz_ij[0]/r[ij] * R1_deriv_ij_lel1l2[k] * Y_ij_lm1 * H1_ij_lm2[k]
+                                    + R1_ij_lel1l2[k] * Y_grad_ij_x_lm1 * H1_ij_lm2[k];
+                                const double force_factor_y =
+                                    xyz_ij[1]/r[ij] * R1_deriv_ij_lel1l2[k] * Y_ij_lm1 * H1_ij_lm2[k]
+                                    + R1_ij_lel1l2[k] * Y_grad_ij_y_lm1 * H1_ij_lm2[k];
+                                const double force_factor_z =
+                                    xyz_ij[2]/r[ij] * R1_deriv_ij_lel1l2[k] * Y_ij_lm1 * H1_ij_lm2[k]
+                                    + R1_ij_lel1l2[k] * Y_grad_ij_z_lm1 * H1_ij_lm2[k];
+                                const double force_factor_dot_x =
+                                    xyz_ij[0]/r[ij] * R1_deriv_ij_lel1l2[k] * Y_ij_lm1 * H1_dot_ij_lm2[k]
+                                    + R1_ij_lel1l2[k] * Y_grad_ij_x_lm1 * H1_dot_ij_lm2[k];
+                                const double force_factor_dot_y =
+                                    xyz_ij[1]/r[ij] * R1_deriv_ij_lel1l2[k] * Y_ij_lm1 * H1_dot_ij_lm2[k]
+                                    + R1_ij_lel1l2[k] * Y_grad_ij_y_lm1 * H1_dot_ij_lm2[k];
+                                const double force_factor_dot_z =
+                                    xyz_ij[2]/r[ij] * R1_deriv_ij_lel1l2[k] * Y_ij_lm1 * H1_dot_ij_lm2[k]
+                                    + R1_ij_lel1l2[k] * Y_grad_ij_z_lm1 * H1_dot_ij_lm2[k];
+                                force_deriv_ij[0] += -(
+                                    dPhi1r_dot_i_lelm1lm2[k] * force_factor_x
+                                    + dPhi1r_i_lelm1lm2[k] * force_factor_dot_x);
+                                force_deriv_ij[1] += -(
+                                    dPhi1r_dot_i_lelm1lm2[k] * force_factor_y
+                                    + dPhi1r_i_lelm1lm2[k] * force_factor_dot_y);
+                                force_deriv_ij[2] += -(
+                                    dPhi1r_dot_i_lelm1lm2[k] * force_factor_z
+                                    + dPhi1r_i_lelm1lm2[k] * force_factor_dot_z);
+                                H1_adj_ij_lm2[k] +=
+                                    R1_ij_lel1l2[k]*Y_ij_lm1*dPhi1r_i_lelm1lm2[k];
+                                H1_adj_dot_ij_lm2[k] +=
+                                    R1_ij_lel1l2[k]*Y_ij_lm1*dPhi1r_dot_i_lelm1lm2[k];
+                            }
+                            lelm1lm2 += 1;
+                        }
+                    }
+                }
+                ij += 1;
+            }
+        }
+
+        auto H1_adj_before_linear_up = H1_adj_local;
+        auto H1_adj_dot_before_linear_up = H1_adj_dot;
+        std::fill(H1_adj_local.begin(), H1_adj_local.end(), 0.0);
+        std::fill(H1_adj_dot.begin(), H1_adj_dot.end(), 0.0);
+        for (int i=0; i<num_nodes; ++i) {
+            for (int l=0; l<=L_max; ++l) {
+                const auto H1_adj_il = H1_adj_before_linear_up.data()+(i*num_LM+l*l)*num_channels;
+                const auto H1_adj_dot_il = H1_adj_dot_before_linear_up.data()+(i*num_LM+l*l)*num_channels;
+                const auto weights_l = H1_linear_up_weights.data()+l*num_channels*num_channels;
+                auto H1_pre_adj_il = H1_adj_local.data()+(i*num_LM+l*l)*num_channels;
+                auto H1_pre_adj_dot_il = H1_adj_dot.data()+(i*num_LM+l*l)*num_channels;
+                cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                            2*l+1, num_channels, num_channels,
+                            1.0, H1_adj_il, num_channels,
+                            weights_l, num_channels,
+                            0.0, H1_pre_adj_il, num_channels);
+                cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                            2*l+1, num_channels, num_channels,
+                            1.0, H1_adj_dot_il, num_channels,
+                            weights_l, num_channels,
+                            0.0, H1_pre_adj_dot_il, num_channels);
+            }
+        }
+
+        auto delta_scalar_adj = std::vector<double>(num_nodes*num_channels, 0.0);
+        auto delta_vector_adj = std::vector<double>(num_nodes*num_channels*3, 0.0);
+        auto delta_scalar_adj_dot = std::vector<double>(num_nodes*num_channels, 0.0);
+        auto delta_vector_adj_dot = std::vector<double>(num_nodes*num_channels*3, 0.0);
+        auto H1_pre_adj = H1_adj_local;
+        auto H1_pre_adj_dot = H1_adj_dot;
+        for (int i=0; i<num_nodes; ++i) {
+            for (int u=0; u<num_channels; ++u) {
+                for (int w=0; w<num_channels; ++w) {
+                    const int weight_index = u*num_channels + w;
+                    delta_scalar_adj[i*num_channels + u] +=
+                        -field_linear_scalar_path_weight
+                        * field_linear_weight[weight_index]
+                        * H1_adj_local[h1_index(i, 0, w)];
+                    delta_scalar_adj_dot[i*num_channels + u] +=
+                        -field_linear_scalar_path_weight
+                        * field_linear_weight[weight_index]
+                        * H1_adj_dot[h1_index(i, 0, w)];
+                    for (int component=0; component<3; ++component) {
+                        delta_vector_adj_dot[vector_index(i, u, component)] +=
+                            field_linear_vector_path_weight
+                            * field_linear_weight[channel_pairs + weight_index]
+                            * H1_adj_dot[h1_index(i, 1+component, w)];
+                        delta_vector_adj[vector_index(i, u, component)] +=
+                            field_linear_vector_path_weight
+                            * field_linear_weight[channel_pairs + weight_index]
+                            * H1_adj_local[h1_index(i, 1+component, w)];
+                    }
+                }
+            }
+            for (int u=0; u<num_channels; ++u) {
+                const double scalar_in = H1_pre_field[h1_index(i, 0, u)];
+                for (int w=0; w<num_channels; ++w) {
+                    const int weight_index = u*num_channels + w;
+                    const double scalar_to_vector_weight =
+                        field_feats_scalar_to_vector_path_weight
+                        * field_feats_weight[weight_index]
+                        * inv_sqrt_3;
+                    const double vector_to_scalar_weight =
+                        field_feats_vector_to_scalar_path_weight
+                        * field_feats_weight[channel_pairs + weight_index]
+                        * inv_sqrt_3;
+                    const double scalar_delta_adj =
+                        delta_scalar_adj[i*num_channels + w];
+                    const double scalar_delta_adj_dot =
+                        delta_scalar_adj_dot[i*num_channels + w];
+                    for (int component=0; component<3; ++component) {
+                        const double field_dot = (component == seed) ? 1.0 : 0.0;
+                        const double vector_delta_adj =
+                            delta_vector_adj[vector_index(i, w, component)];
+                        const double vector_delta_adj_dot =
+                            delta_vector_adj_dot[vector_index(i, w, component)];
+                        H1_pre_adj[h1_index(i, 0, u)] +=
+                            vector_delta_adj*scalar_to_vector_weight*electric_field[component];
+                        H1_pre_adj_dot[h1_index(i, 0, u)] +=
+                            vector_delta_adj_dot*scalar_to_vector_weight*electric_field[component]
+                            + vector_delta_adj*scalar_to_vector_weight*field_dot;
+                        electric_field_hessian[component*3 + seed] +=
+                            vector_delta_adj_dot*scalar_to_vector_weight*scalar_in;
+                        H1_pre_adj[h1_index(i, 1+component, u)] +=
+                            -scalar_delta_adj*vector_to_scalar_weight*electric_field[component];
+                        H1_pre_adj_dot[h1_index(i, 1+component, u)] +=
+                            -scalar_delta_adj_dot*vector_to_scalar_weight*electric_field[component]
+                            - scalar_delta_adj*vector_to_scalar_weight*field_dot;
+                        electric_field_hessian[component*3 + seed] +=
+                            -scalar_delta_adj_dot*vector_to_scalar_weight
+                            * H1_pre_field[h1_index(i, 1+component, u)];
+                    }
+                }
+            }
+        }
+        H1_adj_local = std::move(H1_pre_adj);
+        H1_adj_dot = std::move(H1_pre_adj_dot);
+
+        auto M0_adj_local = std::vector<double>(M0.size(), 0.0);
+        auto M0_adj_dot = std::vector<double>(M0.size(), 0.0);
+        for (int i=0; i<num_nodes; ++i) {
+            for (int l=0; l<=L_max; ++l) {
+                const auto H1_adj_il = H1_adj_local.data()+(i*num_LM+l*l)*num_channels;
+                const auto H1_adj_dot_il = H1_adj_dot.data()+(i*num_LM+l*l)*num_channels;
+                const auto weights_l = H1_product_weights.data()+l*num_channels*num_channels;
+                auto M0_adj_il = M0_adj_local.data()+(i*num_LM+l*l)*num_channels;
+                auto M0_adj_dot_il = M0_adj_dot.data()+(i*num_LM+l*l)*num_channels;
+                cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                            2*l+1, num_channels, num_channels,
+                            1.0, H1_adj_il, num_channels,
+                            weights_l, num_channels,
+                            0.0, M0_adj_il, num_channels);
+                cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                            2*l+1, num_channels, num_channels,
+                            1.0, H1_adj_dot_il, num_channels,
+                            weights_l, num_channels,
+                            0.0, M0_adj_dot_il, num_channels);
+            }
+        }
+
+        auto A0_adj_local = std::vector<double>(A0.size(), 0.0);
+        auto A0_adj_dot = std::vector<double>(A0.size(), 0.0);
+        for (int i=0; i<num_nodes; ++i) {
+            auto A0_adj_i = A0_adj_local.data()+i*num_lm*num_channels;
+            auto A0_adj_dot_i = A0_adj_dot.data()+i*num_lm*num_channels;
+            auto M0_adj_i = M0_adj_local.data()+i*num_LM*num_channels;
+            auto M0_adj_dot_i = M0_adj_dot.data()+i*num_LM*num_channels;
+            auto M0_grad_i = M0_grad.data()+i*num_LM*num_channels*num_lm;
+            for (int lm=0; lm<num_lm; ++lm) {
+                auto A0_adj_ilm = A0_adj_i + lm*num_channels;
+                auto A0_adj_dot_ilm = A0_adj_dot_i + lm*num_channels;
+                for (int lmp=0; lmp<num_LM; ++lmp) {
+                    auto M0_adj_ilmp = M0_adj_i + lmp*num_channels;
+                    auto M0_adj_dot_ilmp = M0_adj_dot_i + lmp*num_channels;
+                    auto M0_grad_ilmplm =
+                        M0_grad_i + lmp*num_lm*num_channels + lm*num_channels;
+                    for (int k=0; k<num_channels; ++k) {
+                        A0_adj_ilm[k] += M0_grad_ilmplm[k] * M0_adj_ilmp[k];
+                        A0_adj_dot_ilm[k] += M0_grad_ilmplm[k] * M0_adj_dot_ilmp[k];
+                    }
+                }
+            }
+        }
+
+        if (A0_scaled) {
+            int ij_scale = 0;
+            for (int i=0; i<num_nodes; ++i) {
+                const int type_i = node_types[i];
+                auto A0_i = A0.data()+i*num_lm*num_channels;
+                auto A0_adj_dot_i = A0_adj_dot.data()+i*num_lm*num_channels;
+                double dA0_dot_A0_dot = 0.0;
+                for (int lmk=0; lmk<num_lm*num_channels; ++lmk)
+                    dA0_dot_A0_dot += A0_adj_dot_i[lmk] * A0_i[lmk];
+                for (int j=0; j<num_neigh[i]; ++j) {
+                    const int type_j = neigh_types[ij_scale];
+                    const int type_ij = (type_i <= type_j)
+                        ? type_i*(2*atomic_numbers.size()-type_i-1)/2 + type_j
+                        : type_j*(2*atomic_numbers.size()-type_j-1)/2 + type_i;
+                    auto [f,d] = A0_splines[type_ij].evaluate_deriv(r[ij_scale]);
+                    auto xyz_ij = xyz.data()+ij_scale*3;
+                    auto force_deriv_ij =
+                        electric_field_force_derivative.data()+seed*xyz.size()+ij_scale*3;
+                    force_deriv_ij[0] += dA0_dot_A0_dot/A0_scale_factors[i]*d*xyz_ij[0]/r[ij_scale];
+                    force_deriv_ij[1] += dA0_dot_A0_dot/A0_scale_factors[i]*d*xyz_ij[1]/r[ij_scale];
+                    force_deriv_ij[2] += dA0_dot_A0_dot/A0_scale_factors[i]*d*xyz_ij[2]/r[ij_scale];
+                    ij_scale += 1;
+                }
+            }
+            for (int i=0; i<num_nodes; ++i) {
+                auto A0_adj_i = A0_adj_local.data()+i*num_lm*num_channels;
+                auto A0_adj_dot_i = A0_adj_dot.data()+i*num_lm*num_channels;
+                for (int lmk=0; lmk<num_lm*num_channels; ++lmk) {
+                    A0_adj_i[lmk] /= A0_scale_factors[i];
+                    A0_adj_dot_i[lmk] /= A0_scale_factors[i];
+                }
+            }
+        }
+
+        int ij_a0 = 0;
+        for (int i=0; i<num_nodes; ++i) {
+            auto Phi0_adj_dot_i = std::vector<double>(num_lm*num_channels, 0.0);
+            for (int l=0; l<=l_max; ++l) {
+                auto Phi0_adj_dot_il = Phi0_adj_dot_i.data()+l*l*num_channels;
+                auto A0_adj_dot_il = A0_adj_dot.data()+(i*num_lm+l*l)*num_channels;
+                cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                            2*l+1, num_channels, num_channels,
+                            1.0, A0_adj_dot_il, num_channels,
+                            A0_weights[node_types[i]][l].data(), num_channels,
+                            0.0, Phi0_adj_dot_il, num_channels);
+            }
+
+            for (int j=0; j<num_neigh[i]; ++j) {
+                auto xyz_ij = xyz.data()+ij_a0*3;
+                const double r_ij = r[ij_a0];
+                auto Y_ij = Y.data()+ij_a0*num_lm;
+                auto Y_grad_ij = Y_grad.data()+ij_a0*3*num_lm;
+                auto H0_ij = H0_weights.data()+neigh_types[ij_a0]*num_channels;
+                auto force_deriv_ij = electric_field_force_derivative.data()+seed*xyz.size()+ij_a0*3;
+                for (int l=0; l<=l_max; ++l) {
+                    auto R0_ij_l = R0.data()+ij_a0*(l_max+1)*num_channels+l*num_channels;
+                    auto R0_deriv_ij_l = R0_deriv.data()+ij_a0*(l_max+1)*num_channels+l*num_channels;
+                    for (int m=-l; m<=l; ++m) {
+                        const int lm = l*l+l+m;
+                        const double Y_ij_lm = Y_ij[lm];
+                        const double Y_grad_ij_lm_x = Y_grad_ij[lm];
+                        const double Y_grad_ij_lm_y = Y_grad_ij[num_lm+lm];
+                        const double Y_grad_ij_lm_z = Y_grad_ij[2*num_lm+lm];
+                        auto Phi0_adj_dot_i_lm = Phi0_adj_dot_i.data()+lm*num_channels;
+                        for (int k=0; k<num_channels; ++k) {
+                            force_deriv_ij[0] += -Phi0_adj_dot_i_lm[k] * (
+                                xyz_ij[0]/r_ij * R0_deriv_ij_l[k] * Y_ij_lm * H0_ij[k]
+                                + R0_ij_l[k] * Y_grad_ij_lm_x * H0_ij[k]);
+                            force_deriv_ij[1] += -Phi0_adj_dot_i_lm[k] * (
+                                xyz_ij[1]/r_ij * R0_deriv_ij_l[k] * Y_ij_lm * H0_ij[k]
+                                + R0_ij_l[k] * Y_grad_ij_lm_y * H0_ij[k]);
+                            force_deriv_ij[2] += -Phi0_adj_dot_i_lm[k] * (
+                                xyz_ij[2]/r_ij * R0_deriv_ij_l[k] * Y_ij_lm * H0_ij[k]
+                                + R0_ij_l[k] * Y_grad_ij_lm_z * H0_ij[k]);
+                        }
+                    }
+                }
+                ij_a0 += 1;
+            }
+        }
+    }
+}
+
+void MACE::compute_electric_field_force_derivative(
+    const int num_nodes,
+    std::span<const int> node_types,
+    std::span<const int> num_neigh,
+    std::span<const int> neigh_indices,
+    std::span<const int> neigh_types,
+    std::span<const double> xyz,
+    std::span<const double> r,
+    std::span<const double> electric_field)
+{
+    compute_electric_field_hessian(
+        num_nodes,
+        node_types,
+        num_neigh,
+        neigh_indices,
+        neigh_types,
+        xyz,
+        r,
+        electric_field);
+}
+
 void MACE::compute_R0(
     const int num_nodes,
     std::span<const int> node_types,

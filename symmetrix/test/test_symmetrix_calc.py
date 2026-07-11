@@ -305,6 +305,149 @@ def test_macefield_native_json_polarization_uses_single_native_field_call(monkey
     assert evaluator.calls == 1
 
 
+def test_macefield_native_json_polarizability_uses_native_field_hessian(monkeypatch, tmp_path):
+    class DummyFieldEvaluator:
+        has_field_coupling = True
+        r_cut = 3.0
+        atomic_numbers = [7, 13]
+
+        def __init__(self):
+            self.calls = 0
+            self.hessian_calls = 0
+            self.node_energies = []
+            self.node_forces = []
+            self.electric_field_adj = []
+            self.electric_field_hessian = []
+
+        def compute_node_energies_forces_field(
+            self,
+            num_nodes,
+            node_types,
+            num_neigh,
+            neigh_indices,
+            neigh_types,
+            xyz,
+            r,
+            electric_field,
+        ):
+            self.calls += 1
+            self.node_energies = np.zeros(num_nodes)
+            self.node_forces = np.zeros_like(np.asarray(xyz, dtype=float))
+            self.electric_field_adj = np.array([1.0, 2.0, 3.0])
+
+        def compute_electric_field_hessian(
+            self,
+            num_nodes,
+            node_types,
+            num_neigh,
+            neigh_indices,
+            neigh_types,
+            xyz,
+            r,
+            electric_field,
+        ):
+            self.hessian_calls += 1
+            self.electric_field_hessian = np.arange(9, dtype=float).reshape(3, 3)
+
+    evaluator = DummyFieldEvaluator()
+    monkeypatch.setattr("symmetrix.symmetrix_calc.symmetrix.MACE", lambda filename: evaluator)
+
+    json_path = tmp_path / "macefield.json"
+    json_path.write_text(json.dumps({"has_field_coupling": True}))
+
+    atoms = Atoms(
+        "AlN",
+        positions=[[0.0, 0.0, 0.0], [1.8, 0.0, 0.0]],
+        cell=[5.0, 5.0, 5.0],
+        pbc=True,
+    )
+    atoms.info["electric_field"] = np.array([0.01, 0.0, 0.0])
+    atoms.calc = Symmetrix(json_path, use_kokkos=False, dtype="float64")
+
+    expected = (
+        -np.arange(9, dtype=float).reshape(3, 3)
+        / atoms.get_volume()
+        / atoms.calc._macefield_eps0
+    ).reshape(9)
+    assert np.allclose(atoms.calc.get_property("polarizability", atoms), expected)
+    assert evaluator.calls == 1
+    assert evaluator.hessian_calls == 1
+
+
+def test_macefield_native_json_becs_use_native_force_field_derivative(monkeypatch, tmp_path):
+    class DummyFieldEvaluator:
+        has_field_coupling = True
+        r_cut = 3.0
+        atomic_numbers = [7, 13]
+
+        def __init__(self):
+            self.calls = 0
+            self.derivative_calls = 0
+            self.node_energies = []
+            self.node_forces = []
+            self.electric_field_adj = []
+            self.electric_field_force_derivative = []
+
+        def compute_node_energies_forces_field(
+            self,
+            num_nodes,
+            node_types,
+            num_neigh,
+            neigh_indices,
+            neigh_types,
+            xyz,
+            r,
+            electric_field,
+        ):
+            self.calls += 1
+            self.node_energies = np.zeros(num_nodes)
+            self.node_forces = np.zeros_like(np.asarray(xyz, dtype=float))
+            self.electric_field_adj = np.array([1.0, 2.0, 3.0])
+
+        def compute_electric_field_force_derivative(
+            self,
+            num_nodes,
+            node_types,
+            num_neigh,
+            neigh_indices,
+            neigh_types,
+            xyz,
+            r,
+            electric_field,
+        ):
+            self.derivative_calls += 1
+            self.electric_field_force_derivative = np.arange(3*len(xyz), dtype=float).reshape(3, -1, 3)
+
+    evaluator = DummyFieldEvaluator()
+    monkeypatch.setattr("symmetrix.symmetrix_calc.symmetrix.MACE", lambda filename: evaluator)
+
+    json_path = tmp_path / "macefield.json"
+    json_path.write_text(json.dumps({"has_field_coupling": True}))
+
+    atoms = Atoms(
+        "AlN",
+        positions=[[0.0, 0.0, 0.0], [1.8, 0.0, 0.0]],
+        cell=[5.0, 5.0, 5.0],
+        pbc=True,
+    )
+    atoms.info["electric_field"] = np.array([0.01, 0.0, 0.0])
+    atoms.calc = Symmetrix(json_path, use_kokkos=False, dtype="float64")
+
+    num_nodes, _, _, j_list, _, xyz, _, i_list = atoms.calc._mace_inputs(atoms)
+    pair_derivative = np.arange(3*xyz.size, dtype=float).reshape(3, -1, 3)[:, :len(i_list)]
+    expected = np.zeros((num_nodes, 3, 3))
+    for field_component in range(3):
+        for cartesian in range(3):
+            expected[:, field_component, cartesian] = (
+                np.bincount(j_list, weights=pair_derivative[field_component, :, cartesian], minlength=num_nodes)
+                - np.bincount(i_list, weights=pair_derivative[field_component, :, cartesian], minlength=num_nodes)
+            )
+
+    assert np.allclose(atoms.calc.get_property("becs", atoms), expected.reshape(num_nodes, 9))
+    assert evaluator.calls == 1
+    assert evaluator.derivative_calls == 1
+
+
 @pytest.mark.skipif(mace is None, reason="mace-field is not available")
 def test_macefield_native_json_uses_serial_field_path_when_kokkos_requested(macefield_model_path, tmp_path):
     from symmetrix.extract_mace_data import extract_mace_data

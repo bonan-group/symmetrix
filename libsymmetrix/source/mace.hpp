@@ -133,12 +133,30 @@ std::vector<double> field_linear_weight;
 std::vector<double> field_linear_bias;
 std::vector<double> field_linear_output_mask;
 std::vector<double> electric_field_adj;
+std::vector<double> electric_field_hessian;
+std::vector<double> electric_field_force_derivative;
 double field_feats_scalar_to_vector_path_weight;
 double field_feats_vector_to_scalar_path_weight;
 double field_linear_scalar_path_weight;
 double field_linear_vector_path_weight;
 void compute_field_H1(const int num_nodes, std::span<const double> electric_field);
 void reverse_field_H1(const int num_nodes, std::span<const double> electric_field);
+void compute_electric_field_hessian(const int num_nodes,
+                                    std::span<const int> node_types,
+                                    std::span<const int> num_neigh,
+                                    std::span<const int> neigh_indices,
+                                    std::span<const int> neigh_types,
+                                    std::span<const double> xyz,
+                                    std::span<const double> r,
+                                    std::span<const double> electric_field);
+void compute_electric_field_force_derivative(const int num_nodes,
+                                             std::span<const int> node_types,
+                                             std::span<const int> num_neigh,
+                                             std::span<const int> neigh_indices,
+                                             std::span<const int> neigh_types,
+                                             std::span<const double> xyz,
+                                             std::span<const double> r,
+                                             std::span<const double> electric_field);
 
 // Phi1
 int num_lelm1lm2, num_lme;
