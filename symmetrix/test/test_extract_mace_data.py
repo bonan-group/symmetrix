@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import pytest
 
 try:
@@ -9,14 +7,6 @@ except ImportError as exc:
     extract_mace_data_import_error = exc
 else:
     extract_mace_data_import_error = None
-
-
-@pytest.fixture(scope="module")
-def macefield_model_path():
-    model_path = Path("/home/bonan/appdir/mace-field/MACEField-MH-0-omat-dielectric.model")
-    if not model_path.exists():
-        pytest.skip(f"MACEField example model is not available: {model_path}")
-    return model_path
 
 
 @pytest.mark.skipif(extract_mace_data is None, reason=f"extract_mace_data is not available: {extract_mace_data_import_error}")

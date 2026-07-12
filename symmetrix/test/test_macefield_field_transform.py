@@ -1,4 +1,3 @@
-from pathlib import Path
 from math import sqrt
 
 import pytest
@@ -12,15 +11,9 @@ except ImportError as exc:
     pytest.skip(f"mace-field tensor test dependencies are not available: {exc}", allow_module_level=True)
 
 
-MODEL_PATH = Path("/home/bonan/appdir/mace-field/MACEField-MH-0-omat-dielectric.model")
-
-
 @pytest.fixture(scope="module")
-def macefield_modules():
-    if not MODEL_PATH.exists():
-        pytest.skip(f"MACEField example model is not available: {MODEL_PATH}")
-
-    model = torch.load(MODEL_PATH, map_location=torch.device("cpu"), weights_only=False).to(torch.float64)
+def macefield_modules(macefield_model_path):
+    model = torch.load(macefield_model_path, map_location=torch.device("cpu"), weights_only=False).to(torch.float64)
     if hasattr(model, "heads") and len(model.heads) != 1:
         torch.set_default_dtype(next(model.parameters()).dtype)
         model = remove_pt_head(model, "mp-dielectric")

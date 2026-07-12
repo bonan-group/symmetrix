@@ -6,7 +6,6 @@ import pytest
 import os
 import json
 import time
-from pathlib import Path
 
 import numpy as np
 
@@ -28,28 +27,31 @@ except ModuleNotFoundError as exc:
 try:
     import mace
     from mace.calculators import MACECalculator
-    from mace.tools.utils import get_cache_dir
     from mace.calculators.foundations_models import download_mace_mp_checkpoint
 except ImportError as exc:
     mace = None
 
+from model_downloads import test_model_cache_dir
+
+
 @pytest.fixture(scope="module")
-def mace_foundation_model(tmp_path_factory):
+def mace_foundation_model():
     if mace is None:
         return None
-    else:
-        # download into a temp dir by modifying XDG_CACHE_HOME which
-        # mace.calculators.foundations_models uses
-        cache_dir = tmp_path_factory.mktemp("mace_cache")
-        xdg_cache_home = os.environ.get("XDG_CACHE_HOME")
-        os.environ["XDG_CACHE_HOME"] = str(cache_dir)
+    cache_dir = test_model_cache_dir() / "mace-foundation"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    xdg_cache_home = os.environ.get("XDG_CACHE_HOME")
+    os.environ["XDG_CACHE_HOME"] = str(cache_dir)
+    try:
         downloaded_model = download_mace_mp_checkpoint('small-omat-0')
+    except Exception as exc:
+        pytest.skip(f"MACE foundation model is not available: {exc}")
+    finally:
         if xdg_cache_home is None:
             del os.environ["XDG_CACHE_HOME"]
         else:
             os.environ["XDG_CACHE_HOME"] = xdg_cache_home
-
-        return str(downloaded_model)
+    return str(downloaded_model)
 
 
 @pytest.mark.parametrize("use_kokkos", [True, False])
@@ -138,14 +140,6 @@ def test_symmetrix_vs_pytorch(mace_foundation_model, use_kokkos):
     assert np.allclose(atoms_s.get_potential_energy(), atoms_p.get_potential_energy(), atol=0.001)
     assert np.allclose(atoms_s.get_forces(), atoms_p.get_forces(), atol=0.002)
     assert np.allclose(atoms_s.get_stress(), atoms_p.get_stress(), atol=0.003)
-
-
-@pytest.fixture(scope="module")
-def macefield_model_path():
-    model_path = Path("/home/bonan/appdir/mace-field/MACEField-MH-0-omat-dielectric.model")
-    if not model_path.exists():
-        pytest.skip(f"MACEField example model is not available: {model_path}")
-    return model_path
 
 
 @pytest.mark.skipif(mace is None, reason="mace-field is not available")

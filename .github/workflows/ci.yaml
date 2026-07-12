@@ -116,12 +116,22 @@ jobs:
         source venv/bin/activate
         pip install ${{ matrix.mace-torch }}
         deactivate
+    - name: Cache test models
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/symmetrix/test-models
+        key: symmetrix-test-models-macefield-1.0.2
     - name: Build and package symmetrix
       run: |
         source venv/bin/activate
         cd symmetrix
         pip install .
         cd ..
+        deactivate
+    - name: Test MACEField model download
+      run: |
+        source venv/bin/activate
+        PYTHONPATH=symmetrix/test python -c "from model_downloads import macefield_model_path; print(macefield_model_path())"
         deactivate
     - name: Test model extraction
       run: |

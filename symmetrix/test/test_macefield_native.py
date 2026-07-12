@@ -20,8 +20,6 @@ except ImportError as exc:
     pytest.skip(f"MACEField native test dependencies are not available: {exc}", allow_module_level=True)
 
 
-MODEL_PATH = Path("/home/bonan/appdir/mace-field/MACEField-MH-0-omat-dielectric.model")
-
 try:
     from matscipy.neighbours import neighbour_list as neighbor_list
 except ImportError:
@@ -29,13 +27,10 @@ except ImportError:
 
 
 @pytest.fixture(scope="module")
-def macefield_json_path(tmp_path_factory):
-    if not MODEL_PATH.exists():
-        pytest.skip(f"MACEField example model is not available: {MODEL_PATH}")
-
+def macefield_json_path(tmp_path_factory, macefield_model_path):
     output_path = tmp_path_factory.mktemp("macefield-json") / "macefield.json"
     data = extract_mace_data(
-        MODEL_PATH,
+        macefield_model_path,
         species=[7, 13],
         head="mp-dielectric",
         num_spline_points=8,
@@ -45,13 +40,10 @@ def macefield_json_path(tmp_path_factory):
 
 
 @pytest.fixture(scope="module")
-def macefield_full_json_path(tmp_path_factory):
-    if not MODEL_PATH.exists():
-        pytest.skip(f"MACEField example model is not available: {MODEL_PATH}")
-
+def macefield_full_json_path(tmp_path_factory, macefield_model_path):
     output_path = tmp_path_factory.mktemp("macefield-full-json") / "macefield.json"
     data = extract_mace_data(
-        MODEL_PATH,
+        macefield_model_path,
         species=[7, 13],
         head="mp-dielectric",
     )
@@ -168,13 +160,13 @@ def test_kokkos_reverse_field_h1_matches_native_reverse(macefield_json_path):
     assert np.allclose(kokkos.electric_field_adj, native.electric_field_adj, atol=1e-12, rtol=1e-12)
 
 
-def test_native_field_energy_forces_match_ase_macefield(macefield_full_json_path):
+def test_native_field_energy_forces_match_ase_macefield(macefield_full_json_path, macefield_model_path):
     atoms = bulk("AlN", "wurtzite", a=3.112, c=4.982)
     electric_field = np.array([0.01, 0.0, 0.0], dtype=np.float64)
     atoms.info["electric_field"] = electric_field
 
     calc_torch = MACECalculator(
-        model_paths=[str(MODEL_PATH)],
+        model_paths=[str(macefield_model_path)],
         model_type="MACEField",
         head="mp-dielectric",
         device="cpu",
