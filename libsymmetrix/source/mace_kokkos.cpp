@@ -27,6 +27,97 @@ using Kokkos::TeamVectorMDRange;
 using Kokkos::View;
 
 template <typename Precision>
+struct ReverseFieldH1GlobalReducer {
+    using value_type = double[];
+
+    static constexpr unsigned value_count = 3;
+
+    int num_channels;
+    int channel_pairs;
+    double inv_sqrt_3;
+    double field_feats_scalar_to_vector_path_weight;
+    double field_feats_vector_to_scalar_path_weight;
+    double field_linear_scalar_path_weight;
+    double field_linear_vector_path_weight;
+    Kokkos::View<Precision**,Kokkos::LayoutRight> delta_scalar_adj;
+    Kokkos::View<Precision***,Kokkos::LayoutRight> delta_vector_adj;
+    Kokkos::View<Precision***,Kokkos::LayoutRight> H1_pre_adj;
+    Kokkos::View<Precision***,Kokkos::LayoutRight> H1_adj;
+    Kokkos::View<Precision***,Kokkos::LayoutRight> H1_pre_field;
+    Kokkos::View<Precision*> field_feats_weight;
+    Kokkos::View<Precision*> field_linear_weight;
+    Kokkos::View<const double*> electric_field;
+    Kokkos::View<double*> electric_field_adj;
+
+    KOKKOS_INLINE_FUNCTION
+    void operator()(const int i, double local_electric_field_adj[]) const {
+        for (int u=0; u<num_channels; ++u) {
+            for (int w=0; w<num_channels; ++w) {
+                const int weight_index = u*num_channels + w;
+                delta_scalar_adj(i,u) +=
+                    -field_linear_scalar_path_weight
+                    * field_linear_weight(weight_index)
+                    * H1_adj(i,0,w);
+                for (int component=0; component<3; ++component)
+                    delta_vector_adj(i,u,component) +=
+                        field_linear_vector_path_weight
+                        * field_linear_weight(channel_pairs + weight_index)
+                        * H1_adj(i,1+component,w);
+            }
+        }
+
+        for (int u=0; u<num_channels; ++u) {
+            const Precision scalar_in = H1_pre_field(i,0,u);
+            for (int w=0; w<num_channels; ++w) {
+                const int weight_index = u*num_channels + w;
+                const Precision scalar_to_vector_weight =
+                    field_feats_scalar_to_vector_path_weight
+                    * field_feats_weight(weight_index)
+                    * inv_sqrt_3;
+                const Precision vector_to_scalar_weight =
+                    field_feats_vector_to_scalar_path_weight
+                    * field_feats_weight(channel_pairs + weight_index)
+                    * inv_sqrt_3;
+                const Precision scalar_delta_adj = delta_scalar_adj(i,w);
+
+                for (int component=0; component<3; ++component) {
+                    const Precision vector_delta_adj = delta_vector_adj(i,w,component);
+                    H1_pre_adj(i,0,u) +=
+                        vector_delta_adj*scalar_to_vector_weight*electric_field(component);
+                    local_electric_field_adj[component] +=
+                        static_cast<double>(vector_delta_adj*scalar_to_vector_weight*scalar_in);
+
+                    H1_pre_adj(i,1+component,u) +=
+                        -scalar_delta_adj*vector_to_scalar_weight*electric_field(component);
+                    local_electric_field_adj[component] +=
+                        static_cast<double>(
+                            -scalar_delta_adj*vector_to_scalar_weight
+                            * H1_pre_field(i,1+component,u));
+                }
+            }
+        }
+    }
+
+    KOKKOS_INLINE_FUNCTION
+    void init(double update[]) const {
+        for (int component=0; component<3; ++component)
+            update[component] = 0.0;
+    }
+
+    KOKKOS_INLINE_FUNCTION
+    void join(double dst[], const double src[]) const {
+        for (int component=0; component<3; ++component)
+            dst[component] += src[component];
+    }
+
+    KOKKOS_INLINE_FUNCTION
+    void final(double update[]) const {
+        for (int component=0; component<3; ++component)
+            electric_field_adj(component) = update[component];
+    }
+};
+
+template <typename Precision>
 MACEKokkos<Precision>::MACEKokkos(std::string filename)
 {
     load_from_json(filename);
@@ -1228,21 +1319,6 @@ void MACEKokkos<Precision>::reverse_field_H1(
     if (H1_adj.extent(0) < num_nodes || H1_pre_field.extent(0) < num_nodes)
         throw std::runtime_error("MACEField reverse_field_H1 requires H1_adj and saved pre-field H1 buffers.");
 
-    const int channel_pairs = num_channels*num_channels;
-    const bool global_field = electric_field.size() == 3;
-
-    if (electric_field_adj.size() != electric_field.size())
-        Kokkos::realloc(electric_field_adj, electric_field.size());
-    Kokkos::deep_copy(electric_field_adj, 0.0);
-
-    Kokkos::View<Precision**,Kokkos::LayoutRight> delta_scalar_adj("delta_scalar_adj", num_nodes, num_channels);
-    Kokkos::View<Precision***,Kokkos::LayoutRight> delta_vector_adj("delta_vector_adj", num_nodes, num_channels, 3);
-    Kokkos::View<Precision***,Kokkos::LayoutRight> H1_pre_adj("H1_pre_adj", H1_adj.extent(0), H1_adj.extent(1), H1_adj.extent(2));
-    Kokkos::deep_copy(delta_scalar_adj, 0.0);
-    Kokkos::deep_copy(delta_vector_adj, 0.0);
-    Kokkos::deep_copy(H1_pre_adj, H1_adj);
-
-    const double inv_sqrt_3 = 1.0/std::sqrt(3.0);
     const auto num_channels = this->num_channels;
     const auto H1_adj = this->H1_adj;
     const auto H1_pre_field = this->H1_pre_field;
@@ -1252,59 +1328,121 @@ void MACEKokkos<Precision>::reverse_field_H1(
     const auto field_feats_vector_to_scalar_path_weight = this->field_feats_vector_to_scalar_path_weight;
     const auto field_linear_scalar_path_weight = this->field_linear_scalar_path_weight;
     const auto field_linear_vector_path_weight = this->field_linear_vector_path_weight;
+
+    const int channel_pairs = num_channels*num_channels;
+    const bool global_field = electric_field.size() == 3;
+    const int h1_lm = H1_adj.extent(1);
+    const int h1_channels = H1_adj.extent(2);
+
+    if (this->electric_field_adj.size() != electric_field.size())
+        Kokkos::realloc(this->electric_field_adj, electric_field.size());
     auto electric_field_adj = this->electric_field_adj;
 
-    Kokkos::parallel_for("MACEKokkos::reverse_field_H1", num_nodes, KOKKOS_LAMBDA (const int i) {
-        const int field_offset = global_field ? 0 : 3*i;
-        for (int u=0; u<num_channels; ++u) {
-            for (int w=0; w<num_channels; ++w) {
-                const int weight_index = u*num_channels + w;
-                delta_scalar_adj(i,u) +=
-                    -field_linear_scalar_path_weight
-                    * field_linear_weight(weight_index)
-                    * H1_adj(i,0,w);
-                for (int component=0; component<3; ++component)
-                    delta_vector_adj(i,u,component) +=
-                        field_linear_vector_path_weight
-                        * field_linear_weight(channel_pairs + weight_index)
-                        * H1_adj(i,1+component,w);
-            }
-        }
+    if (field_delta_scalar_adj.extent(0) < num_nodes
+        || field_delta_scalar_adj.extent(1) < num_channels)
+        Kokkos::realloc(field_delta_scalar_adj, num_nodes, num_channels);
+    if (field_delta_vector_adj.extent(0) < num_nodes
+        || field_delta_vector_adj.extent(1) < num_channels)
+        Kokkos::realloc(field_delta_vector_adj, num_nodes, num_channels, 3);
+    if (field_H1_pre_adj.extent(0) < num_nodes
+        || field_H1_pre_adj.extent(1) < h1_lm
+        || field_H1_pre_adj.extent(2) < h1_channels)
+        Kokkos::realloc(field_H1_pre_adj, num_nodes, h1_lm, h1_channels);
 
-        for (int u=0; u<num_channels; ++u) {
-            const Precision scalar_in = H1_pre_field(i,0,u);
-            for (int w=0; w<num_channels; ++w) {
-                const int weight_index = u*num_channels + w;
-                const Precision scalar_to_vector_weight =
-                    field_feats_scalar_to_vector_path_weight
-                    * field_feats_weight(weight_index)
-                    * inv_sqrt_3;
-                const Precision vector_to_scalar_weight =
-                    field_feats_vector_to_scalar_path_weight
-                    * field_feats_weight(channel_pairs + weight_index)
-                    * inv_sqrt_3;
-                const Precision scalar_delta_adj = delta_scalar_adj(i,w);
+    auto delta_scalar_adj = this->field_delta_scalar_adj;
+    auto delta_vector_adj = this->field_delta_vector_adj;
+    auto H1_pre_adj = this->field_H1_pre_adj;
+    Kokkos::deep_copy(delta_scalar_adj, 0.0);
+    Kokkos::deep_copy(delta_vector_adj, 0.0);
+    Kokkos::parallel_for(
+        "MACEKokkos::reverse_field_H1_copy_in",
+        Kokkos::MDRangePolicy<Kokkos::Rank<3,Kokkos::Iterate::Right>>(
+            {0,0,0}, {num_nodes,h1_lm,h1_channels}),
+        KOKKOS_LAMBDA (const int i, const int lm, const int channel) {
+            H1_pre_adj(i,lm,channel) = H1_adj(i,lm,channel);
+        });
 
-                for (int component=0; component<3; ++component) {
-                    const Precision vector_delta_adj = delta_vector_adj(i,w,component);
-                    H1_pre_adj(i,0,u) +=
-                        vector_delta_adj*scalar_to_vector_weight*electric_field(field_offset+component);
-                    Kokkos::atomic_add(
-                        &electric_field_adj(field_offset+component),
-                        static_cast<double>(vector_delta_adj*scalar_to_vector_weight*scalar_in));
+    const double inv_sqrt_3 = 1.0/std::sqrt(3.0);
 
-                    H1_pre_adj(i,1+component,u) +=
-                        -scalar_delta_adj*vector_to_scalar_weight*electric_field(field_offset+component);
-                    Kokkos::atomic_add(
-                        &electric_field_adj(field_offset+component),
-                        static_cast<double>(
-                            -scalar_delta_adj*vector_to_scalar_weight
-                            * H1_pre_field(i,1+component,u)));
+    if (global_field) {
+        Kokkos::parallel_reduce(
+            "MACEKokkos::reverse_field_H1_global",
+            num_nodes,
+            ReverseFieldH1GlobalReducer<Precision>{
+                num_channels,
+                channel_pairs,
+                inv_sqrt_3,
+                field_feats_scalar_to_vector_path_weight,
+                field_feats_vector_to_scalar_path_weight,
+                field_linear_scalar_path_weight,
+                field_linear_vector_path_weight,
+                delta_scalar_adj,
+                delta_vector_adj,
+                H1_pre_adj,
+                H1_adj,
+                H1_pre_field,
+                field_feats_weight,
+                field_linear_weight,
+                electric_field,
+                electric_field_adj});
+    } else {
+        Kokkos::deep_copy(electric_field_adj, 0.0);
+        Kokkos::parallel_for("MACEKokkos::reverse_field_H1", num_nodes, KOKKOS_LAMBDA (const int i) {
+            const int field_offset = 3*i;
+            for (int u=0; u<num_channels; ++u) {
+                for (int w=0; w<num_channels; ++w) {
+                    const int weight_index = u*num_channels + w;
+                    delta_scalar_adj(i,u) +=
+                        -field_linear_scalar_path_weight
+                        * field_linear_weight(weight_index)
+                        * H1_adj(i,0,w);
+                    for (int component=0; component<3; ++component)
+                        delta_vector_adj(i,u,component) +=
+                            field_linear_vector_path_weight
+                            * field_linear_weight(channel_pairs + weight_index)
+                            * H1_adj(i,1+component,w);
                 }
             }
-        }
-    });
-    Kokkos::deep_copy(H1_adj, H1_pre_adj);
+
+            for (int u=0; u<num_channels; ++u) {
+                const Precision scalar_in = H1_pre_field(i,0,u);
+                for (int w=0; w<num_channels; ++w) {
+                    const int weight_index = u*num_channels + w;
+                    const Precision scalar_to_vector_weight =
+                        field_feats_scalar_to_vector_path_weight
+                        * field_feats_weight(weight_index)
+                        * inv_sqrt_3;
+                    const Precision vector_to_scalar_weight =
+                        field_feats_vector_to_scalar_path_weight
+                        * field_feats_weight(channel_pairs + weight_index)
+                        * inv_sqrt_3;
+                    const Precision scalar_delta_adj = delta_scalar_adj(i,w);
+
+                    for (int component=0; component<3; ++component) {
+                        const Precision vector_delta_adj = delta_vector_adj(i,w,component);
+                        H1_pre_adj(i,0,u) +=
+                            vector_delta_adj*scalar_to_vector_weight*electric_field(field_offset+component);
+                        electric_field_adj(field_offset+component) +=
+                            static_cast<double>(vector_delta_adj*scalar_to_vector_weight*scalar_in);
+
+                        H1_pre_adj(i,1+component,u) +=
+                            -scalar_delta_adj*vector_to_scalar_weight*electric_field(field_offset+component);
+                        electric_field_adj(field_offset+component) +=
+                            static_cast<double>(
+                                -scalar_delta_adj*vector_to_scalar_weight
+                                * H1_pre_field(i,1+component,u));
+                    }
+                }
+            }
+        });
+    }
+    Kokkos::parallel_for(
+        "MACEKokkos::reverse_field_H1_copy_out",
+        Kokkos::MDRangePolicy<Kokkos::Rank<3,Kokkos::Iterate::Right>>(
+            {0,0,0}, {num_nodes,h1_lm,h1_channels}),
+        KOKKOS_LAMBDA (const int i, const int lm, const int channel) {
+            H1_adj(i,lm,channel) = H1_pre_adj(i,lm,channel);
+        });
     Kokkos::fence();
 }
 
