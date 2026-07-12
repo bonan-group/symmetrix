@@ -16,6 +16,17 @@ pair_coeff    * * my-mace-1-8.json H O
 where the final `H O` assumes that `H` and `O` correspond to LAMMPS
 types `1` and `2`, respectively.
 
+For MACEField JSON models, use the Kokkos pair style with an explicit
+uniform electric field:
+```
+pair_style    symmetrix/mace electric_field 0.01 0.0 0.0
+pair_coeff    * * my-macefield.json Al N
+```
+The field is currently a static graph-level vector in the active LAMMPS
+unit system. Per-atom fields, time-dependent fields, field-response
+properties, non-Kokkos MACEField LAMMPS runs, and atomic virials are not
+yet supported.
+
 ### Building LAMMPS
 
 Some (probably incomplete) prerequisites are:

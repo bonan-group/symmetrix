@@ -47,5 +47,9 @@ One can import the ASE calculator with
 ```
 from symmetrix import Symmetrix
 ```
+MACEField `.json` models can be evaluated with `use_kokkos=True` when
+Symmetrix is built with Kokkos support. In the ASE calculator this path
+supports field-aware energies, forces, polarization, Born effective charges,
+and polarizability for graph-level electric fields with `dtype="float64"`.
 See [the source code](source/symmetrix/symmetrix_calc.py) and [this test](test/test_symmetrix_calc.py)
 for additional details.

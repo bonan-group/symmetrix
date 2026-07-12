@@ -236,6 +236,46 @@ def test_macefield_native_json_ase_response_properties_match_pytorch(macefield_m
 
 
 @pytest.mark.skipif(mace is None, reason="mace-field is not available")
+def test_macefield_json_kokkos_response_properties_match_native(macefield_model_path, tmp_path):
+    from symmetrix import symmetrix as native_symmetrix
+    from symmetrix.extract_mace_data import extract_mace_data
+    if not hasattr(native_symmetrix, "MACEKokkos"):
+        pytest.skip("Symmetrix was built without Kokkos bindings.")
+
+    json_path = tmp_path / "macefield.json"
+    json_path.write_text(json.dumps(extract_mace_data(
+        macefield_model_path,
+        species=[7, 13],
+        head="mp-dielectric",
+    )))
+
+    atoms = bulk("AlN", "wurtzite", a=3.112, c=4.982)
+    atoms.info["electric_field"] = np.array([0.01, -0.02, 0.03])
+
+    atoms_native = atoms.copy()
+    atoms_kokkos = atoms.copy()
+    atoms_native.calc = Symmetrix(json_path, use_kokkos=False, dtype="float64")
+    atoms_kokkos.calc = Symmetrix(json_path, use_kokkos=True, dtype="float64")
+
+    assert atoms_kokkos.calc.use_kokkos is True
+    assert "polarization" in atoms_kokkos.calc.implemented_properties
+    assert "becs" in atoms_kokkos.calc.implemented_properties
+    assert "polarizability" in atoms_kokkos.calc.implemented_properties
+
+    tolerances = {
+        "energy": 1e-8,
+        "forces": 1e-8,
+        "polarization": 1e-8,
+        "becs": 2e-6,
+        "polarizability": 2e-6,
+    }
+    for prop, tolerance in tolerances.items():
+        expected = atoms_native.calc.get_property(prop, atoms_native)
+        actual = atoms_kokkos.calc.get_property(prop, atoms_kokkos)
+        assert np.allclose(actual, expected, atol=tolerance, rtol=tolerance)
+
+
+@pytest.mark.skipif(mace is None, reason="mace-field is not available")
 def test_macefield_native_json_response_properties_require_graph_field(macefield_model_path, tmp_path):
     from symmetrix.extract_mace_data import extract_mace_data
 
@@ -449,8 +489,11 @@ def test_macefield_native_json_becs_use_native_force_field_derivative(monkeypatc
 
 
 @pytest.mark.skipif(mace is None, reason="mace-field is not available")
-def test_macefield_native_json_uses_serial_field_path_when_kokkos_requested(macefield_model_path, tmp_path):
+def test_macefield_native_json_uses_kokkos_field_path_when_kokkos_requested(macefield_model_path, tmp_path):
+    from symmetrix import symmetrix as native_symmetrix
     from symmetrix.extract_mace_data import extract_mace_data
+    if not hasattr(native_symmetrix, "MACEKokkos"):
+        pytest.skip("Symmetrix was built without Kokkos bindings.")
 
     json_path = tmp_path / "macefield.json"
     json_path.write_text(json.dumps(extract_mace_data(
@@ -463,10 +506,51 @@ def test_macefield_native_json_uses_serial_field_path_when_kokkos_requested(mace
     atoms.info["electric_field"] = np.array([0.01, 0.0, 0.0])
     atoms.calc = Symmetrix(json_path, use_kokkos=True, dtype="float64")
 
-    assert atoms.calc.use_kokkos is False
+    assert atoms.calc.use_kokkos is True
     assert "polarization" in atoms.calc.implemented_properties
     assert np.isfinite(atoms.get_potential_energy())
     assert atoms.calc.get_property("polarization", atoms).shape == (3,)
+
+
+def test_macefield_json_with_kokkos_requested_constructs_kokkos_evaluator(monkeypatch, tmp_path):
+    class DummyKokkosEvaluator:
+        has_field_coupling = True
+        r_cut = 3.0
+        atomic_numbers = [7, 13]
+
+        def __init__(self, filename):
+            self.filename = filename
+            self.node_energies = []
+            self.node_forces = []
+            self.electric_field_adj = []
+
+    constructed = []
+
+    def fake_init_kokkos():
+        constructed.append("init")
+
+    def fake_mace_kokkos(filename):
+        constructed.append("kokkos")
+        return DummyKokkosEvaluator(filename)
+
+    def fake_mace(filename):
+        constructed.append("serial")
+        raise AssertionError("field-aware use_kokkos=True should not instantiate serial MACE")
+
+    monkeypatch.setattr("symmetrix.symmetrix_calc.symmetrix._kokkos_is_initialized", lambda: False)
+    monkeypatch.setattr("symmetrix.symmetrix_calc.symmetrix._init_kokkos", fake_init_kokkos)
+    monkeypatch.setattr("symmetrix.symmetrix_calc.symmetrix.MACEKokkos", fake_mace_kokkos)
+    monkeypatch.setattr("symmetrix.symmetrix_calc.symmetrix.MACE", fake_mace)
+
+    json_path = tmp_path / "macefield.json"
+    json_path.write_text(json.dumps({"has_field_coupling": True}))
+
+    calc = Symmetrix(json_path, use_kokkos=True, dtype="float64")
+
+    assert calc.use_kokkos is True
+    assert constructed == ["init", "kokkos"]
+    assert isinstance(calc.evaluator, DummyKokkosEvaluator)
+    assert "polarization" in calc.implemented_properties
 
 
 @pytest.mark.skipif(mace is None, reason="mace-field is not available")

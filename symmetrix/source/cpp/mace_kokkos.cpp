@@ -34,6 +34,19 @@ void bind_mace_kokkos(py::module_ &m, const char* class_name)
             [] (MACEKokkos<Precision>& self, py::array_t<double> node_forces) {
                 set_kokkos_view(self.node_forces, node_forces);
             })
+        .def_readonly("has_field_coupling", &MACEKokkos<Precision>::has_field_coupling)
+        .def_property_readonly("electric_field_adj",
+            [] (MACEKokkos<Precision>& self) {
+                return view2vector(self.electric_field_adj);
+            })
+        .def_property_readonly("electric_field_hessian",
+            [] (MACEKokkos<Precision>& self) {
+                return view2vector(self.electric_field_hessian);
+            })
+        .def_property_readonly("electric_field_force_derivative",
+            [] (MACEKokkos<Precision>& self) {
+                return view2vector(self.electric_field_force_derivative);
+            })
         // node energies and forces
         .def("compute_node_energies_forces",
             [] (MACEKokkos<Precision>& self,
@@ -52,6 +65,66 @@ void bind_mace_kokkos(py::module_ &m, const char* class_name)
                     create_kokkos_view("neigh_types", neigh_types),
                     create_kokkos_view("xyz", xyz),
                     create_kokkos_view("r", r));
+            })
+        .def("compute_node_energies_forces_field",
+            [] (MACEKokkos<Precision>& self,
+                    const int num_nodes,
+                    py::array_t<int> node_types,
+                    py::array_t<int> num_neigh,
+                    py::array_t<int> neigh_indices,
+                    py::array_t<int> neigh_types,
+                    py::array_t<double> xyz,
+                    py::array_t<double> r,
+                    py::array_t<double> electric_field) {
+                self.compute_node_energies_forces_field(
+                    num_nodes,
+                    create_kokkos_view("node_types", node_types),
+                    create_kokkos_view("num_neigh", num_neigh),
+                    create_kokkos_view("neigh_indices", neigh_indices),
+                    create_kokkos_view("neigh_types", neigh_types),
+                    create_kokkos_view("xyz", xyz),
+                    create_kokkos_view("r", r),
+                    create_kokkos_view("electric_field", electric_field));
+            })
+        .def("compute_electric_field_hessian",
+            [] (MACEKokkos<Precision>& self,
+                    const int num_nodes,
+                    py::array_t<int> node_types,
+                    py::array_t<int> num_neigh,
+                    py::array_t<int> neigh_indices,
+                    py::array_t<int> neigh_types,
+                    py::array_t<double> xyz,
+                    py::array_t<double> r,
+                    py::array_t<double> electric_field) {
+                self.compute_electric_field_hessian(
+                    num_nodes,
+                    create_kokkos_view("node_types", node_types),
+                    create_kokkos_view("num_neigh", num_neigh),
+                    create_kokkos_view("neigh_indices", neigh_indices),
+                    create_kokkos_view("neigh_types", neigh_types),
+                    create_kokkos_view("xyz", xyz),
+                    create_kokkos_view("r", r),
+                    create_kokkos_view("electric_field", electric_field));
+            })
+        .def("compute_electric_field_force_derivative",
+            [] (MACEKokkos<Precision>& self,
+                    const int num_nodes,
+                    py::array_t<int> node_types,
+                    py::array_t<int> num_neigh,
+                    py::array_t<int> neigh_indices,
+                    py::array_t<int> neigh_types,
+                    py::array_t<double> xyz,
+                    py::array_t<double> r,
+                    py::array_t<double> electric_field) {
+                self.compute_electric_field_force_derivative(
+                    num_nodes,
+                    create_kokkos_view("node_types", node_types),
+                    create_kokkos_view("num_neigh", num_neigh),
+                    create_kokkos_view("neigh_indices", neigh_indices),
+                    create_kokkos_view("neigh_types", neigh_types),
+                    create_kokkos_view("xyz", xyz),
+                    create_kokkos_view("r", r),
+                    create_kokkos_view("electric_field", electric_field));
             })
         // R0
         .def_property("R0",
@@ -234,6 +307,26 @@ void bind_mace_kokkos(py::module_ &m, const char* class_name)
             })
         .def("compute_H1", &MACEKokkos<Precision>::compute_H1)
         .def("reverse_H1", &MACEKokkos<Precision>::reverse_H1)
+        .def("compute_H1_product", &MACEKokkos<Precision>::compute_H1_product)
+        .def("compute_H1_linear_up", &MACEKokkos<Precision>::compute_H1_linear_up)
+        .def("reverse_H1_linear_up", &MACEKokkos<Precision>::reverse_H1_linear_up)
+        .def("reverse_H1_product", &MACEKokkos<Precision>::reverse_H1_product)
+        .def("compute_field_H1",
+            [] (MACEKokkos<Precision>& self,
+                    const int num_nodes,
+                    py::array_t<double> electric_field) {
+                self.compute_field_H1(
+                    num_nodes,
+                    create_kokkos_view("electric_field", electric_field));
+            })
+        .def("reverse_field_H1",
+            [] (MACEKokkos<Precision>& self,
+                    const int num_nodes,
+                    py::array_t<double> electric_field) {
+                self.reverse_field_H1(
+                    num_nodes,
+                    create_kokkos_view("electric_field", electric_field));
+            })
         // Phi1
         .def_property("Phi1",
             [] (MACEKokkos<Precision>& self) {

@@ -49,8 +49,7 @@ class Symmetrix(Calculator):
 
         if use_kokkos and self._model_has_field_coupling:
             if dtype == "float32":
-                raise ValueError("MACEField JSON models require dtype 'float64' in the native serial path.")
-            use_kokkos = False
+                raise ValueError("MACEField JSON models require dtype 'float64' in the Kokkos field-aware path.")
 
         if use_kokkos and not hasattr(symmetrix, "MACEKokkos"):
             if not str(model_file).endswith(".json"):

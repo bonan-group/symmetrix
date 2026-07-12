@@ -1,5 +1,7 @@
+#include <cmath>
 #include <fstream>
 #include <numbers>
+#include <stdexcept>
 
 // TODO: remove some of these headers?
 #include "KokkosBatched_Util.hpp"
@@ -56,6 +58,8 @@ void MACEKokkos<Precision>::compute_node_energies_forces(
     Kokkos::View<const double*> xyz,
     Kokkos::View<const double*> r)
 {
+    field_state_current = false;
+
     if (node_energies.size() < num_nodes)
         Kokkos::realloc(node_energies, num_nodes);
     if (node_forces.size() < xyz.size())
@@ -95,6 +99,200 @@ void MACEKokkos<Precision>::compute_node_energies_forces(
     reverse_M0(num_nodes, node_types);
     reverse_A0_scaled(num_nodes, node_types, num_neigh, neigh_types, xyz, r);
     reverse_A0(num_nodes, node_types, num_neigh, neigh_types, xyz, r);
+}
+
+template <typename Precision>
+void MACEKokkos<Precision>::compute_node_energies_forces_field(
+    const int num_nodes,
+    Kokkos::View<const int*> node_types,
+    Kokkos::View<const int*> num_neigh,
+    Kokkos::View<const int*> neigh_indices,
+    Kokkos::View<const int*> neigh_types,
+    Kokkos::View<const double*> xyz,
+    Kokkos::View<const double*> r,
+    Kokkos::View<const double*> electric_field)
+{
+    if (!has_field_coupling)
+        throw std::invalid_argument("MACEKokkos::compute_node_energies_forces_field requires field coupling.");
+
+    if (node_energies.size() < num_nodes)
+        Kokkos::realloc(node_energies, num_nodes);
+    if (node_forces.size() < xyz.size())
+        Kokkos::realloc(node_forces, xyz.size());
+    Kokkos::deep_copy(node_energies, 0.0);
+    Kokkos::deep_copy(node_forces, 0.0);
+
+    if (has_zbl)
+        zbl.compute_ZBL(
+            num_nodes, node_types, num_neigh, neigh_types,
+            atomic_numbers, r, xyz, node_energies, node_forces);
+
+    compute_R0(num_nodes, node_types, num_neigh, neigh_types, r);
+    compute_R1(num_nodes, node_types, num_neigh, neigh_types, r);
+    compute_Y(xyz);
+
+    compute_A0(num_nodes, node_types, num_neigh, neigh_types);
+    compute_A0_scaled(num_nodes, node_types, num_neigh, neigh_types, r);
+    compute_M0(num_nodes, node_types);
+    compute_H1_product(num_nodes);
+    compute_field_H1(num_nodes, electric_field);
+    compute_H1_linear_up(num_nodes);
+
+    compute_Phi1(num_nodes, num_neigh, neigh_indices);
+    compute_A1(num_nodes);
+    compute_A1_scaled(num_nodes, node_types, num_neigh, neigh_types, r);
+    compute_M1(num_nodes, node_types);
+    compute_H2(num_nodes, node_types);
+
+    compute_readouts(num_nodes, node_types);
+
+    reverse_H2(num_nodes, node_types, false);
+    reverse_M1(num_nodes, node_types);
+    reverse_A1_scaled(num_nodes, node_types, num_neigh, neigh_types, xyz, r);
+    reverse_A1(num_nodes);
+    reverse_Phi1(num_nodes, num_neigh, neigh_indices, xyz, r, false, false);
+
+    reverse_H1_linear_up(num_nodes);
+    reverse_field_H1(num_nodes, electric_field);
+    reverse_H1_product(num_nodes);
+    reverse_M0(num_nodes, node_types);
+    reverse_A0_scaled(num_nodes, node_types, num_neigh, neigh_types, xyz, r);
+    reverse_A0(num_nodes, node_types, num_neigh, neigh_types, xyz, r);
+
+    if (electric_field.size() == 3) {
+        auto h_electric_field =
+            Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), electric_field);
+        for (int component=0; component<3; ++component)
+            current_electric_field[component] = h_electric_field(component);
+        field_state_current = true;
+    } else {
+        field_state_current = false;
+    }
+}
+
+template <typename Precision>
+void MACEKokkos<Precision>::compute_electric_field_hessian(
+    const int num_nodes,
+    Kokkos::View<const int*> node_types,
+    Kokkos::View<const int*> num_neigh,
+    Kokkos::View<const int*> neigh_indices,
+    Kokkos::View<const int*> neigh_types,
+    Kokkos::View<const double*> xyz,
+    Kokkos::View<const double*> r,
+    Kokkos::View<const double*> electric_field)
+{
+    if (!has_field_coupling)
+        throw std::invalid_argument("MACEKokkos::compute_electric_field_hessian requires field coupling.");
+    if (electric_field.size() != 3)
+        throw std::invalid_argument("MACEKokkos::compute_electric_field_hessian requires a graph-level electric field.");
+
+    if (electric_field_hessian.size() != 9)
+        Kokkos::realloc(electric_field_hessian, 9);
+    if (electric_field_force_derivative.size() != 3*xyz.size())
+        Kokkos::realloc(electric_field_force_derivative, 3*xyz.size());
+
+    auto h_electric_field =
+        Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), electric_field);
+    Kokkos::View<double*, Kokkos::HostSpace> h_electric_field_hessian(
+        "h_electric_field_hessian", 9);
+    Kokkos::View<double*, Kokkos::HostSpace> h_electric_field_force_derivative(
+        "h_electric_field_force_derivative", 3*xyz.size());
+    Kokkos::deep_copy(h_electric_field_hessian, 0.0);
+    Kokkos::deep_copy(h_electric_field_force_derivative, 0.0);
+
+    bool use_cached_base_state =
+        field_state_current
+        && electric_field_adj.size() == 3
+        && node_forces.size() >= xyz.size()
+        && node_energies.size() >= num_nodes;
+    for (int component=0; component<3; ++component)
+        use_cached_base_state =
+            use_cached_base_state
+            && current_electric_field[component] == h_electric_field(component);
+
+    if (!use_cached_base_state)
+        compute_node_energies_forces_field(
+            num_nodes,
+            node_types,
+            num_neigh,
+            neigh_indices,
+            neigh_types,
+            xyz,
+            r,
+            electric_field);
+    Kokkos::View<double*, Kokkos::HostSpace> h_base_adj(
+        "h_base_adj", electric_field_adj.size());
+    Kokkos::View<double*, Kokkos::HostSpace> h_base_forces(
+        "h_base_forces", node_forces.size());
+    Kokkos::View<double*, Kokkos::HostSpace> h_base_energies(
+        "h_base_energies", node_energies.size());
+    Kokkos::deep_copy(h_base_adj, electric_field_adj);
+    Kokkos::deep_copy(h_base_forces, node_forces);
+    Kokkos::deep_copy(h_base_energies, node_energies);
+
+    constexpr double step = 1e-6;
+    for (int seed=0; seed<3; ++seed) {
+        Kokkos::View<double*> field_plus("field_plus", 3);
+        auto h_field_plus = Kokkos::create_mirror_view(field_plus);
+        for (int component=0; component<3; ++component)
+            h_field_plus(component) = h_electric_field(component);
+        h_field_plus(seed) += step;
+        Kokkos::deep_copy(field_plus, h_field_plus);
+
+        compute_node_energies_forces_field(
+            num_nodes,
+            node_types,
+            num_neigh,
+            neigh_indices,
+            neigh_types,
+            xyz,
+            r,
+            field_plus);
+        Kokkos::View<double*, Kokkos::HostSpace> h_adj_plus(
+            "h_adj_plus", electric_field_adj.size());
+        Kokkos::View<double*, Kokkos::HostSpace> h_forces_plus(
+            "h_forces_plus", node_forces.size());
+        Kokkos::deep_copy(h_adj_plus, electric_field_adj);
+        Kokkos::deep_copy(h_forces_plus, node_forces);
+
+        for (int component=0; component<3; ++component)
+            h_electric_field_hessian(component*3 + seed) =
+                (h_adj_plus(component) - h_base_adj(component))/step;
+        for (int index=0; index<xyz.size(); ++index)
+            h_electric_field_force_derivative(seed*xyz.size() + index) =
+                (h_forces_plus(index) - h_base_forces(index))/step;
+    }
+
+    Kokkos::deep_copy(electric_field_hessian, h_electric_field_hessian);
+    Kokkos::deep_copy(electric_field_force_derivative, h_electric_field_force_derivative);
+    Kokkos::deep_copy(electric_field_adj, h_base_adj);
+    Kokkos::deep_copy(node_forces, h_base_forces);
+    Kokkos::deep_copy(node_energies, h_base_energies);
+    for (int component=0; component<3; ++component)
+        current_electric_field[component] = h_electric_field(component);
+    field_state_current = true;
+}
+
+template <typename Precision>
+void MACEKokkos<Precision>::compute_electric_field_force_derivative(
+    const int num_nodes,
+    Kokkos::View<const int*> node_types,
+    Kokkos::View<const int*> num_neigh,
+    Kokkos::View<const int*> neigh_indices,
+    Kokkos::View<const int*> neigh_types,
+    Kokkos::View<const double*> xyz,
+    Kokkos::View<const double*> r,
+    Kokkos::View<const double*> electric_field)
+{
+    compute_electric_field_hessian(
+        num_nodes,
+        node_types,
+        num_neigh,
+        neigh_indices,
+        neigh_types,
+        xyz,
+        r,
+        electric_field);
 }
 
 template <typename Precision>
@@ -774,6 +972,65 @@ void MACEKokkos<Precision>::compute_H1(
 }
 
 template <typename Precision>
+void MACEKokkos<Precision>::compute_H1_product(
+    const int num_nodes)
+{
+    if (H1.extent(0) < M0.extent(0))
+        Kokkos::realloc(H1, M0.extent(0), M0.extent(1), M0.extent(2));
+
+    auto L_max = this->L_max;
+    auto H1 = this->H1;
+    auto H1_product_weights = this->H1_product_weights;
+    auto M0 = this->M0;
+
+    Kokkos::parallel_for("MACEKokkos::compute_H1_product",
+        Kokkos::TeamPolicy<>(num_nodes*(L_max+1), Kokkos::AUTO, Kokkos::AUTO),
+        KOKKOS_LAMBDA (Kokkos::TeamPolicy<>::member_type team_member) {
+            const int i = team_member.league_rank() / (L_max+1);
+            const int l = team_member.league_rank() % (L_max+1);
+            auto M0_il = Kokkos::subview(M0, i, Kokkos::make_pair(l*l, l*(l+2)+1), Kokkos::ALL);
+            auto W_il = Kokkos::subview(H1_product_weights, l, Kokkos::ALL, Kokkos::ALL);
+            auto H1_il = Kokkos::subview(H1, i, Kokkos::make_pair(l*l, l*(l+2)+1), Kokkos::ALL);
+            KokkosBatched::TeamGemm<Kokkos::TeamPolicy<>::member_type,
+                                    KokkosBatched::Trans::NoTranspose,
+                                    KokkosBatched::Trans::NoTranspose,
+                                    KokkosBatched::Algo::Gemm::Unblocked>
+                ::invoke(team_member, 1.0, M0_il, W_il, 0.0, H1_il);
+        });
+    Kokkos::fence();
+}
+
+template <typename Precision>
+void MACEKokkos<Precision>::compute_H1_linear_up(
+    const int num_nodes)
+{
+    if (H1_pre_linear_up.extent(0) < H1.extent(0))
+        Kokkos::realloc(H1_pre_linear_up, H1.extent(0), H1.extent(1), H1.extent(2));
+    Kokkos::deep_copy(H1_pre_linear_up, H1);
+
+    auto L_max = this->L_max;
+    auto H1 = this->H1;
+    auto H1_pre_linear_up = this->H1_pre_linear_up;
+    auto H1_linear_up_weights = this->H1_linear_up_weights;
+
+    Kokkos::parallel_for("MACEKokkos::compute_H1_linear_up",
+        Kokkos::TeamPolicy<>(num_nodes*(L_max+1), Kokkos::AUTO, Kokkos::AUTO),
+        KOKKOS_LAMBDA (Kokkos::TeamPolicy<>::member_type team_member) {
+            const int i = team_member.league_rank() / (L_max+1);
+            const int l = team_member.league_rank() % (L_max+1);
+            auto H1_in_il = Kokkos::subview(H1_pre_linear_up, i, Kokkos::make_pair(l*l, l*(l+2)+1), Kokkos::ALL);
+            auto W_il = Kokkos::subview(H1_linear_up_weights, l, Kokkos::ALL, Kokkos::ALL);
+            auto H1_il = Kokkos::subview(H1, i, Kokkos::make_pair(l*l, l*(l+2)+1), Kokkos::ALL);
+            KokkosBatched::TeamGemm<Kokkos::TeamPolicy<>::member_type,
+                                    KokkosBatched::Trans::NoTranspose,
+                                    KokkosBatched::Trans::NoTranspose,
+                                    KokkosBatched::Algo::Gemm::Unblocked>
+                ::invoke(team_member, 1.0, H1_in_il, W_il, 0.0, H1_il);
+        });
+    Kokkos::fence();
+}
+
+template <typename Precision>
 void MACEKokkos<Precision>::reverse_H1(
     const int num_nodes)
 {
@@ -799,6 +1056,255 @@ void MACEKokkos<Precision>::reverse_H1(
                                     KokkosBatched::Algo::Gemm::Unblocked>
                 ::invoke(team_member, 1.0, H1_adj_il, W_il, 0.0, M0_adj_il);
         });
+    Kokkos::fence();
+}
+
+template <typename Precision>
+void MACEKokkos<Precision>::reverse_H1_linear_up(
+    const int num_nodes)
+{
+    if (H1_pre_linear_up.extent(0) < H1.extent(0))
+        throw std::runtime_error("MACEKokkos::reverse_H1_linear_up requires saved pre-linear-up H1.");
+
+    auto L_max = this->L_max;
+    auto H1_adj = this->H1_adj;
+    auto H1_linear_up_weights = this->H1_linear_up_weights;
+    auto H1_pre_linear_up = this->H1_pre_linear_up;
+
+    Kokkos::parallel_for("MACEKokkos::reverse_H1_linear_up",
+        Kokkos::TeamPolicy<>(num_nodes*(L_max+1), Kokkos::AUTO, Kokkos::AUTO),
+        KOKKOS_LAMBDA (Kokkos::TeamPolicy<>::member_type team_member) {
+            const int i = team_member.league_rank() / (L_max+1);
+            const int l = team_member.league_rank() % (L_max+1);
+            auto H1_adj_il = Kokkos::subview(H1_adj, i, Kokkos::make_pair(l*l, l*(l+2)+1), Kokkos::ALL);
+            auto W_il = Kokkos::subview(H1_linear_up_weights, l, Kokkos::ALL, Kokkos::ALL);
+            auto H1_pre_adj_il = Kokkos::subview(H1_pre_linear_up, i, Kokkos::make_pair(l*l, l*(l+2)+1), Kokkos::ALL);
+            KokkosBatched::TeamGemm<Kokkos::TeamPolicy<>::member_type,
+                                    KokkosBatched::Trans::NoTranspose,
+                                    KokkosBatched::Trans::Transpose,
+                                    KokkosBatched::Algo::Gemm::Unblocked>
+                ::invoke(team_member, 1.0, H1_adj_il, W_il, 0.0, H1_pre_adj_il);
+        });
+    Kokkos::deep_copy(H1_adj, H1_pre_linear_up);
+    Kokkos::fence();
+}
+
+template <typename Precision>
+void MACEKokkos<Precision>::reverse_H1_product(
+    const int num_nodes)
+{
+    if (M0_adj.extent(0) < M0.extent(0))
+        Kokkos::realloc(M0_adj, M0.extent(0), M0.extent(1), M0.extent(2));
+
+    auto L_max = this->L_max;
+    auto M0_adj = this->M0_adj;
+    auto H1_product_weights = this->H1_product_weights;
+    auto H1_adj = this->H1_adj;
+
+    Kokkos::parallel_for("MACEKokkos::reverse_H1_product",
+        Kokkos::TeamPolicy<>(num_nodes*(L_max+1), Kokkos::AUTO, Kokkos::AUTO),
+        KOKKOS_LAMBDA (Kokkos::TeamPolicy<>::member_type team_member) {
+            const int i = team_member.league_rank() / (L_max+1);
+            const int l = team_member.league_rank() % (L_max+1);
+            auto H1_adj_il = Kokkos::subview(H1_adj, i, Kokkos::make_pair(l*l, l*(l+2)+1), Kokkos::ALL);
+            auto W_il = Kokkos::subview(H1_product_weights, l, Kokkos::ALL, Kokkos::ALL);
+            auto M0_adj_il = Kokkos::subview(M0_adj, i, Kokkos::make_pair(l*l, l*(l+2)+1), Kokkos::ALL);
+            KokkosBatched::TeamGemm<Kokkos::TeamPolicy<>::member_type,
+                                    KokkosBatched::Trans::NoTranspose,
+                                    KokkosBatched::Trans::Transpose,
+                                    KokkosBatched::Algo::Gemm::Unblocked>
+                ::invoke(team_member, 1.0, H1_adj_il, W_il, 0.0, M0_adj_il);
+        });
+    Kokkos::fence();
+}
+
+template <typename Precision>
+void MACEKokkos<Precision>::compute_field_H1(
+    const int num_nodes,
+    Kokkos::View<const double*> electric_field)
+{
+    if (!has_field_coupling)
+        return;
+
+    if (L_max != 1 || num_LM != 4)
+        throw std::runtime_error("MACEField H1 coupling currently requires L_max == 1.");
+    if (electric_field.size() != 3 && electric_field.size() != 3*num_nodes)
+        throw std::runtime_error("MACEField electric_field must have shape (3,) or (num_nodes, 3).");
+    if (H1.extent(0) < num_nodes || H1.extent(1) != num_LM || H1.extent(2) != num_channels)
+        throw std::runtime_error("MACEField H1 buffer size does not match num_nodes.");
+
+    const int channel_pairs = num_channels*num_channels;
+    if (field_feats_weight.size() != 2*channel_pairs || field_linear_weight.size() != 2*channel_pairs)
+        throw std::runtime_error("MACEField field coupling weights do not match num_channels.");
+
+    if (H1_pre_field.extent(0) < H1.extent(0))
+        Kokkos::realloc(H1_pre_field, H1.extent(0), H1.extent(1), H1.extent(2));
+    Kokkos::deep_copy(H1_pre_field, H1);
+
+    Kokkos::View<Precision**,Kokkos::LayoutRight> delta_scalar("delta_scalar", num_nodes, num_channels);
+    Kokkos::View<Precision***,Kokkos::LayoutRight> delta_vector("delta_vector", num_nodes, num_channels, 3);
+    Kokkos::View<Precision**,Kokkos::LayoutRight> linear_scalar("linear_scalar", num_nodes, num_channels);
+    Kokkos::View<Precision***,Kokkos::LayoutRight> linear_vector("linear_vector", num_nodes, num_channels, 3);
+    Kokkos::deep_copy(delta_scalar, 0.0);
+    Kokkos::deep_copy(delta_vector, 0.0);
+    Kokkos::deep_copy(linear_scalar, 0.0);
+    Kokkos::deep_copy(linear_vector, 0.0);
+
+    const double inv_sqrt_3 = 1.0/std::sqrt(3.0);
+    const bool global_field = electric_field.size() == 3;
+    const auto num_channels = this->num_channels;
+    const auto H1_pre_field = this->H1_pre_field;
+    const auto H1 = this->H1;
+    const auto field_feats_weight = this->field_feats_weight;
+    const auto field_linear_weight = this->field_linear_weight;
+    const auto field_feats_scalar_to_vector_path_weight = this->field_feats_scalar_to_vector_path_weight;
+    const auto field_feats_vector_to_scalar_path_weight = this->field_feats_vector_to_scalar_path_weight;
+    const auto field_linear_scalar_path_weight = this->field_linear_scalar_path_weight;
+    const auto field_linear_vector_path_weight = this->field_linear_vector_path_weight;
+
+    Kokkos::parallel_for("MACEKokkos::compute_field_H1", num_nodes, KOKKOS_LAMBDA (const int i) {
+        const int field_offset = global_field ? 0 : 3*i;
+        for (int u=0; u<num_channels; ++u) {
+            const Precision scalar_in = H1_pre_field(i,0,u);
+            double vector_dot_field = 0.0;
+            for (int component=0; component<3; ++component)
+                vector_dot_field += -H1_pre_field(i,1+component,u)*electric_field(field_offset+component);
+
+            for (int w=0; w<num_channels; ++w) {
+                const int weight_index = u*num_channels + w;
+                const Precision scalar_to_vector_weight =
+                    field_feats_scalar_to_vector_path_weight
+                    * field_feats_weight(weight_index)
+                    * inv_sqrt_3;
+                const Precision vector_to_scalar_weight =
+                    field_feats_vector_to_scalar_path_weight
+                    * field_feats_weight(channel_pairs + weight_index)
+                    * inv_sqrt_3;
+
+                for (int component=0; component<3; ++component)
+                    delta_vector(i,w,component) +=
+                        scalar_to_vector_weight*scalar_in*electric_field(field_offset+component);
+
+                delta_scalar(i,w) += vector_to_scalar_weight*vector_dot_field;
+            }
+        }
+
+        for (int u=0; u<num_channels; ++u) {
+            const Precision scalar_in = delta_scalar(i,u);
+            for (int w=0; w<num_channels; ++w) {
+                const int weight_index = u*num_channels + w;
+                linear_scalar(i,w) +=
+                    field_linear_scalar_path_weight
+                    * field_linear_weight(weight_index)
+                    * scalar_in;
+                for (int component=0; component<3; ++component)
+                    linear_vector(i,w,component) +=
+                        field_linear_vector_path_weight
+                        * field_linear_weight(channel_pairs + weight_index)
+                        * delta_vector(i,u,component);
+            }
+        }
+
+        for (int k=0; k<num_channels; ++k) {
+            H1(i,0,k) = H1_pre_field(i,0,k) - linear_scalar(i,k);
+            for (int component=0; component<3; ++component)
+                H1(i,1+component,k) =
+                    H1_pre_field(i,1+component,k) + linear_vector(i,k,component);
+        }
+    });
+    Kokkos::fence();
+}
+
+template <typename Precision>
+void MACEKokkos<Precision>::reverse_field_H1(
+    const int num_nodes,
+    Kokkos::View<const double*> electric_field)
+{
+    if (!has_field_coupling)
+        return;
+
+    if (electric_field.size() != 3 && electric_field.size() != 3*num_nodes)
+        throw std::runtime_error("MACEField electric_field must have shape (3,) or (num_nodes, 3).");
+    if (H1_adj.extent(0) < num_nodes || H1_pre_field.extent(0) < num_nodes)
+        throw std::runtime_error("MACEField reverse_field_H1 requires H1_adj and saved pre-field H1 buffers.");
+
+    const int channel_pairs = num_channels*num_channels;
+    const bool global_field = electric_field.size() == 3;
+
+    if (electric_field_adj.size() != electric_field.size())
+        Kokkos::realloc(electric_field_adj, electric_field.size());
+    Kokkos::deep_copy(electric_field_adj, 0.0);
+
+    Kokkos::View<Precision**,Kokkos::LayoutRight> delta_scalar_adj("delta_scalar_adj", num_nodes, num_channels);
+    Kokkos::View<Precision***,Kokkos::LayoutRight> delta_vector_adj("delta_vector_adj", num_nodes, num_channels, 3);
+    Kokkos::View<Precision***,Kokkos::LayoutRight> H1_pre_adj("H1_pre_adj", H1_adj.extent(0), H1_adj.extent(1), H1_adj.extent(2));
+    Kokkos::deep_copy(delta_scalar_adj, 0.0);
+    Kokkos::deep_copy(delta_vector_adj, 0.0);
+    Kokkos::deep_copy(H1_pre_adj, H1_adj);
+
+    const double inv_sqrt_3 = 1.0/std::sqrt(3.0);
+    const auto num_channels = this->num_channels;
+    const auto H1_adj = this->H1_adj;
+    const auto H1_pre_field = this->H1_pre_field;
+    const auto field_feats_weight = this->field_feats_weight;
+    const auto field_linear_weight = this->field_linear_weight;
+    const auto field_feats_scalar_to_vector_path_weight = this->field_feats_scalar_to_vector_path_weight;
+    const auto field_feats_vector_to_scalar_path_weight = this->field_feats_vector_to_scalar_path_weight;
+    const auto field_linear_scalar_path_weight = this->field_linear_scalar_path_weight;
+    const auto field_linear_vector_path_weight = this->field_linear_vector_path_weight;
+    auto electric_field_adj = this->electric_field_adj;
+
+    Kokkos::parallel_for("MACEKokkos::reverse_field_H1", num_nodes, KOKKOS_LAMBDA (const int i) {
+        const int field_offset = global_field ? 0 : 3*i;
+        for (int u=0; u<num_channels; ++u) {
+            for (int w=0; w<num_channels; ++w) {
+                const int weight_index = u*num_channels + w;
+                delta_scalar_adj(i,u) +=
+                    -field_linear_scalar_path_weight
+                    * field_linear_weight(weight_index)
+                    * H1_adj(i,0,w);
+                for (int component=0; component<3; ++component)
+                    delta_vector_adj(i,u,component) +=
+                        field_linear_vector_path_weight
+                        * field_linear_weight(channel_pairs + weight_index)
+                        * H1_adj(i,1+component,w);
+            }
+        }
+
+        for (int u=0; u<num_channels; ++u) {
+            const Precision scalar_in = H1_pre_field(i,0,u);
+            for (int w=0; w<num_channels; ++w) {
+                const int weight_index = u*num_channels + w;
+                const Precision scalar_to_vector_weight =
+                    field_feats_scalar_to_vector_path_weight
+                    * field_feats_weight(weight_index)
+                    * inv_sqrt_3;
+                const Precision vector_to_scalar_weight =
+                    field_feats_vector_to_scalar_path_weight
+                    * field_feats_weight(channel_pairs + weight_index)
+                    * inv_sqrt_3;
+                const Precision scalar_delta_adj = delta_scalar_adj(i,w);
+
+                for (int component=0; component<3; ++component) {
+                    const Precision vector_delta_adj = delta_vector_adj(i,w,component);
+                    H1_pre_adj(i,0,u) +=
+                        vector_delta_adj*scalar_to_vector_weight*electric_field(field_offset+component);
+                    Kokkos::atomic_add(
+                        &electric_field_adj(field_offset+component),
+                        static_cast<double>(vector_delta_adj*scalar_to_vector_weight*scalar_in));
+
+                    H1_pre_adj(i,1+component,u) +=
+                        -scalar_delta_adj*vector_to_scalar_weight*electric_field(field_offset+component);
+                    Kokkos::atomic_add(
+                        &electric_field_adj(field_offset+component),
+                        static_cast<double>(
+                            -scalar_delta_adj*vector_to_scalar_weight
+                            * H1_pre_field(i,1+component,u)));
+                }
+            }
+        }
+    });
+    Kokkos::deep_copy(H1_adj, H1_pre_adj);
     Kokkos::fence();
 }
 
@@ -1735,6 +2241,115 @@ void MACEKokkos<Precision>::load_from_json(std::string filename)
         L_max+1,
         num_channels,
         num_channels);
+
+    // MACEField H1 coupling
+    has_field_coupling = file.value("has_field_coupling", false);
+    field_feats_scalar_to_vector_path_weight = 0.0;
+    field_feats_vector_to_scalar_path_weight = 0.0;
+    field_linear_scalar_path_weight = 0.0;
+    field_linear_vector_path_weight = 0.0;
+    if (has_field_coupling) {
+        auto field_couplings = file["field_couplings"];
+        if (field_couplings.size() != 1)
+            throw std::runtime_error("MACEField JSON must contain exactly one field coupling.");
+        auto coupling = field_couplings[0];
+        if (coupling["field_feats_irreps_in1"].get<std::string>() != "128x0e+128x1o"
+            || coupling["field_feats_irreps_in2"].get<std::string>() != "1x1o"
+            || coupling["field_feats_irreps_out"].get<std::string>() != "128x0e+128x1o"
+            || coupling["field_linear_irreps_in"].get<std::string>() != "128x0e+128x1o"
+            || coupling["field_linear_irreps_out"].get<std::string>() != "128x0e+128x1o")
+            throw std::runtime_error("Unsupported MACEField field coupling irreps.");
+        if (num_channels != 128 || L_max != 1)
+            throw std::runtime_error("MACEField JSON field coupling currently requires 128 channels and L_max == 1.");
+
+        const auto H1_product_weights_vec =
+            file.value("H1_product_weights", std::vector<Precision>{});
+        const auto H1_linear_up_weights_vec =
+            file.value("H1_linear_up_weights", std::vector<Precision>{});
+        if (H1_product_weights_vec.size() != H1_weights.size()
+            || H1_linear_up_weights_vec.size() != H1_weights.size())
+            throw std::runtime_error("MACEField JSON must contain split H1 product and linear_up weights.");
+        set_kokkos_view(
+            H1_product_weights,
+            H1_product_weights_vec,
+            L_max+1,
+            num_channels,
+            num_channels);
+        set_kokkos_view(
+            H1_linear_up_weights,
+            H1_linear_up_weights_vec,
+            L_max+1,
+            num_channels,
+            num_channels);
+
+        const auto field_feats_weight_vec =
+            coupling["field_feats_weight"].get<std::vector<Precision>>();
+        const auto field_feats_output_mask_vec =
+            coupling["field_feats_output_mask"].get<std::vector<Precision>>();
+        const auto field_linear_weight_vec =
+            coupling["field_linear_weight"].get<std::vector<Precision>>();
+        const auto field_linear_bias_vec =
+            coupling["field_linear_bias"].get<std::vector<Precision>>();
+        const auto field_linear_output_mask_vec =
+            coupling["field_linear_output_mask"].get<std::vector<Precision>>();
+
+        const int channel_pairs = num_channels*num_channels;
+        if (field_feats_weight_vec.size() != 2*channel_pairs
+            || field_linear_weight_vec.size() != 2*channel_pairs
+            || field_feats_output_mask_vec.size() != 4*num_channels
+            || field_linear_output_mask_vec.size() != 4*num_channels
+            || !field_linear_bias_vec.empty())
+            throw std::runtime_error("MACEField JSON field coupling tensor sizes are unsupported.");
+        for (Precision mask_value : field_feats_output_mask_vec)
+            if (mask_value != static_cast<Precision>(1.0))
+                throw std::runtime_error("Unsupported MACEField field_feats output mask.");
+        for (Precision mask_value : field_linear_output_mask_vec)
+            if (mask_value != static_cast<Precision>(1.0))
+                throw std::runtime_error("Unsupported MACEField field_linear output mask.");
+
+        field_feats_weight = toKokkosView("field_feats_weight", field_feats_weight_vec);
+        field_feats_output_mask = toKokkosView("field_feats_output_mask", field_feats_output_mask_vec);
+        field_linear_weight = toKokkosView("field_linear_weight", field_linear_weight_vec);
+        field_linear_bias = toKokkosView("field_linear_bias", field_linear_bias_vec);
+        field_linear_output_mask = toKokkosView("field_linear_output_mask", field_linear_output_mask_vec);
+
+        auto field_feats_instructions = coupling["field_feats_instructions"];
+        if (field_feats_instructions.size() != 2)
+            throw std::runtime_error("MACEField field_feats must contain exactly two instructions.");
+        for (const auto& instruction : field_feats_instructions) {
+            if (instruction["connection_mode"].get<std::string>() != "uvw")
+                throw std::runtime_error("MACEField field_feats only supports uvw instructions.");
+            auto path_shape = instruction["path_shape"].get<std::vector<int>>();
+            if (path_shape != std::vector<int>{num_channels, 1, num_channels})
+                throw std::runtime_error("Unsupported MACEField field_feats path shape.");
+            const int i_in1 = instruction["i_in1"].get<int>();
+            const int i_in2 = instruction["i_in2"].get<int>();
+            const int i_out = instruction["i_out"].get<int>();
+            if (i_in1 == 0 && i_in2 == 0 && i_out == 1)
+                field_feats_scalar_to_vector_path_weight = instruction["path_weight"].get<double>();
+            else if (i_in1 == 1 && i_in2 == 0 && i_out == 0)
+                field_feats_vector_to_scalar_path_weight = instruction["path_weight"].get<double>();
+            else
+                throw std::runtime_error("Unsupported MACEField field_feats instruction.");
+        }
+
+        auto field_linear_instructions = coupling["field_linear_instructions"];
+        if (field_linear_instructions.size() != 2)
+            throw std::runtime_error("MACEField field_linear must contain exactly two instructions.");
+        for (const auto& instruction : field_linear_instructions) {
+            auto path_shape = instruction["path_shape"].get<std::vector<int>>();
+            if (path_shape != std::vector<int>{num_channels, num_channels})
+                throw std::runtime_error("Unsupported MACEField field_linear path shape.");
+            const int i_in = instruction["i_in"].get<int>();
+            const int i_out = instruction["i_out"].get<int>();
+            if (i_in == 0 && i_out == 0)
+                field_linear_scalar_path_weight = instruction["path_weight"].get<double>();
+            else if (i_in == 1 && i_out == 1)
+                field_linear_vector_path_weight = instruction["path_weight"].get<double>();
+            else
+                throw std::runtime_error("Unsupported MACEField field_linear instruction.");
+        }
+    }
 
     // Phi1
     Phi1_l = toKokkosView("Phi1_l", file["Phi1_l"].get<std::vector<int>>());
