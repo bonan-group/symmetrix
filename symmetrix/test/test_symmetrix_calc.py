@@ -11,7 +11,6 @@ import numpy as np
 
 from ase.atoms import Atoms
 from ase.build import bulk
-from ase.calculators.calculator import PropertyNotImplementedError
 from ase.stress import full_3x3_to_voigt_6_stress
 
 try:
@@ -270,7 +269,49 @@ def test_macefield_json_kokkos_response_properties_match_native(macefield_model_
 
 
 @pytest.mark.skipif(mace is None, reason="mace-field is not available")
-def test_macefield_native_json_response_properties_require_graph_field(macefield_model_path, tmp_path):
+def test_macefield_native_json_node_energy_matches_pytorch(macefield_model_path, tmp_path):
+    from symmetrix.extract_mace_data import extract_mace_data
+
+    json_path = tmp_path / "macefield.json"
+    json_path.write_text(json.dumps(extract_mace_data(
+        macefield_model_path,
+        species=[7, 13],
+        head="mp-dielectric",
+    )))
+
+    atoms = bulk("AlN", "wurtzite", a=3.112, c=4.982)
+    atoms.info["electric_field"] = np.array([0.01, -0.02, 0.03])
+
+    atoms_sym = atoms.copy()
+    atoms_torch = atoms.copy()
+    atoms_sym.calc = Symmetrix(json_path, use_kokkos=False, dtype="float64")
+    atoms_torch.calc = MACECalculator(
+        model_paths=[str(macefield_model_path)],
+        model_type="MACEField",
+        head="mp-dielectric",
+        device="cpu",
+        default_dtype="float64",
+    )
+
+    atoms_sym.get_potential_energy()
+    atoms_torch.get_potential_energy()
+
+    assert "node_energy" in atoms_sym.calc.implemented_properties
+    assert atoms_sym.calc.results["node_energy"].shape == (len(atoms),)
+    assert np.allclose(
+        atoms_sym.calc.results["energies"],
+        atoms_torch.calc.results["energies"],
+        atol=1e-5,
+    )
+    assert np.allclose(
+        atoms_sym.calc.results["node_energy"],
+        atoms_torch.calc.results["node_energy"],
+        atol=1e-5,
+    )
+
+
+@pytest.mark.skipif(mace is None, reason="mace-field is not available")
+def test_macefield_native_json_requires_graph_field(macefield_model_path, tmp_path):
     from symmetrix.extract_mace_data import extract_mace_data
 
     json_path = tmp_path / "macefield.json"
@@ -284,9 +325,79 @@ def test_macefield_native_json_response_properties_require_graph_field(macefield
     atoms.info["electric_field"] = np.zeros((len(atoms), 3))
     atoms.calc = Symmetrix(json_path, use_kokkos=False, dtype="float64")
 
+    with pytest.raises(ValueError, match="graph-level electric_field"):
+        atoms.get_potential_energy()
+
+
+def test_macefield_native_json_accepts_singleton_graph_field(monkeypatch, tmp_path):
+    class DummyFieldEvaluator:
+        has_field_coupling = True
+        r_cut = 3.0
+        atomic_numbers = [7, 13]
+        atomic_energies = np.array([0.0, 0.0])
+
+        def __init__(self):
+            self.electric_fields = []
+            self.node_energies = []
+            self.node_forces = []
+            self.electric_field_adj = []
+
+        def compute_node_energies_forces_field(
+            self,
+            num_nodes,
+            node_types,
+            num_neigh,
+            neigh_indices,
+            neigh_types,
+            xyz,
+            r,
+            electric_field,
+        ):
+            self.electric_fields.append(np.asarray(electric_field, dtype=float).copy())
+            self.node_energies = np.zeros(num_nodes)
+            self.node_forces = np.zeros_like(np.asarray(xyz, dtype=float))
+            self.electric_field_adj = np.array([1.0, 2.0, 3.0])
+
+    evaluator = DummyFieldEvaluator()
+    monkeypatch.setattr("symmetrix.symmetrix_calc.symmetrix.MACE", lambda filename: evaluator)
+
+    json_path = tmp_path / "macefield.json"
+    json_path.write_text(json.dumps({"has_field_coupling": True}))
+
+    atoms = Atoms(
+        "AlN",
+        positions=[[0.0, 0.0, 0.0], [1.8, 0.0, 0.0]],
+        cell=[5.0, 5.0, 5.0],
+        pbc=True,
+    )
+    atoms.info["electric_field"] = np.array([[0.01, -0.02, 0.03]])
+    atoms.calc = Symmetrix(json_path, use_kokkos=False, dtype="float64")
+
     assert np.isfinite(atoms.get_potential_energy())
-    with pytest.raises(PropertyNotImplementedError, match="graph-level electric_field"):
-        atoms.calc.get_property("polarization", atoms)
+    assert np.allclose(evaluator.electric_fields[-1], np.array([0.01, -0.02, 0.03]))
+
+
+@pytest.mark.skipif(mace is None, reason="mace-field is not available")
+def test_macefield_native_json_keeps_response_properties_selective(macefield_model_path, tmp_path):
+    from symmetrix.extract_mace_data import extract_mace_data
+
+    json_path = tmp_path / "macefield.json"
+    json_path.write_text(json.dumps(extract_mace_data(
+        macefield_model_path,
+        species=[7, 13],
+        head="mp-dielectric",
+    )))
+
+    atoms = bulk("AlN", "wurtzite", a=3.112, c=4.982)
+    atoms.info["electric_field"] = np.array([0.01, -0.02, 0.03])
+    atoms.calc = Symmetrix(json_path, use_kokkos=False, dtype="float64")
+
+    assert np.isfinite(atoms.get_potential_energy())
+    assert "polarization" not in atoms.calc.results
+    assert "becs" not in atoms.calc.results
+    assert "polarizability" not in atoms.calc.results
+
+    assert atoms.calc.get_property("polarization", atoms).shape == (3,)
 
 
 def test_macefield_native_json_polarization_uses_single_native_field_call(monkeypatch, tmp_path):
@@ -294,6 +405,7 @@ def test_macefield_native_json_polarization_uses_single_native_field_call(monkey
         has_field_coupling = True
         r_cut = 3.0
         atomic_numbers = [7, 13]
+        atomic_energies = np.array([0.0, 0.0])
 
         def __init__(self):
             self.calls = 0
@@ -344,6 +456,7 @@ def test_macefield_native_json_polarizability_uses_native_field_hessian(monkeypa
         has_field_coupling = True
         r_cut = 3.0
         atomic_numbers = [7, 13]
+        atomic_energies = np.array([0.0, 0.0])
 
         def __init__(self):
             self.calls = 0
@@ -413,6 +526,7 @@ def test_macefield_native_json_becs_use_native_force_field_derivative(monkeypatc
         has_field_coupling = True
         r_cut = 3.0
         atomic_numbers = [7, 13]
+        atomic_energies = np.array([0.0, 0.0])
 
         def __init__(self):
             self.calls = 0
@@ -482,6 +596,124 @@ def test_macefield_native_json_becs_use_native_force_field_derivative(monkeypatc
     assert evaluator.derivative_calls == 1
 
 
+def test_macefield_native_json_cache_tracks_only_electric_field(monkeypatch, tmp_path):
+    class DummyFieldEvaluator:
+        has_field_coupling = True
+        r_cut = 3.0
+        atomic_numbers = [7, 13]
+        atomic_energies = np.array([0.0, 0.0])
+
+        def __init__(self):
+            self.calls = 0
+            self.node_energies = []
+            self.node_forces = []
+            self.electric_field_adj = []
+
+        def compute_node_energies_forces_field(
+            self,
+            num_nodes,
+            node_types,
+            num_neigh,
+            neigh_indices,
+            neigh_types,
+            xyz,
+            r,
+            electric_field,
+        ):
+            self.calls += 1
+            field = np.asarray(electric_field, dtype=float)
+            self.node_energies = np.full(num_nodes, field[0])
+            self.node_forces = np.zeros_like(np.asarray(xyz, dtype=float))
+            self.electric_field_adj = np.array([1.0, 2.0, 3.0])
+
+    class NonNumericMetadata:
+        pass
+
+    evaluator = DummyFieldEvaluator()
+    monkeypatch.setattr("symmetrix.symmetrix_calc.symmetrix.MACE", lambda filename: evaluator)
+
+    json_path = tmp_path / "macefield.json"
+    json_path.write_text(json.dumps({"has_field_coupling": True}))
+
+    atoms = Atoms(
+        "AlN",
+        positions=[[0.0, 0.0, 0.0], [1.8, 0.0, 0.0]],
+        cell=[5.0, 5.0, 5.0],
+        pbc=True,
+    )
+    atoms.info["spacegroup"] = NonNumericMetadata()
+    atoms.info["electric_field"] = np.array([0.01, 0.0, 0.0])
+    atoms.calc = Symmetrix(json_path, use_kokkos=False, dtype="float64")
+
+    assert np.isfinite(atoms.get_potential_energy())
+    assert np.isfinite(atoms.get_forces()).all()
+    assert evaluator.calls == 1
+
+    atoms.info["spacegroup"] = NonNumericMetadata()
+    assert np.isfinite(atoms.get_forces()).all()
+    assert evaluator.calls == 1
+
+    atoms.info["electric_field"][0] = 0.02
+    assert np.isfinite(atoms.get_potential_energy())
+    assert evaluator.calls == 2
+
+
+def test_macefield_native_json_calculator_electric_field_override(monkeypatch, tmp_path):
+    class DummyFieldEvaluator:
+        has_field_coupling = True
+        r_cut = 3.0
+        atomic_numbers = [7, 13]
+        atomic_energies = np.array([0.0, 0.0])
+
+        def __init__(self):
+            self.electric_fields = []
+            self.node_energies = []
+            self.node_forces = []
+            self.electric_field_adj = []
+
+        def compute_node_energies_forces_field(
+            self,
+            num_nodes,
+            node_types,
+            num_neigh,
+            neigh_indices,
+            neigh_types,
+            xyz,
+            r,
+            electric_field,
+        ):
+            field = np.asarray(electric_field, dtype=float)
+            self.electric_fields.append(field.copy())
+            self.node_energies = np.full(num_nodes, field[2])
+            self.node_forces = np.zeros_like(np.asarray(xyz, dtype=float))
+            self.electric_field_adj = np.array([1.0, 2.0, 3.0])
+
+    evaluator = DummyFieldEvaluator()
+    monkeypatch.setattr("symmetrix.symmetrix_calc.symmetrix.MACE", lambda filename: evaluator)
+
+    json_path = tmp_path / "macefield.json"
+    json_path.write_text(json.dumps({"has_field_coupling": True}))
+
+    atoms = Atoms(
+        "AlN",
+        positions=[[0.0, 0.0, 0.0], [1.8, 0.0, 0.0]],
+        cell=[5.0, 5.0, 5.0],
+        pbc=True,
+    )
+    atoms.info["electric_field"] = np.array([0.01, 0.0, 0.0])
+    atoms.calc = Symmetrix(json_path, use_kokkos=False, dtype="float64")
+
+    atoms.calc.electric_field = [0.0, 0.0, 0.02]
+    energy_override = atoms.get_potential_energy()
+
+    atoms.calc.electric_field = [0.0, 0.0, 0.03]
+    energy_updated = atoms.get_potential_energy()
+
+    assert np.isclose(energy_override, 0.04)
+    assert np.isclose(energy_updated, 0.06)
+    assert np.allclose(evaluator.electric_fields, [[0.0, 0.0, 0.02], [0.0, 0.0, 0.03]])
+
+
 @pytest.mark.skipif(mace is None, reason="mace-field is not available")
 def test_macefield_native_json_uses_kokkos_field_path_when_kokkos_requested(macefield_model_path, tmp_path):
     from symmetrix import symmetrix as native_symmetrix
@@ -511,6 +743,7 @@ def test_macefield_json_with_kokkos_requested_constructs_kokkos_evaluator(monkey
         has_field_coupling = True
         r_cut = 3.0
         atomic_numbers = [7, 13]
+        atomic_energies = np.array([0.0, 0.0])
 
         def __init__(self, filename):
             self.filename = filename
