@@ -81,6 +81,12 @@ The output JSON is the file used by the ASE calculator. MACEField JSON requires
 field-aware Kokkos evaluator when Symmetrix is built with Kokkos support and
 `use_kokkos=True`.
 
+The original PyTorch checkpoint does not need to be trained or saved in double
+precision. `symmetrix_extract_mace` loads the checkpoint and extracts the
+Symmetrix JSON data in double precision, so a float32-trained MACEField model
+can still be used by converting it first and running the resulting JSON with
+`dtype="float64"`.
+
 ```python
 import numpy as np
 from ase.build import bulk

@@ -154,6 +154,36 @@ def test_macefield_model_requires_explicit_json_conversion(macefield_model_path)
 
 
 @pytest.mark.skipif(mace is None, reason="mace-field is not available")
+def test_macefield_float32_checkpoint_extracts_to_float64_json(macefield_model_path, tmp_path):
+    import torch
+    from symmetrix.extract_mace_data import extract_mace_data
+
+    model = torch.load(
+        macefield_model_path,
+        map_location=torch.device("cpu"),
+        weights_only=False,
+    )
+    parameter_dtype = next(model.parameters()).dtype
+    if parameter_dtype != torch.float32:
+        pytest.skip(f"Expected float32 MACEField checkpoint, got {parameter_dtype}.")
+
+    json_path = tmp_path / "macefield-from-float32.json"
+    json_path.write_text(json.dumps(extract_mace_data(
+        macefield_model_path,
+        species=[7, 13],
+        head="mp-dielectric",
+    )))
+
+    atoms = bulk("AlN", "wurtzite", a=3.112, c=4.982)
+    atoms.info["electric_field"] = np.array([0.01, -0.02, 0.03])
+    atoms.calc = Symmetrix(json_path, use_kokkos=False, dtype="float64")
+
+    assert np.isfinite(atoms.get_potential_energy())
+    assert atoms.get_forces().shape == (len(atoms), 3)
+    assert atoms.calc.get_property("polarization", atoms).shape == (3,)
+
+
+@pytest.mark.skipif(mace is None, reason="mace-field is not available")
 def test_macefield_native_json_ase_energy_forces_match_pytorch(macefield_model_path, tmp_path):
     from symmetrix.extract_mace_data import extract_mace_data
 
