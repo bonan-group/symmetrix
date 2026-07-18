@@ -35,16 +35,60 @@ pip install --verbose . \
 
 Once the Python package is installed, use
 ```
-symmetrix_extract_mace --model my-mace.model --atomic-numbers 1 8
+symmetrix_extract_mace --model my-mace.model
 ```
 from the command line to extract a `.json` file from a Torch-based model.
-The result will be `my-mace-1-8.json`, and this model is only suitable
-for simulations involving H and O.
+The default compact output is `my-mace-universal.json`. It retains every
+element in the checkpoint and can be reused across compositions without
+conversion. At runtime, Symmetrix materializes radial splines only for the
+elements present in the current structure.
+
+To make a smaller compact artifact, select a subset explicitly:
+```
+symmetrix_extract_mace --model my-mace.model --atomic-numbers 1 8
+```
+This produces `my-mace-1-8.json`, which is suitable only for H/O structures.
 
 For multi-head models, choose the head explicitly:
 ```
-symmetrix_extract_mace --model my-mace.model --atomic-numbers 8 14 22 56 --head mp-dielectric
+symmetrix_extract_mace --model my-mace.model --head mp-dielectric
 ```
+
+Compact files use Symmetrix format version 2. The spline resolution used for
+the transient active-composition cache defaults to 256 nodes and can be set
+with `--num-spline-points`. To generate the previous pair-table format, provide
+an explicit element list and request it directly:
+```
+symmetrix_extract_mace --model my-mace.model \
+    --atomic-numbers 1 8 \
+    --radial-format pair-splines
+```
+
+#### Backward compatibility
+
+Existing unversioned JSON artifacts remain supported and are interpreted as
+format version 1. Compact version 2 is the new converter default, including
+when an explicit species subset is provided. Older Symmetrix installations
+cannot read version 2 artifacts.
+
+To generate version 1 data for an older reader or for code that consumes the
+legacy `radial_spline_*` keys, request pair splines explicitly. The equivalent
+Python API is:
+
+```python
+from symmetrix.extract_mace_data import extract_mace_data
+
+data = extract_mace_data(
+    "my-mace.model",
+    species=[1, 8],
+    radial_format="pair-splines",
+)
+```
+
+An explicit species subset is strongly recommended for version 1 output
+because persisted pair tables scale quadratically with the number of retained
+elements. Updated Symmetrix readers support both unversioned version 1 and
+compact version 2 files.
 
 ### ASE Calculator
 
@@ -66,14 +110,13 @@ MACEField models must be converted to Symmetrix JSON before they are passed to
 to the ASE calculator raises an error instead of silently delegating back to
 PyTorch.
 
-For the MACEField dielectric models, include every atomic number that can appear
-in the ASE structures and keep the dielectric head. For example, an AlN-only
-JSON can be extracted with:
+For the MACEField dielectric models, retain the dielectric head. One universal
+JSON can then be used for AlN, MgO, or any other composition whose elements are
+supported by the checkpoint:
 ```
 symmetrix_extract_mace --model MACEField-MH-0-omat-dielectric.model \
-    --atomic-numbers 7 13 \
     --head mp-dielectric \
-    --output macefield-dielectric-7-13.json
+    --output macefield-dielectric-universal.json
 ```
 
 The output JSON is the file used by the ASE calculator. MACEField JSON requires
@@ -96,7 +139,7 @@ atoms = bulk("AlN", "wurtzite", a=3.112, c=4.982)
 atoms.info["electric_field"] = np.array([0.01, -0.02, 0.03])
 
 atoms.calc = Symmetrix(
-    "macefield-dielectric-7-13.json",
+    "macefield-dielectric-universal.json",
     use_kokkos=False,
     dtype="float64",
 )
@@ -107,6 +150,11 @@ polarization = atoms.calc.get_property("polarization", atoms)
 becs = atoms.calc.get_property("becs", atoms)
 polarizability = atoms.calc.get_property("polarizability", atoms)
 ```
+
+The calculator updates its active radial cache when the composition changes,
+so the same calculator instance can be assigned to a different supported
+structure. Evaluator instances are stateful and should not be used by
+concurrent host calls.
 
 The response properties are computed selectively. A plain
 `atoms.get_potential_energy()` or `atoms.get_forces()` call does not compute or

@@ -3,6 +3,7 @@
 #include <vector>
 #include <span>
 
+#include "compact_radial.hpp"
 #include "cubic_spline.hpp"
 #include "cubic_spline_set.hpp"
 #include "multilayer_perceptron.hpp"
@@ -23,6 +24,8 @@ int l_max, num_lm;
 int L_max, num_LM;
 std::vector<int> atomic_numbers;
 std::vector<double> atomic_energies;
+std::vector<int> active_atomic_numbers;
+void prepare_active_types(std::span<const int> node_types);
 
 // Node energies and forces
 std::vector<double> node_energies, node_forces;
@@ -47,6 +50,10 @@ bool has_zbl;
 ZBL zbl;
 
 // Radial functions
+bool uses_compact_radial = false;
+std::unique_ptr<CompactRadialModel> compact_radial_model;
+std::vector<int> active_types;
+std::vector<int> type_to_active;
 std::vector<std::unique_ptr<CubicSplineSet>> spl_set_0;
 std::vector<double> R0, R0_deriv;
 void compute_R0(const int num_nodes,
@@ -63,6 +70,7 @@ void compute_R1(const int num_nodes,
                 std::span<const int> num_neigh,
                 std::span<const int> neigh_types,
                 std::span<const double> r);
+int radial_pair_index(int type_i, int type_j) const;
 
 // Spherical harmonics
 std::vector<double> Y, Y_grad;

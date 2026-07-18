@@ -155,6 +155,8 @@ template<class DeviceType, typename Precision>
 void PairSymmetrixMACEKokkos<DeviceType, Precision>::coeff(int narg, char **arg)
 {
   if (!allocated) allocate();
+  if (narg != atom->ntypes + 3)
+    error->all(FLERR, "Incorrect args for pair coefficients");
 
   utils::logmesg(lmp, "Loading MACEKokkos model from \'{}\' ... ", arg[2]);
   mace = std::make_unique<MACEKokkos<Precision>>(arg[2]);
@@ -163,9 +165,11 @@ void PairSymmetrixMACEKokkos<DeviceType, Precision>::coeff(int narg, char **arg)
     error->all(FLERR, "MACEField models require pair_style symmetrix/mace/kk electric_field Ex Ey Ez");
 
   // extract atomic numbers from pair_coeff
-  mace_types = Kokkos::View<int*>("mace_types", mace->atomic_numbers.size());
-  auto h_mace_types = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), mace_types);
+  mace_types = Kokkos::View<int*>("mace_types", atom->ntypes);
+  auto h_mace_types = Kokkos::create_mirror_view(mace_types);
   auto h_mace_atomic_numbers = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), mace->atomic_numbers);
+  auto active_mace_types = std::vector<int>();
+  active_mace_types.reserve(atom->ntypes);
   for (int i=3; i<narg; ++i) {
     // find atomic number for element in arg[i]
     auto iter1 = std::find(periodic_table.begin(), periodic_table.end(), arg[i]);
@@ -177,10 +181,14 @@ void PairSymmetrixMACEKokkos<DeviceType, Precision>::coeff(int narg, char **arg)
     for (int j=0; j<mace->atomic_numbers.size(); ++j)
         if (h_mace_atomic_numbers(j) == atomic_number)
             mace_index = j;
+    if (mace_index < 0)
+      error->all(FLERR, "Problem matching LAMMPS types to MACEKokkos types.");
     utils::logmesg(lmp, "  mapping LAMMPS type {} ({}) to MACEKokkos type {}\n",
                    i-2, arg[i], mace_index);
     h_mace_types(i-3) = mace_index;
+    active_mace_types.push_back(mace_index);
   }
+  mace->prepare_active_types(active_mace_types);
   Kokkos::deep_copy(mace_types, h_mace_types);
 
   // set message size

@@ -6,6 +6,7 @@
 
 #include "Kokkos_UnorderedMap.hpp"
 
+#include "compact_radial.hpp"
 #include "cubic_spline_kokkos.hpp"
 #include "cubic_spline_set_kokkos.hpp"
 #include "multilayer_perceptron_kokkos.hpp"
@@ -30,6 +31,9 @@ int l_max, num_lm;
 int L_max, num_LM;
 Kokkos::View<int*> atomic_numbers;
 Kokkos::View<double*> atomic_energies;
+std::vector<int> atomic_numbers_host;
+std::vector<int> active_atomic_numbers;
+void prepare_active_types(std::vector<int> node_types);
 
 // Node energies and forces
 Kokkos::View<double*> node_energies, node_forces;
@@ -54,7 +58,15 @@ bool has_zbl;
 ZBLKokkos zbl;
 
 // R0
+bool uses_compact_radial = false;
+std::unique_ptr<CompactRadialModel> compact_radial_model;
+std::vector<int> active_types;
+Kokkos::View<int*> type_to_active;
+int num_active_types = 0;
+std::vector<double> H0_weights_host;
+std::vector<std::vector<std::vector<double>>> A0_weights_host;
 double R0_spline_h;
+double R0_spline_min = 0.0;
 Kokkos::View<const Precision****,Kokkos::LayoutRight> R0_spline_coefficients;
 Kokkos::View<Precision**,Kokkos::LayoutRight> R0, R0_deriv;
 void compute_R0(const int num_nodes,
@@ -145,8 +157,6 @@ Kokkos::View<double*> electric_field_force_derivative;
 Kokkos::View<Precision**,Kokkos::LayoutRight> field_delta_scalar_adj;
 Kokkos::View<Precision***,Kokkos::LayoutRight> field_delta_vector_adj;
 Kokkos::View<Precision***,Kokkos::LayoutRight> field_H1_pre_adj;
-bool field_state_current = false;
-std::array<double, 3> current_electric_field = {0.0, 0.0, 0.0};
 double field_feats_scalar_to_vector_path_weight;
 double field_feats_vector_to_scalar_path_weight;
 double field_linear_scalar_path_weight;

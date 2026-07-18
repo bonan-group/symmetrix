@@ -299,6 +299,138 @@ def test_macefield_json_kokkos_response_properties_match_native(macefield_model_
 
 
 @pytest.mark.skipif(mace is None, reason="mace-field is not available")
+def test_compact_macefield_calculator_replaces_active_composition_cache(
+    macefield_model_path,
+    tmp_path,
+):
+    from symmetrix import symmetrix as native_symmetrix
+    from symmetrix.extract_mace_data import extract_mace_data
+    if not hasattr(native_symmetrix, "MACEKokkos"):
+        pytest.skip("Symmetrix was built without Kokkos bindings.")
+
+    json_path = tmp_path / "macefield-multicomposition.json"
+    json_path.write_text(json.dumps(
+        extract_mace_data(
+            macefield_model_path,
+            species=[7, 8, 12, 13],
+            head="mp-dielectric",
+        ),
+        separators=(",", ":"),
+    ))
+
+    if not native_symmetrix._kokkos_is_initialized():
+        native_symmetrix._init_kokkos()
+    partial_node_types = np.asarray([0, 99], dtype=np.int32)[::2]
+    partial_num_neigh = np.asarray([1, 99], dtype=np.int32)[::2]
+    partial_neigh_types = np.asarray([3, 99], dtype=np.int32)[::2]
+    partial_r = np.asarray([1.5, 99.0], dtype=float)[::2]
+    partial_R1 = []
+    for evaluator_type in (native_symmetrix.MACE, native_symmetrix.MACEKokkos):
+        evaluator = evaluator_type(str(json_path))
+        evaluator.compute_R1(
+            1,
+            partial_node_types,
+            partial_num_neigh,
+            partial_neigh_types,
+            partial_r,
+        )
+        assert evaluator.active_atomic_numbers == [7, 13]
+        partial_R1.append(np.asarray(evaluator.R1))
+    assert np.allclose(partial_R1[1], partial_R1[0], rtol=0.0, atol=1e-11)
+
+    structures = (
+        (bulk("AlN", "wurtzite", a=3.112, c=4.982), [7, 13]),
+        (bulk("MgO", "rocksalt", a=4.21), [8, 12]),
+        (bulk("AlN", "wurtzite", a=3.112, c=4.982), [7, 13]),
+    )
+    backend_energies = {}
+    for use_kokkos in (False, True):
+        calc = Symmetrix(json_path, use_kokkos=use_kokkos, dtype="float64")
+        energies = []
+        for atoms, expected_active in structures:
+            atoms = atoms.copy()
+            atoms.calc = calc
+            energies.append(atoms.get_potential_energy())
+            assert calc.evaluator.active_atomic_numbers == expected_active
+        assert energies[0] == pytest.approx(energies[2], abs=1e-11)
+        backend_energies[use_kokkos] = energies
+
+    assert np.allclose(
+        backend_energies[True],
+        backend_energies[False],
+        rtol=0.0,
+        atol=1e-8,
+    )
+
+    electric_field = np.array([0.001, -0.002, 0.003])
+    response_calc = Symmetrix(json_path, use_kokkos=True, dtype="float64")
+    old_atoms = bulk("AlN", "rocksalt", a=4.05)
+    new_atoms = bulk("MgO", "rocksalt", a=4.21)
+    old_inputs = response_calc._mace_inputs(old_atoms)
+    response_calc.evaluator.compute_node_energies_forces_field(
+        *old_inputs[:7],
+        electric_field,
+    )
+    new_inputs = response_calc._mace_inputs(new_atoms)
+    response_calc.evaluator.compute_electric_field_hessian(
+        *new_inputs[:7],
+        electric_field,
+    )
+    switched_hessian = np.asarray(
+        response_calc.evaluator.electric_field_hessian,
+    ).copy()
+
+    fresh_calc = Symmetrix(json_path, use_kokkos=True, dtype="float64")
+    fresh_inputs = fresh_calc._mace_inputs(new_atoms)
+    fresh_calc.evaluator.compute_electric_field_hessian(
+        *fresh_inputs[:7],
+        electric_field,
+    )
+    assert np.allclose(
+        switched_hessian,
+        fresh_calc.evaluator.electric_field_hessian,
+        rtol=1e-8,
+        atol=2e-6,
+    )
+
+    same_composition_calc = Symmetrix(json_path, use_kokkos=True, dtype="float64")
+    baseline_atoms = bulk("AlN", "rocksalt", a=4.05)
+    changed_atoms = baseline_atoms.copy()
+    changed_atoms.positions[0, 0] += 0.05
+    baseline_inputs = same_composition_calc._mace_inputs(baseline_atoms)
+    same_composition_calc.evaluator.compute_node_energies_forces_field(
+        *baseline_inputs[:7],
+        electric_field,
+    )
+    changed_inputs = same_composition_calc._mace_inputs(changed_atoms)
+    same_composition_calc.evaluator.compute_electric_field_hessian(
+        *changed_inputs[:7],
+        electric_field,
+    )
+    changed_hessian = np.asarray(
+        same_composition_calc.evaluator.electric_field_hessian,
+    ).copy()
+
+    changed_fresh_calc = Symmetrix(json_path, use_kokkos=True, dtype="float64")
+    changed_fresh_inputs = changed_fresh_calc._mace_inputs(changed_atoms)
+    changed_fresh_calc.evaluator.compute_electric_field_hessian(
+        *changed_fresh_inputs[:7],
+        electric_field,
+    )
+    assert np.allclose(
+        changed_hessian,
+        changed_fresh_calc.evaluator.electric_field_hessian,
+        rtol=1e-8,
+        atol=2e-6,
+    )
+
+    fresh_calc.evaluator.prepare_active_types(
+        np.asarray([0, 1, 0, 1], dtype=np.int32)[::2],
+    )
+    assert fresh_calc.evaluator.active_atomic_numbers == [7]
+
+
+@pytest.mark.skipif(mace is None, reason="mace-field is not available")
 def test_macefield_native_json_node_energy_matches_pytorch(macefield_model_path, tmp_path):
     from symmetrix.extract_mace_data import extract_mace_data
 

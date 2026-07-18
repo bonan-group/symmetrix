@@ -66,6 +66,8 @@ class Symmetrix(Calculator):
         try:
             self.evaluator = MACE(str(model_file))
         except RuntimeError: # expecting json.exception.parse_error.101
+            if str(model_file).endswith(".json"):
+                raise
             self._raise_if_macefield_checkpoint(model_file)
 
             # import this here so that torch/mace support isn't needed if file is already symmetrix json
@@ -73,7 +75,8 @@ class Symmetrix(Calculator):
             kwargs_extract = {k: v for k, v in kwargs.items()
                 if k in ['species',
                          'head',
-                         'num_spline_points']}
+                         'num_spline_points',
+                         'radial_format']}
             logging.warning(f"Converting model from pytorch model to symmetrix dict with {kwargs_extract}")
             data = extract_mace_data(model_file, **kwargs_extract)
             with NamedTemporaryFile("w") as fout:
@@ -175,6 +178,12 @@ class Symmetrix(Calculator):
     def _mace_inputs(self, atoms):
         ase_atomic_numbers = atoms.get_atomic_numbers().tolist()
         mace_atomic_numbers = self.evaluator.atomic_numbers
+        unsupported = sorted(set(ase_atomic_numbers) - set(mace_atomic_numbers))
+        if unsupported:
+            raise ValueError(
+                f"Model does not support atomic numbers {unsupported}. "
+                f"Supported atomic numbers are {mace_atomic_numbers}."
+            )
         i_list, j_list, r, xyz = neighbor_list('ijdD', atoms, self.cutoff)
         num_nodes = len(atoms)
         node_types = [mace_atomic_numbers.index(ase_atomic_numbers[i]) for i in range(num_nodes)]

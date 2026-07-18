@@ -1,3 +1,4 @@
+import hashlib
 import os
 from pathlib import Path
 from urllib.error import URLError
@@ -9,6 +10,7 @@ MODEL_URLS = {
     "mace-mp-0b3-medium-1-8.json": "https://www.dropbox.com/scl/fi/3lydfgta1lijymq98pgal/mace-mp-0b3-medium-1-8.json?rlkey=7wofp9gznqt5b3wmk5ybbj76z&st=w7cd09x6&dl=1",
     "MACEField-MH-0-omat-dielectric.model": "https://github.com/mdi-group/mace-field/releases/download/1.0.2/MACEField-MH-0-omat-dielectric.model",
 }
+MACEFIELD_MODEL_SHA256 = "f92e043aaf2cd8879919db8452503553fe7b608cb749d8d169dd96d4aa094aa2"
 
 
 def test_model_cache_dir():
@@ -23,7 +25,15 @@ def test_model_cache_dir():
     return Path.home() / ".cache" / "symmetrix" / "test-models"
 
 
-def cached_model_path(filename, url, env_var=None):
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as model_file:
+        for chunk in iter(lambda: model_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def cached_model_path(filename, url, env_var=None, sha256=None):
     if env_var:
         override = os.environ.get(env_var)
         if override:
@@ -36,7 +46,9 @@ def cached_model_path(filename, url, env_var=None):
     cache_dir.mkdir(parents=True, exist_ok=True)
     destination = cache_dir / filename
     if destination.exists():
-        return destination
+        if sha256 is None or file_sha256(destination) == sha256:
+            return destination
+        destination.unlink()
 
     try:
         urlretrieve(url, destination)
@@ -44,9 +56,17 @@ def cached_model_path(filename, url, env_var=None):
         if destination.exists():
             destination.unlink()
         raise RuntimeError(f"Could not download test model {filename} from {url}") from exc
+    if sha256 is not None and file_sha256(destination) != sha256:
+        destination.unlink()
+        raise RuntimeError(f"Downloaded test model {filename} failed SHA-256 verification")
     return destination
 
 
 def macefield_model_path():
     filename = "MACEField-MH-0-omat-dielectric.model"
-    return cached_model_path(filename, MODEL_URLS[filename], env_var="SYMMETRIX_MACEFIELD_MODEL")
+    return cached_model_path(
+        filename,
+        MODEL_URLS[filename],
+        env_var="SYMMETRIX_MACEFIELD_MODEL",
+        sha256=MACEFIELD_MODEL_SHA256,
+    )

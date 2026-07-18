@@ -1,6 +1,8 @@
+#include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <numbers>
+#include <numeric>
 #include <stdexcept>
 
 // TODO: remove some of these headers?
@@ -140,6 +142,159 @@ MACEKokkos<Precision>::~MACEKokkos()
 }
 
 template <typename Precision>
+void MACEKokkos<Precision>::prepare_active_types(std::vector<int> node_types)
+{
+    if (!uses_compact_radial)
+        return;
+
+    std::sort(node_types.begin(), node_types.end());
+    node_types.erase(std::unique(node_types.begin(), node_types.end()), node_types.end());
+    if (node_types.empty())
+        throw std::invalid_argument("MACEKokkos compact radial cache requires at least one active type.");
+    for (const int type : node_types)
+        if (type < 0 || type >= atomic_numbers_host.size())
+            throw std::out_of_range("MACEKokkos active type index is out of range.");
+    if (node_types == active_types)
+        return;
+
+    Kokkos::fence();
+    const int active_count = node_types.size();
+    const int pair_count = active_count*(active_count+1)/2;
+    auto pair_tables = std::vector<CompactRadialPairTables>();
+    pair_tables.reserve(pair_count);
+    for (int active_i=0; active_i<active_count; ++active_i)
+        for (int active_j=active_i; active_j<active_count; ++active_j)
+            pair_tables.push_back(compact_radial_model->materialize_pair(
+                node_types[active_i], node_types[active_j]));
+
+    const double h = compact_radial_model->spline_h();
+    const double x0 = compact_radial_model->spline_min();
+    const int spline_nodes = compact_radial_model->num_spline_points();
+    const int R0_functions = (l_max+1)*num_channels;
+    auto new_R0_coefficients = Kokkos::View<Precision****,Kokkos::LayoutRight>(
+        "R0 compact coefficients", active_count*active_count,
+        spline_nodes-1, 4, R0_functions);
+    auto h_R0_coefficients = Kokkos::create_mirror_view(new_R0_coefficients);
+    for (int active_i=0; active_i<active_count; ++active_i) {
+        for (int active_j=0; active_j<active_count; ++active_j) {
+            const int ordered_pair = active_i*active_count+active_j;
+            const int unordered_pair = (active_i <= active_j)
+                ? active_i*(2*active_count-active_i-1)/2+active_j
+                : active_j*(2*active_count-active_j-1)/2+active_i;
+            const int global_i = node_types[active_i];
+            const int global_j = node_types[active_j];
+            const auto& values = pair_tables[unordered_pair].R0.values;
+            const auto& derivatives = pair_tables[unordered_pair].R0.derivatives;
+            if (values.size() != R0_functions || derivatives.size() != R0_functions)
+                throw std::runtime_error("Compact radial R0 output has an invalid size.");
+            for (int node=0; node<spline_nodes-1; ++node) {
+                for (int lk=0; lk<R0_functions; ++lk) {
+                    const double value = values[lk][node];
+                    const double deriv = derivatives[lk][node];
+                    const double next_value = values[lk][node+1];
+                    const double next_deriv = derivatives[lk][node+1];
+                    h_R0_coefficients(ordered_pair,node,0,lk) = static_cast<Precision>(value);
+                    h_R0_coefficients(ordered_pair,node,1,lk) = static_cast<Precision>(deriv);
+                    h_R0_coefficients(ordered_pair,node,2,lk) = static_cast<Precision>(
+                        (-3*value-2*h*deriv+3*next_value-h*next_deriv)/(h*h));
+                    h_R0_coefficients(ordered_pair,node,3,lk) = static_cast<Precision>(
+                        (2*value+h*deriv-2*next_value+h*next_deriv)/(h*h*h));
+                }
+
+                for (int lk=0; lk<R0_functions; ++lk) {
+                    const int channel = lk%num_channels;
+                    const auto H0_weight = static_cast<Precision>(
+                        H0_weights_host[global_j*num_channels+channel]);
+                    for (int coefficient=0; coefficient<4; ++coefficient)
+                        h_R0_coefficients(ordered_pair,node,coefficient,lk) *= H0_weight;
+                }
+
+                for (int l=0; l<=l_max; ++l) {
+                    auto original = std::vector<Precision>(4*num_channels);
+                    for (int coefficient=0; coefficient<4; ++coefficient)
+                        for (int channel=0; channel<num_channels; ++channel)
+                            original[coefficient*num_channels+channel] =
+                                h_R0_coefficients(
+                                    ordered_pair,node,coefficient,l*num_channels+channel);
+                    for (int coefficient=0; coefficient<4; ++coefficient) {
+                        for (int channel=0; channel<num_channels; ++channel) {
+                            Precision fused = 0.0;
+                            for (int input_channel=0; input_channel<num_channels; ++input_channel)
+                                fused += static_cast<Precision>(
+                                    A0_weights_host[global_i][l][input_channel*num_channels+channel])
+                                    * original[coefficient*num_channels+input_channel];
+                            h_R0_coefficients(
+                                ordered_pair,node,coefficient,l*num_channels+channel) = fused;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Kokkos::deep_copy(new_R0_coefficients, h_R0_coefficients);
+
+    auto R1_values = std::vector<std::vector<std::vector<double>>>();
+    auto R1_derivatives = std::vector<std::vector<std::vector<double>>>();
+    auto A0_values = std::vector<std::vector<std::vector<double>>>();
+    auto A0_derivatives = std::vector<std::vector<std::vector<double>>>();
+    auto A1_values = std::vector<std::vector<std::vector<double>>>();
+    auto A1_derivatives = std::vector<std::vector<std::vector<double>>>();
+    R1_values.reserve(pair_count);
+    R1_derivatives.reserve(pair_count);
+    for (auto& tables : pair_tables) {
+        const auto expected_R1 = static_cast<std::size_t>(Phi1_l.size()*num_channels);
+        if (tables.R1.values.size() != expected_R1
+            || tables.R1.derivatives.size() != expected_R1)
+            throw std::runtime_error("Compact radial R1 output has an invalid size.");
+        R1_values.push_back(std::move(tables.R1.values));
+        R1_derivatives.push_back(std::move(tables.R1.derivatives));
+        if (A0_scaled) {
+            A0_values.push_back(std::move(tables.A0.values));
+            A0_derivatives.push_back(std::move(tables.A0.derivatives));
+        }
+        if (A1_scaled) {
+            A1_values.push_back(std::move(tables.A1.values));
+            A1_derivatives.push_back(std::move(tables.A1.derivatives));
+        }
+    }
+    auto new_radial_1 =
+        RadialFunctionSetKokkos<Precision>(h, R1_values, R1_derivatives, x0);
+    auto new_A0_splines = RadialFunctionSetKokkos<double>();
+    auto new_A1_splines = RadialFunctionSetKokkos<double>();
+    if (A0_scaled)
+        new_A0_splines =
+            RadialFunctionSetKokkos<double>(h, A0_values, A0_derivatives, x0);
+    if (A1_scaled)
+        new_A1_splines =
+            RadialFunctionSetKokkos<double>(h, A1_values, A1_derivatives, x0);
+
+    auto new_type_to_active = Kokkos::View<int*>("compact type_to_active", atomic_numbers_host.size());
+    auto h_type_to_active = Kokkos::create_mirror_view(new_type_to_active);
+    Kokkos::deep_copy(h_type_to_active, -1);
+    auto new_active_atomic_numbers = std::vector<int>();
+    new_active_atomic_numbers.reserve(active_count);
+    for (int active=0; active<active_count; ++active) {
+        h_type_to_active(node_types[active]) = active;
+        new_active_atomic_numbers.push_back(atomic_numbers_host[node_types[active]]);
+    }
+    Kokkos::deep_copy(new_type_to_active, h_type_to_active);
+    Kokkos::fence();
+
+    R0_spline_h = h;
+    R0_spline_min = x0;
+    R0_spline_coefficients = new_R0_coefficients;
+    radial_1 = std::move(new_radial_1);
+    if (A0_scaled)
+        A0_splines = std::move(new_A0_splines);
+    if (A1_scaled)
+        A1_splines = std::move(new_A1_splines);
+    type_to_active = new_type_to_active;
+    num_active_types = active_count;
+    active_atomic_numbers = std::move(new_active_atomic_numbers);
+    active_types = std::move(node_types);
+}
+
+template <typename Precision>
 void MACEKokkos<Precision>::compute_node_energies_forces(
     const int num_nodes,
     Kokkos::View<const int*> node_types,
@@ -149,11 +304,9 @@ void MACEKokkos<Precision>::compute_node_energies_forces(
     Kokkos::View<const double*> xyz,
     Kokkos::View<const double*> r)
 {
-    field_state_current = false;
-
-    if (node_energies.size() < num_nodes)
+    if (node_energies.size() != num_nodes)
         Kokkos::realloc(node_energies, num_nodes);
-    if (node_forces.size() < xyz.size())
+    if (node_forces.size() != xyz.size())
         Kokkos::realloc(node_forces, xyz.size());
     Kokkos::deep_copy(node_energies, 0.0);
     Kokkos::deep_copy(node_forces, 0.0);
@@ -206,9 +359,9 @@ void MACEKokkos<Precision>::compute_node_energies_forces_field(
     if (!has_field_coupling)
         throw std::invalid_argument("MACEKokkos::compute_node_energies_forces_field requires field coupling.");
 
-    if (node_energies.size() < num_nodes)
+    if (node_energies.size() != num_nodes)
         Kokkos::realloc(node_energies, num_nodes);
-    if (node_forces.size() < xyz.size())
+    if (node_forces.size() != xyz.size())
         Kokkos::realloc(node_forces, xyz.size());
     Kokkos::deep_copy(node_energies, 0.0);
     Kokkos::deep_copy(node_forces, 0.0);
@@ -250,15 +403,6 @@ void MACEKokkos<Precision>::compute_node_energies_forces_field(
     reverse_A0_scaled(num_nodes, node_types, num_neigh, neigh_types, xyz, r);
     reverse_A0(num_nodes, node_types, num_neigh, neigh_types, xyz, r);
 
-    if (electric_field.size() == 3) {
-        auto h_electric_field =
-            Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), electric_field);
-        for (int component=0; component<3; ++component)
-            current_electric_field[component] = h_electric_field(component);
-        field_state_current = true;
-    } else {
-        field_state_current = false;
-    }
 }
 
 template <typename Precision>
@@ -291,26 +435,17 @@ void MACEKokkos<Precision>::compute_electric_field_hessian(
     Kokkos::deep_copy(h_electric_field_hessian, 0.0);
     Kokkos::deep_copy(h_electric_field_force_derivative, 0.0);
 
-    bool use_cached_base_state =
-        field_state_current
-        && electric_field_adj.size() == 3
-        && node_forces.size() >= xyz.size()
-        && node_energies.size() >= num_nodes;
-    for (int component=0; component<3; ++component)
-        use_cached_base_state =
-            use_cached_base_state
-            && current_electric_field[component] == h_electric_field(component);
-
-    if (!use_cached_base_state)
-        compute_node_energies_forces_field(
-            num_nodes,
-            node_types,
-            num_neigh,
-            neigh_indices,
-            neigh_types,
-            xyz,
-            r,
-            electric_field);
+    // Arbitrary Kokkos views do not carry a stable graph identity. Recompute the
+    // baseline so a previous structure cannot contaminate finite differences.
+    compute_node_energies_forces_field(
+        num_nodes,
+        node_types,
+        num_neigh,
+        neigh_indices,
+        neigh_types,
+        xyz,
+        r,
+        electric_field);
     Kokkos::View<double*, Kokkos::HostSpace> h_base_adj(
         "h_base_adj", electric_field_adj.size());
     Kokkos::View<double*, Kokkos::HostSpace> h_base_forces(
@@ -359,9 +494,6 @@ void MACEKokkos<Precision>::compute_electric_field_hessian(
     Kokkos::deep_copy(electric_field_adj, h_base_adj);
     Kokkos::deep_copy(node_forces, h_base_forces);
     Kokkos::deep_copy(node_energies, h_base_energies);
-    for (int component=0; component<3; ++component)
-        current_electric_field[component] = h_electric_field(component);
-    field_state_current = true;
 }
 
 template <typename Precision>
@@ -394,6 +526,8 @@ void MACEKokkos<Precision>::compute_R0(
     Kokkos::View<const int*> neigh_types,
     Kokkos::View<const double*> r)
 {
+    if (num_active_types == 0)
+        throw std::runtime_error("MACEKokkos radial cache has not been prepared.");
     if (r.size() > R0.extent(0)) {
         Kokkos::realloc(R0, r.size(), (l_max+1)*num_channels);
         Kokkos::realloc(R0_deriv, r.size(), (l_max+1)*num_channels);
@@ -425,9 +559,12 @@ void MACEKokkos<Precision>::compute_R0(
 
     const int l_max = this->l_max;
     const int num_channels = this->num_channels;
-    const auto num_types = atomic_numbers.size();
+    const auto num_types = num_active_types;
+    const auto type_to_active = this->type_to_active;
     const auto h = R0_spline_h;
+    const auto x0 = R0_spline_min;
     const auto c = R0_spline_coefficients;
+    const auto num_intervals = c.extent(1);
     auto R0 = this->R0;
     auto R0_deriv = this->R0_deriv;
 
@@ -436,12 +573,19 @@ void MACEKokkos<Precision>::compute_R0(
         Kokkos::TeamPolicy<>(r.size(), Kokkos::AUTO, 32),
         KOKKOS_LAMBDA (Kokkos::TeamPolicy<>::member_type team_member) {
             const int ij = team_member.league_rank();
-            const int type_i = node_types(i_list(ij));
-            const int type_j = neigh_types(ij);
+            const int type_i = type_to_active(node_types(i_list(ij)));
+            const int type_j = type_to_active(neigh_types(ij));
             const int type_ij = type_i*num_types+type_j;
             // compute x, x^2, x^3
-            const int n = static_cast<int>(r(ij)/h); // TODO: bounds checking?
-            const double x = r(ij) - h*n;
+            int n = static_cast<int>(Kokkos::floor((r(ij)-x0)/h));
+            double x = r(ij)-x0-h*n;
+            if (n < 0) {
+                n = 0;
+                x = 0.0;
+            } else if (n >= num_intervals) {
+                n = num_intervals-1;
+                x = h;
+            }
             const double xx = x*x;
             const double xxx = xx*x;
             const double two_x = 2*x;
@@ -473,7 +617,9 @@ void MACEKokkos<Precision>::compute_R1(
         Kokkos::realloc(R1, r.size(), Phi1_l.size()*num_channels);
         Kokkos::realloc(R1_deriv, r.size(), Phi1_l.size()*num_channels);
     }
-    radial_1.evaluate(num_nodes, node_types, num_neigh, neigh_types, r, R1, R1_deriv);
+    radial_1.evaluate(
+        num_nodes, node_types, num_neigh, neigh_types,
+        type_to_active, num_active_types, r, R1, R1_deriv);
     Kokkos::fence();
 }
 
@@ -722,7 +868,9 @@ void MACEKokkos<Precision>::compute_A0_scaled(
         Kokkos::realloc(A0_spline_values, r.size(), 1);
         Kokkos::realloc(A0_spline_derivs, r.size(), 1);
     }
-    A0_splines.evaluate(num_nodes, node_types, num_neigh, neigh_types, r, A0_spline_values, A0_spline_derivs);
+    A0_splines.evaluate(
+        num_nodes, node_types, num_neigh, neigh_types,
+        type_to_active, num_active_types, r, A0_spline_values, A0_spline_derivs);
 
     Kokkos::View<int*> first_neigh("first_neigh", num_nodes);
     Kokkos::parallel_scan("Compute first_neigh",
@@ -1574,7 +1722,7 @@ void MACEKokkos<Precision>::reverse_Phi1(
 {
     if (dPhi1r.extent(0) < Phi1r.extent(0))
         Kokkos::realloc(dPhi1r, Phi1r.extent(0), Phi1r.extent(1), Phi1r.extent(2)); 
-    if (node_forces.size() < xyz.size())
+    if (node_forces.size() != xyz.size())
         Kokkos::resize(node_forces, xyz.size());
     if (H1_adj.extent(0) < H1.extent(0))
         Kokkos::resize(H1_adj, H1.extent(0), H1.extent(1), H1.extent(2));
@@ -1765,7 +1913,9 @@ void MACEKokkos<Precision>::compute_A1_scaled(
         Kokkos::realloc(A1_spline_values, r.size(), 1);
         Kokkos::realloc(A1_spline_derivs, r.size(), 1);
     }
-    A1_splines.evaluate(num_nodes, node_types, num_neigh, neigh_types, r, A1_spline_values, A1_spline_derivs);
+    A1_splines.evaluate(
+        num_nodes, node_types, num_neigh, neigh_types,
+        type_to_active, num_active_types, r, A1_spline_values, A1_spline_derivs);
 
     // compute first_neigh
     Kokkos::View<int*> first_neigh("first_neigh", num_nodes);
@@ -2199,8 +2349,11 @@ void MACEKokkos<Precision>::load_from_json(std::string filename)
     num_lm = (l_max+1)*(l_max+1);
     L_max = file["L_max"];
     num_LM = (L_max+1)*(L_max+1);
-    atomic_numbers = toKokkosView("atomic_numbers", file["atomic_numbers"].get<std::vector<int>>());
+    atomic_numbers_host = file["atomic_numbers"].get<std::vector<int>>();
+    atomic_numbers = toKokkosView("atomic_numbers", atomic_numbers_host);
     atomic_energies = toKokkosView("atomic_energies", file["atomic_energies"].get<std::vector<double>>());
+    H0_weights_host = file["H0_weights"].get<std::vector<double>>();
+    A0_weights_host = file["A0_weights"].get<std::vector<std::vector<std::vector<double>>>>();
 
     // ZBL
     has_zbl = file["has_zbl"].get<bool>();
@@ -2212,86 +2365,98 @@ void MACEKokkos<Precision>::load_from_json(std::string filename)
             file["zbl_covalent_radii"].get<std::vector<double>>(),
             file["zbl_p"].get<int>());
 
-    // R0
-    const double spl_h = file["radial_spline_h"];
-    auto spl_values_0 = file["radial_spline_values_0"].get<std::vector<std::vector<std::vector<double>>>>();
-    auto spl_derivs_0 = file["radial_spline_derivs_0"].get<std::vector<std::vector<std::vector<double>>>>();
-    auto c = Kokkos::View<Precision****,Kokkos::LayoutRight>(
-        "c", atomic_numbers.size()*atomic_numbers.size(), spl_values_0[0][0].size()-1, 4, (l_max+1)*num_channels);
-    auto h_c = Kokkos::create_mirror_view(c);
-    for (int a=0; a<atomic_numbers.size(); ++a) {
-        for (int b=0; b<atomic_numbers.size(); ++b) {
-            const int ab = a*atomic_numbers.size()+b;
-            const int ab_unordered = (a <= b)
-                ? a*(2*atomic_numbers.size()-a-1)/2 + b
-                : b*(2*atomic_numbers.size()-b-1)/2 + a;
-            auto spl_values = spl_values_0[ab_unordered];
-            auto spl_derivs = spl_derivs_0[ab_unordered];
-            for (int i=0; i<spl_values_0[0][0].size()-1; ++i) {
-                for (int lk=0; lk<(l_max+1)*num_channels; ++lk) {
-                    h_c(ab,i,0,lk) = spl_values[lk][i];
-                    h_c(ab,i,1,lk) = spl_derivs[lk][i];
-                    h_c(ab,i,2,lk) = (-3*spl_values[lk][i] -2*spl_h*spl_derivs[lk][i]
-                                        + 3*spl_values[lk][i+1] - spl_h*spl_derivs[lk][i+1]) / (spl_h*spl_h);
-                    h_c(ab,i,3,lk) = (2*spl_values[lk][i] + spl_h*spl_derivs[lk][i]
-                                        - 2*spl_values[lk][i+1] + spl_h*spl_derivs[lk][i+1]) / (spl_h*spl_h*spl_h);
-                }
-            }
-            // add H0_weights
-            auto H0_weights = file["H0_weights"].get<std::vector<double>>();
-            for (int i=0; i<spl_values_0[0][0].size()-1; ++i) {
-                for (int lk=0; lk<(l_max+1)*num_channels; ++lk) {
-                    const int k = lk % num_channels;
-                    h_c(ab,i,0,lk) *= H0_weights[b*num_channels+k];
-                    h_c(ab,i,1,lk) *= H0_weights[b*num_channels+k]; 
-                    h_c(ab,i,2,lk) *= H0_weights[b*num_channels+k]; 
-                    h_c(ab,i,3,lk) *= H0_weights[b*num_channels+k]; 
-                }
-            }
-            // add A0_weights
-            auto A0_weights = file["A0_weights"].get<std::vector<std::vector<std::vector<double>>>>();
-            for (int i=0; i<spl_values_0[0][0].size()-1; ++i) {
-                for (int l=0; l<=l_max; ++l) {
-                    auto c0 = std::vector<double>(&h_c(ab,i,0,l*num_channels), &h_c(ab,i,0,l*num_channels)+num_channels);
-                    auto c1 = std::vector<double>(&h_c(ab,i,1,l*num_channels), &h_c(ab,i,1,l*num_channels)+num_channels);
-                    auto c2 = std::vector<double>(&h_c(ab,i,2,l*num_channels), &h_c(ab,i,2,l*num_channels)+num_channels);
-                    auto c3 = std::vector<double>(&h_c(ab,i,3,l*num_channels), &h_c(ab,i,3,l*num_channels)+num_channels);
-                    for (int k=0; k<num_channels; ++k) {
-                        h_c(ab,i,0,l*num_channels+k) = 0.0;
-                        h_c(ab,i,1,l*num_channels+k) = 0.0;
-                        h_c(ab,i,2,l*num_channels+k) = 0.0;
-                        h_c(ab,i,3,l*num_channels+k) = 0.0;
-                        for (int kp=0; kp<num_channels; ++kp) {
-                            h_c(ab,i,0,l*num_channels+k) += A0_weights[a][l][kp*num_channels+k]*c0[kp];
-                            h_c(ab,i,1,l*num_channels+k) += A0_weights[a][l][kp*num_channels+k]*c1[kp];
-                            h_c(ab,i,2,l*num_channels+k) += A0_weights[a][l][kp*num_channels+k]*c2[kp];
-                            h_c(ab,i,3,l*num_channels+k) += A0_weights[a][l][kp*num_channels+k]*c3[kp];
+    A0_scaled = file["A0_scaled"].get<bool>();
+    const int format_version = file.value("symmetrix_format_version", 1);
+    uses_compact_radial = format_version == 2;
+    if (uses_compact_radial) {
+        if (file.value("radial_representation", std::string()) != "compact")
+            throw std::invalid_argument("Symmetrix format version 2 requires compact radial data.");
+        compact_radial_model = std::make_unique<CompactRadialModel>(
+            file.at("compact_radial").dump(), atomic_numbers_host, r_cut);
+        if (A0_scaled != compact_radial_model->has_A0())
+            throw std::invalid_argument("Compact radial A0 network does not match A0_scaled.");
+        R0_spline_h = compact_radial_model->spline_h();
+        R0_spline_min = compact_radial_model->spline_min();
+        type_to_active = Kokkos::View<int*>("compact type_to_active", atomic_numbers.size());
+        Kokkos::deep_copy(type_to_active, -1);
+    } else if (format_version == 1) {
+        const double spl_h = file["radial_spline_h"];
+        const double spl_min = file.value("radial_spline_min", 0.0);
+        auto spl_values_0 = file["radial_spline_values_0"].get<std::vector<std::vector<std::vector<double>>>>();
+        auto spl_derivs_0 = file["radial_spline_derivs_0"].get<std::vector<std::vector<std::vector<double>>>>();
+        auto c = Kokkos::View<Precision****,Kokkos::LayoutRight>(
+            "c", atomic_numbers.size()*atomic_numbers.size(), spl_values_0[0][0].size()-1, 4, (l_max+1)*num_channels);
+        auto h_c = Kokkos::create_mirror_view(c);
+        for (int a=0; a<atomic_numbers.size(); ++a) {
+            for (int b=0; b<atomic_numbers.size(); ++b) {
+                const int ab = a*atomic_numbers.size()+b;
+                const int ab_unordered = (a <= b)
+                    ? a*(2*atomic_numbers.size()-a-1)/2+b
+                    : b*(2*atomic_numbers.size()-b-1)/2+a;
+                const auto& spl_values = spl_values_0[ab_unordered];
+                const auto& spl_derivs = spl_derivs_0[ab_unordered];
+                for (int i=0; i<spl_values_0[0][0].size()-1; ++i) {
+                    for (int lk=0; lk<(l_max+1)*num_channels; ++lk) {
+                        h_c(ab,i,0,lk) = spl_values[lk][i];
+                        h_c(ab,i,1,lk) = spl_derivs[lk][i];
+                        h_c(ab,i,2,lk) = (-3*spl_values[lk][i]-2*spl_h*spl_derivs[lk][i]
+                            +3*spl_values[lk][i+1]-spl_h*spl_derivs[lk][i+1])/(spl_h*spl_h);
+                        h_c(ab,i,3,lk) = (2*spl_values[lk][i]+spl_h*spl_derivs[lk][i]
+                            -2*spl_values[lk][i+1]+spl_h*spl_derivs[lk][i+1])/(spl_h*spl_h*spl_h);
+                    }
+                    for (int lk=0; lk<(l_max+1)*num_channels; ++lk) {
+                        const int k = lk%num_channels;
+                        for (int coefficient=0; coefficient<4; ++coefficient)
+                            h_c(ab,i,coefficient,lk) *= H0_weights_host[b*num_channels+k];
+                    }
+                    for (int l=0; l<=l_max; ++l) {
+                        auto original = std::vector<double>(4*num_channels);
+                        for (int coefficient=0; coefficient<4; ++coefficient)
+                            for (int k=0; k<num_channels; ++k)
+                                original[coefficient*num_channels+k] = h_c(ab,i,coefficient,l*num_channels+k);
+                        for (int coefficient=0; coefficient<4; ++coefficient) {
+                            for (int k=0; k<num_channels; ++k) {
+                                h_c(ab,i,coefficient,l*num_channels+k) = 0.0;
+                                for (int kp=0; kp<num_channels; ++kp)
+                                    h_c(ab,i,coefficient,l*num_channels+k) +=
+                                        A0_weights_host[a][l][kp*num_channels+k]
+                                        * original[coefficient*num_channels+kp];
+                            }
                         }
                     }
                 }
             }
         }
-    }
-    Kokkos::deep_copy(c, h_c);
-    R0_spline_h = spl_h;
-    R0_spline_coefficients = c;
+        Kokkos::deep_copy(c, h_c);
+        R0_spline_h = spl_h;
+        R0_spline_min = spl_min;
+        R0_spline_coefficients = c;
 
-    // R1
-    auto spl_values_1 = file["radial_spline_values_1"].get<std::vector<std::vector<std::vector<double>>>>();
-    auto spl_derivs_1 = file["radial_spline_derivs_1"].get<std::vector<std::vector<std::vector<double>>>>();
-    radial_1 = RadialFunctionSetKokkos<Precision>(spl_h, spl_values_1, spl_derivs_1);
+        auto spl_values_1 = file["radial_spline_values_1"].get<std::vector<std::vector<std::vector<double>>>>();
+        auto spl_derivs_1 = file["radial_spline_derivs_1"].get<std::vector<std::vector<std::vector<double>>>>();
+        radial_1 =
+            RadialFunctionSetKokkos<Precision>(spl_h, spl_values_1, spl_derivs_1, spl_min);
 
-    // A0 scaling
-    A0_scaled = file["A0_scaled"].get<bool>();
-    if (A0_scaled) {
-        const double A0_spline_h = file["A0_spline_h"];
-        auto A0_spline_values = std::vector<std::vector<std::vector<double>>>();
-        for (auto& values : file["A0_spline_values"].get<std::vector<std::vector<double>>>())
-            A0_spline_values.push_back({values});  // adds dimension to reach 3d
-        auto A0_spline_derivs = std::vector<std::vector<std::vector<double>>>();
-        for (auto& derivs : file["A0_spline_derivs"].get<std::vector<std::vector<double>>>())
-            A0_spline_derivs.push_back({derivs});  // adds dimension to reach 3d
-        A0_splines = RadialFunctionSetKokkos<double>(A0_spline_h, A0_spline_values, A0_spline_derivs);
+        if (A0_scaled) {
+            const double A0_spline_h = file["A0_spline_h"];
+            auto A0_spline_values = std::vector<std::vector<std::vector<double>>>();
+            for (auto& values : file["A0_spline_values"].get<std::vector<std::vector<double>>>())
+                A0_spline_values.push_back({values});
+            auto A0_spline_derivs = std::vector<std::vector<std::vector<double>>>();
+            for (auto& derivs : file["A0_spline_derivs"].get<std::vector<std::vector<double>>>())
+                A0_spline_derivs.push_back({derivs});
+            const double A0_spline_min = file.value("A0_spline_min", 0.0);
+            A0_splines = RadialFunctionSetKokkos<double>(
+                A0_spline_h, A0_spline_values, A0_spline_derivs, A0_spline_min);
+        }
+
+        active_types.resize(atomic_numbers.size());
+        std::iota(active_types.begin(), active_types.end(), 0);
+        active_atomic_numbers = atomic_numbers_host;
+        num_active_types = active_types.size();
+        type_to_active = toKokkosView("type_to_active", active_types);
+    } else {
+        throw std::invalid_argument("Unsupported Symmetrix model format version.");
     }
 
     // M0 weights and monomials
@@ -2556,7 +2721,7 @@ void MACEKokkos<Precision>::load_from_json(std::string filename)
 
     // A1 scaling
     A1_scaled = file["A1_scaled"].get<bool>();
-    if (A1_scaled) {
+    if (A1_scaled && !uses_compact_radial) {
         const double A1_spline_h = file["A1_spline_h"];
         auto A1_spline_values = std::vector<std::vector<std::vector<double>>>();
         for (auto& values : file["A1_spline_values"].get<std::vector<std::vector<double>>>())
@@ -2564,8 +2729,12 @@ void MACEKokkos<Precision>::load_from_json(std::string filename)
         auto A1_spline_derivs = std::vector<std::vector<std::vector<double>>>();
         for (auto& derivs : file["A1_spline_derivs"].get<std::vector<std::vector<double>>>())
             A1_spline_derivs.push_back({derivs});  // adds dimension to reach 3d
-        A1_splines = RadialFunctionSetKokkos<double>(A1_spline_h, A1_spline_values, A1_spline_derivs);
+        const double A1_spline_min = file.value("A1_spline_min", 0.0);
+        A1_splines = RadialFunctionSetKokkos<double>(
+            A1_spline_h, A1_spline_values, A1_spline_derivs, A1_spline_min);
     }
+    if (uses_compact_radial && A1_scaled != compact_radial_model->has_A1())
+        throw std::invalid_argument("Compact radial A1 network does not match A1_scaled.");
 
     // M1 weights and monomials
     auto M1_weights = file["M1_weights"].get<std::map<std::string,std::map<std::string,std::vector<double>>>>();

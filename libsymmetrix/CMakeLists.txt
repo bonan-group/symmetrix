@@ -24,6 +24,7 @@ endif()
 # ----- libsymmetrix -----
 
 set(SYMMETRIX_SOURCE_FILES
+    source/compact_radial.cpp
     source/cubic_spline.cpp
     source/cubic_spline_set.cpp
     source/mace.cpp
@@ -74,4 +75,3 @@ if (SYMMETRIX_SPHERICART_CUDA)
     message(STATUS "Symmetrix: Will use CUDA version of sphericart.")
     target_compile_definitions(symmetrix PRIVATE SYMMETRIX_SPHERICART_CUDA)
 endif()
-

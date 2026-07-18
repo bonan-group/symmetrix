@@ -1,4 +1,5 @@
 from pathlib import Path
+import hashlib
 
 
 def test_cached_model_path_uses_external_cache_and_reuses_download(monkeypatch, tmp_path):
@@ -40,3 +41,32 @@ def test_cached_model_path_accepts_existing_env_override(monkeypatch, tmp_path):
     )
 
     assert path == override
+
+
+def test_cached_model_path_replaces_corrupt_cached_download(monkeypatch, tmp_path):
+    from model_downloads import cached_model_path
+
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    destination = cache_dir / "example.model"
+    destination.write_bytes(b"corrupt")
+    expected = b"verified model"
+    expected_sha256 = hashlib.sha256(expected).hexdigest()
+    calls = []
+
+    def fake_urlretrieve(url, path):
+        calls.append((url, Path(path)))
+        Path(path).write_bytes(expected)
+        return str(path), None
+
+    monkeypatch.setenv("SYMMETRIX_TEST_MODEL_CACHE_DIR", str(cache_dir))
+    monkeypatch.setattr("model_downloads.urlretrieve", fake_urlretrieve)
+
+    path = cached_model_path(
+        "example.model",
+        "https://example.invalid/example.model",
+        sha256=expected_sha256,
+    )
+
+    assert path.read_bytes() == expected
+    assert calls == [("https://example.invalid/example.model", destination)]

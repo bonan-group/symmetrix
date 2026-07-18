@@ -1,3 +1,4 @@
+#include <cmath>
 #include <stdexcept>
 #include <vector>
 
@@ -6,19 +7,28 @@
 CubicSpline::CubicSpline(
     double h,
     std::vector<double> nodal_values,
-    std::vector<double> nodal_derivs)
+    std::vector<double> nodal_derivs,
+    double x0)
     : h(h),
+      x0(x0),
       c(generate_coefficients(h, nodal_values, nodal_derivs))
 {
 }
 
 double CubicSpline::evaluate(double r)
 {
-    const int i = static_cast<int>(r / h);
-    // TODO: something better with this bounds checking
-    if (i<0 or i>=c.size()/4)
+    const int num_intervals = c.size()/4;
+    int i = static_cast<int>(std::floor((r-x0)/h));
+    double x = r-x0-h*i;
+    if ((i < 0 || i >= num_intervals) && x0 == 0.0)
         throw std::invalid_argument("Out of bounds in CubicSpline::evaluate.");
-    const double x = r - h*i;
+    if (i < 0) {
+        i = 0;
+        x = 0.0;
+    } else if (i >= num_intervals) {
+        i = num_intervals-1;
+        x = h;
+    }
     const double xx = x*x;
     const double xxx = xx*x;
     const int i4 = 4*i;
@@ -28,11 +38,18 @@ double CubicSpline::evaluate(double r)
 
 std::tuple<double,double> CubicSpline::evaluate_deriv(double r)
 {
-    const int i = static_cast<int>(r / h);
-    // TODO: something better with this bounds checking
-    if (i<0 or i>=c.size()/4)
+    const int num_intervals = c.size()/4;
+    int i = static_cast<int>(std::floor((r-x0)/h));
+    double x = r-x0-h*i;
+    if ((i < 0 || i >= num_intervals) && x0 == 0.0)
         throw std::invalid_argument("Out of bounds in CubicSpline::evaluate_deriv.");
-    const double x = r - h*i;
+    if (i < 0) {
+        i = 0;
+        x = 0.0;
+    } else if (i >= num_intervals) {
+        i = num_intervals-1;
+        x = h;
+    }
     const double xx = x*x;
     const double xxx = xx*x;
     const int i4 = 4*i;
@@ -42,11 +59,18 @@ std::tuple<double,double> CubicSpline::evaluate_deriv(double r)
 
 std::tuple<double,double> CubicSpline::evaluate_deriv_divided(double r)
 {
-    const int i = static_cast<int>(r / h);
-    // TODO: something better with this bounds checking
-    if (i<0 or i>=c.size()/4)
+    const int num_intervals = c.size()/4;
+    int i = static_cast<int>(std::floor((r-x0)/h));
+    double x = r-x0-h*i;
+    if ((i < 0 || i >= num_intervals) && x0 == 0.0)
         throw std::invalid_argument("Out of bounds in CubicSpline::evaluate_deriv.");
-    const double x = r - h*i;
+    if (i < 0) {
+        i = 0;
+        x = 0.0;
+    } else if (i >= num_intervals) {
+        i = num_intervals-1;
+        x = h;
+    }
     const double xx = x*x;
     const double xxx = xx*x;
     const int i4 = 4*i;

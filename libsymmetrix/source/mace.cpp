@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <iostream> //TODO
 #include <fstream>
 #include <cmath>
@@ -14,6 +15,101 @@
 MACE::MACE(std::string filename)
 {
     load_from_json(filename);
+}
+
+void MACE::prepare_active_types(std::span<const int> node_types)
+{
+    if (!uses_compact_radial)
+        return;
+
+    auto requested_types = std::vector<int>(node_types.begin(), node_types.end());
+    std::sort(requested_types.begin(), requested_types.end());
+    requested_types.erase(
+        std::unique(requested_types.begin(), requested_types.end()),
+        requested_types.end());
+    if (requested_types.empty())
+        throw std::invalid_argument("MACE compact radial cache requires at least one active type.");
+    for (const int type : requested_types)
+        if (type < 0 || type >= atomic_numbers.size())
+            throw std::out_of_range("MACE active type index is out of range.");
+    if (requested_types == active_types)
+        return;
+
+    auto new_spl_set_0 = std::vector<std::unique_ptr<CubicSplineSet>>();
+    auto new_spl_set_1 = std::vector<std::unique_ptr<CubicSplineSet>>();
+    auto new_A0_splines = std::vector<CubicSpline>();
+    auto new_A1_splines = std::vector<CubicSpline>();
+    const int pair_count = requested_types.size()*(requested_types.size()+1)/2;
+    new_spl_set_0.reserve(pair_count);
+    new_spl_set_1.reserve(pair_count);
+    if (A0_scaled)
+        new_A0_splines.reserve(pair_count);
+    if (A1_scaled)
+        new_A1_splines.reserve(pair_count);
+
+    const double h = compact_radial_model->spline_h();
+    const double x0 = compact_radial_model->spline_min();
+    for (int local_i=0; local_i<requested_types.size(); ++local_i) {
+        for (int local_j=local_i; local_j<requested_types.size(); ++local_j) {
+            auto tables = compact_radial_model->materialize_pair(
+                requested_types[local_i], requested_types[local_j]);
+            const auto expected_R0 = static_cast<std::size_t>((l_max+1)*num_channels);
+            const auto expected_R1 = static_cast<std::size_t>(Phi1_l.size()*num_channels);
+            if (tables.R0.values.size() != expected_R0
+                || tables.R0.derivatives.size() != expected_R0)
+                throw std::runtime_error("Compact radial R0 output has an invalid size.");
+            if (tables.R1.values.size() != expected_R1
+                || tables.R1.derivatives.size() != expected_R1)
+                throw std::runtime_error("Compact radial R1 output has an invalid size.");
+            new_spl_set_0.push_back(std::make_unique<CubicSplineSet>(
+                h, std::move(tables.R0.values), std::move(tables.R0.derivatives), x0));
+            new_spl_set_1.push_back(std::make_unique<CubicSplineSet>(
+                h, std::move(tables.R1.values), std::move(tables.R1.derivatives), x0));
+            if (A0_scaled) {
+                if (tables.A0.values.size() != 1 || tables.A0.derivatives.size() != 1)
+                    throw std::runtime_error("Compact radial A0 network must have one output.");
+                new_A0_splines.emplace_back(
+                    h, std::move(tables.A0.values[0]), std::move(tables.A0.derivatives[0]), x0);
+            }
+            if (A1_scaled) {
+                if (tables.A1.values.size() != 1 || tables.A1.derivatives.size() != 1)
+                    throw std::runtime_error("Compact radial A1 network must have one output.");
+                new_A1_splines.emplace_back(
+                    h, std::move(tables.A1.values[0]), std::move(tables.A1.derivatives[0]), x0);
+            }
+        }
+    }
+
+    auto new_type_to_active = std::vector<int>(atomic_numbers.size(), -1);
+    auto new_active_atomic_numbers = std::vector<int>();
+    new_active_atomic_numbers.reserve(requested_types.size());
+    for (int active=0; active<requested_types.size(); ++active) {
+        new_type_to_active[requested_types[active]] = active;
+        new_active_atomic_numbers.push_back(atomic_numbers[requested_types[active]]);
+    }
+
+    spl_set_0 = std::move(new_spl_set_0);
+    spl_set_1 = std::move(new_spl_set_1);
+    A0_splines = std::move(new_A0_splines);
+    A1_splines = std::move(new_A1_splines);
+    type_to_active = std::move(new_type_to_active);
+    active_atomic_numbers = std::move(new_active_atomic_numbers);
+    active_types = std::move(requested_types);
+}
+
+int MACE::radial_pair_index(int type_i, int type_j) const
+{
+    if (type_i < 0 || type_i >= type_to_active.size()
+        || type_j < 0 || type_j >= type_to_active.size())
+        throw std::out_of_range("MACE radial type index is out of range.");
+    const int active_i = type_to_active[type_i];
+    const int active_j = type_to_active[type_j];
+    if (active_i < 0 || active_j < 0)
+        throw std::runtime_error("MACE radial cache is not prepared for an active type.");
+    const int num_active = active_types.size();
+    return (active_i <= active_j)
+        ? active_i*(2*num_active-active_i-1)/2+active_j
+        : active_j*(2*num_active-active_j-1)/2+active_i;
 }
 
 void MACE::compute_node_energies_forces(
@@ -173,9 +269,7 @@ void MACE::compute_electric_field_hessian(
             const int type_i = node_types[i];
             for (int j=0; j<num_neigh[i]; ++j) {
                 const int type_j = neigh_types[ij];
-                const int type_ij = (type_i <= type_j)
-                    ? type_i*(2*atomic_numbers.size()-type_i-1)/2 + type_j
-                    : type_j*(2*atomic_numbers.size()-type_j-1)/2 + type_i;
+                const int type_ij = radial_pair_index(type_i, type_j);
                 A1_scale_factors[i] += A1_splines[type_ij].evaluate(r[ij]);
                 ij += 1;
             }
@@ -189,9 +283,7 @@ void MACE::compute_electric_field_hessian(
             const int type_i = node_types[i];
             for (int j=0; j<num_neigh[i]; ++j) {
                 const int type_j = neigh_types[ij];
-                const int type_ij = (type_i <= type_j)
-                    ? type_i*(2*atomic_numbers.size()-type_i-1)/2 + type_j
-                    : type_j*(2*atomic_numbers.size()-type_j-1)/2 + type_i;
+                const int type_ij = radial_pair_index(type_i, type_j);
                 A0_scale_factors[i] += A0_splines[type_ij].evaluate(r[ij]);
                 ij += 1;
             }
@@ -447,9 +539,7 @@ void MACE::compute_electric_field_hessian(
                 }
                 for (int j=0; j<num_neigh[i]; ++j) {
                     const int type_j = neigh_types[ij_scale];
-                    const int type_ij = (type_i <= type_j)
-                        ? type_i*(2*atomic_numbers.size()-type_i-1)/2 + type_j
-                        : type_j*(2*atomic_numbers.size()-type_j-1)/2 + type_i;
+                    const int type_ij = radial_pair_index(type_i, type_j);
                     auto [f,d] = A1_splines[type_ij].evaluate_deriv(r[ij_scale]);
                     auto xyz_ij = xyz.data()+ij_scale*3;
                     auto force_deriv_ij =
@@ -744,9 +834,7 @@ void MACE::compute_electric_field_hessian(
                     dA0_dot_A0_dot += A0_adj_dot_i[lmk] * A0_i[lmk];
                 for (int j=0; j<num_neigh[i]; ++j) {
                     const int type_j = neigh_types[ij_scale];
-                    const int type_ij = (type_i <= type_j)
-                        ? type_i*(2*atomic_numbers.size()-type_i-1)/2 + type_j
-                        : type_j*(2*atomic_numbers.size()-type_j-1)/2 + type_i;
+                    const int type_ij = radial_pair_index(type_i, type_j);
                     auto [f,d] = A0_splines[type_ij].evaluate_deriv(r[ij_scale]);
                     auto xyz_ij = xyz.data()+ij_scale*3;
                     auto force_deriv_ij =
@@ -844,6 +932,9 @@ void MACE::compute_R0(
     std::span<const int> neigh_types,
     std::span<const double> r)
 {
+    if (spl_set_0.empty())
+        throw std::runtime_error(
+            "MACE compact radial cache is not prepared; call prepare_active_types first.");
     const int num_spl = spl_set_0[0]->num_splines;
     R0.resize(r.size()*num_spl);
     R0_deriv.resize(R0.size());
@@ -852,9 +943,7 @@ void MACE::compute_R0(
         const int type_i = node_types[i];
         for (int j=0; j<num_neigh[i]; ++j) {
             const int type_j = neigh_types[ij];
-            const int type_ij = (type_i <= type_j)
-                ? type_i*(2*atomic_numbers.size()-type_i-1)/2 + type_j
-                : type_j*(2*atomic_numbers.size()-type_j-1)/2 + type_i;
+            const int type_ij = radial_pair_index(type_i, type_j);
             auto R0_ij = std::span<double>(R0.data()+ij*num_spl,num_spl);
             auto R0_deriv_ij = std::span<double>(R0_deriv.data()+ij*num_spl,num_spl);
             spl_set_0[type_ij]->evaluate_derivs(r[ij], R0_ij, R0_deriv_ij);
@@ -1047,6 +1136,9 @@ void MACE::compute_R1(
     std::span<const int> neigh_types,
     std::span<const double> r)
 {
+    if (spl_set_1.empty())
+        throw std::runtime_error(
+            "MACE compact radial cache is not prepared; call prepare_active_types first.");
     const int num_spl = spl_set_1[0]->num_splines;
     R1.resize(r.size()*num_spl);
     R1_deriv.resize(R1.size());
@@ -1055,9 +1147,7 @@ void MACE::compute_R1(
         const int type_i = node_types[i];
         for (int j=0; j<num_neigh[i]; ++j) {
             const int type_j = neigh_types[ij];
-            const int type_ij = (type_i <= type_j)
-                ? type_i*(2*atomic_numbers.size()-type_i-1)/2 + type_j
-                : type_j*(2*atomic_numbers.size()-type_j-1)/2 + type_i;
+            const int type_ij = radial_pair_index(type_i, type_j);
             auto R1_ij = std::span<double>(R1.data()+ij*num_spl,num_spl);
             auto R1_deriv_ij = std::span<double>(R1_deriv.data()+ij*num_spl,num_spl);
             spl_set_1[type_ij]->evaluate_derivs(r[ij], R1_ij, R1_deriv_ij);
@@ -1235,9 +1325,7 @@ void MACE::compute_A0_scaled(
         double A0_scale_factor = 1.0;
         for (int j=0; j<num_neigh[i]; ++j) {
             const int type_j = neigh_types[ij];
-            const int type_ij = (type_i <= type_j)
-                ? type_i*(2*atomic_numbers.size()-type_i-1)/2 + type_j
-                : type_j*(2*atomic_numbers.size()-type_j-1)/2 + type_i;
+            const int type_ij = radial_pair_index(type_i, type_j);
             A0_scale_factor += A0_splines[type_ij].evaluate(r[ij]);
             ij += 1;
         }
@@ -1266,9 +1354,7 @@ void MACE::reverse_A0_scaled(
         double A0_scale_factor = 1.0;
         for (int j=0; j<num_neigh[i]; ++j) {
             const int type_j = neigh_types[ij];
-            const int type_ij = (type_i <= type_j)
-                ? type_i*(2*atomic_numbers.size()-type_i-1)/2 + type_j
-                : type_j*(2*atomic_numbers.size()-type_j-1)/2 + type_i;
+            const int type_ij = radial_pair_index(type_i, type_j);
             A0_scale_factor += A0_splines[type_ij].evaluate(r[ij]);
             ij += 1;
         }
@@ -1279,9 +1365,7 @@ void MACE::reverse_A0_scaled(
         ij = ij - num_neigh[i];
         for (int j=0; j<num_neigh[i]; ++j) {
             const int type_j = neigh_types[ij];
-            const int type_ij = (type_i <= type_j)
-                ? type_i*(2*atomic_numbers.size()-type_i-1)/2 + type_j
-                : type_j*(2*atomic_numbers.size()-type_j-1)/2 + type_i;
+            const int type_ij = radial_pair_index(type_i, type_j);
             auto [f,d] = A0_splines[type_ij].evaluate_deriv(r[ij]);
             auto xyz_ij = xyz.data()+ij*3;
             auto node_forces_ij = node_forces.data()+ij*3;
@@ -1755,9 +1839,7 @@ void MACE::compute_A1_scaled(
         double A1_scale_factor = 1.0;
         for (int j=0; j<num_neigh[i]; ++j) {
             const int type_j = neigh_types[ij];
-            const int type_ij = (type_i <= type_j)
-                ? type_i*(2*atomic_numbers.size()-type_i-1)/2 + type_j
-                : type_j*(2*atomic_numbers.size()-type_j-1)/2 + type_i;
+            const int type_ij = radial_pair_index(type_i, type_j);
             A1_scale_factor += A1_splines[type_ij].evaluate(r[ij]);
             ij += 1;
         }
@@ -1789,9 +1871,7 @@ void MACE::reverse_A1_scaled(
         double A1_scale_factor = 1.0;
         for (int j=0; j<num_neigh[i]; ++j) {
             const int type_j = neigh_types[ij];
-            const int type_ij = (type_i <= type_j)
-                ? type_i*(2*atomic_numbers.size()-type_i-1)/2 + type_j
-                : type_j*(2*atomic_numbers.size()-type_j-1)/2 + type_i;
+            const int type_ij = radial_pair_index(type_i, type_j);
             A1_scale_factor += A1_splines[type_ij].evaluate(r[ij]);
             ij += 1;
         }
@@ -1802,9 +1882,7 @@ void MACE::reverse_A1_scaled(
         ij = ij - num_neigh[i];
         for (int j=0; j<num_neigh[i]; ++j) {
             const int type_j = neigh_types[ij];
-            const int type_ij = (type_i <= type_j)
-                ? type_i*(2*atomic_numbers.size()-type_i-1)/2 + type_j
-                : type_j*(2*atomic_numbers.size()-type_j-1)/2 + type_i;
+            const int type_ij = radial_pair_index(type_i, type_j);
             auto [f,d] = A1_splines[type_ij].evaluate_deriv(r[ij]);
             auto xyz_ij = xyz.data()+ij*3;
             auto node_forces_ij = node_forces.data()+ij*3;
@@ -1992,16 +2070,35 @@ void MACE::load_from_json(
             file["zbl_covalent_radii"].get<std::vector<double>>(),
             file["zbl_p"].get<int>());
 
-    // Radial splines
-    const double spl_h = file["radial_spline_h"];
-    auto spl_values_0 = file["radial_spline_values_0"].get<std::vector<std::vector<std::vector<double>>>>();
-    auto spl_derivs_0 = file["radial_spline_derivs_0"].get<std::vector<std::vector<std::vector<double>>>>();
-    for (int i=0; i<spl_values_0.size(); ++i)
-        spl_set_0.push_back(std::make_unique<CubicSplineSet>(spl_h, spl_values_0[i], spl_derivs_0[i]));
-    auto spl_values_1 = file["radial_spline_values_1"].get<std::vector<std::vector<std::vector<double>>>>();
-    auto spl_derivs_1 = file["radial_spline_derivs_1"].get<std::vector<std::vector<std::vector<double>>>>();
-    for (int i=0; i<spl_values_1.size(); ++i)
-        spl_set_1.push_back(std::make_unique<CubicSplineSet>(spl_h, spl_values_1[i], spl_derivs_1[i]));
+    // Radial representation
+    const int format_version = file.value("symmetrix_format_version", 1);
+    uses_compact_radial = format_version == 2;
+    if (uses_compact_radial) {
+        if (file.value("radial_representation", std::string()) != "compact")
+            throw std::invalid_argument("Symmetrix format version 2 requires compact radial data.");
+        compact_radial_model = std::make_unique<CompactRadialModel>(
+            file.at("compact_radial").dump(), atomic_numbers, r_cut);
+        type_to_active.assign(atomic_numbers.size(), -1);
+    } else if (format_version == 1) {
+        const double spl_h = file["radial_spline_h"];
+        const double spl_min = file.value("radial_spline_min", 0.0);
+        auto spl_values_0 = file["radial_spline_values_0"].get<std::vector<std::vector<std::vector<double>>>>();
+        auto spl_derivs_0 = file["radial_spline_derivs_0"].get<std::vector<std::vector<std::vector<double>>>>();
+        for (int i=0; i<spl_values_0.size(); ++i)
+            spl_set_0.push_back(std::make_unique<CubicSplineSet>(
+                spl_h, spl_values_0[i], spl_derivs_0[i], spl_min));
+        auto spl_values_1 = file["radial_spline_values_1"].get<std::vector<std::vector<std::vector<double>>>>();
+        auto spl_derivs_1 = file["radial_spline_derivs_1"].get<std::vector<std::vector<std::vector<double>>>>();
+        for (int i=0; i<spl_values_1.size(); ++i)
+            spl_set_1.push_back(std::make_unique<CubicSplineSet>(
+                spl_h, spl_values_1[i], spl_derivs_1[i], spl_min));
+        active_types.resize(atomic_numbers.size());
+        std::iota(active_types.begin(), active_types.end(), 0);
+        type_to_active = active_types;
+        active_atomic_numbers = atomic_numbers;
+    } else {
+        throw std::invalid_argument("Unsupported Symmetrix model format version.");
+    }
 
     // H0
     H0_weights = file["H0_weights"].get<std::vector<double>>();
@@ -2011,13 +2108,17 @@ void MACE::load_from_json(
 
     // A0 scaling
     A0_scaled = file["A0_scaled"].get<bool>();
-    if (A0_scaled) {
+    if (A0_scaled && !uses_compact_radial) {
         const double A0_spline_h = file["A0_spline_h"];
+        const double A0_spline_min = file.value("A0_spline_min", 0.0);
         auto A0_spline_values = file["A0_spline_values"].get<std::vector<std::vector<double>>>();
         auto A0_spline_derivs = file["A0_spline_derivs"].get<std::vector<std::vector<double>>>();
         for (int i=0; i<A0_spline_values.size(); ++i)
-            A0_splines.push_back(CubicSpline(A0_spline_h, A0_spline_values[i], A0_spline_derivs[i]));
+            A0_splines.push_back(CubicSpline(
+                A0_spline_h, A0_spline_values[i], A0_spline_derivs[i], A0_spline_min));
     }
+    if (uses_compact_radial && A0_scaled != compact_radial_model->has_A0())
+        throw std::invalid_argument("Compact radial A0 network does not match A0_scaled.");
 
     // M0
     auto M0_weights = file["M0_weights"].get<std::map<std::string,std::map<std::string,std::map<std::string,std::vector<double>>>>>();
@@ -2139,13 +2240,17 @@ void MACE::load_from_json(
 
     // A1 scaling
     A1_scaled = file["A1_scaled"].get<bool>();
-    if (A1_scaled) {
+    if (A1_scaled && !uses_compact_radial) {
         const double A1_spline_h = file["A1_spline_h"];
+        const double A1_spline_min = file.value("A1_spline_min", 0.0);
         auto A1_spline_values = file["A1_spline_values"].get<std::vector<std::vector<double>>>();
         auto A1_spline_derivs = file["A1_spline_derivs"].get<std::vector<std::vector<double>>>();
         for (int i=0; i<A1_spline_values.size(); ++i)
-            A1_splines.push_back(CubicSpline(A1_spline_h, A1_spline_values[i], A1_spline_derivs[i]));
+            A1_splines.push_back(CubicSpline(
+                A1_spline_h, A1_spline_values[i], A1_spline_derivs[i], A1_spline_min));
     }
+    if (uses_compact_radial && A1_scaled != compact_radial_model->has_A1())
+        throw std::invalid_argument("Compact radial A1 network does not match A1_scaled.");
 
     // M1
     auto M1_weights = file["M1_weights"].get<std::map<std::string,std::map<std::string,std::vector<double>>>>();
