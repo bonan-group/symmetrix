@@ -210,3 +210,62 @@ not in the production ASE path.
 Symmetrix also exposes upstream-compatible `node_energy`. ASE `energies` include
 the atomic reference terms, while `node_energy` subtracts those atomic reference
 energies to match the upstream MACEField calculator.
+
+### Combining MACEField with another ASE potential
+
+`FieldContributionCalculator` exposes the exact field-dependent part of a
+MACEField model. For every additive property `Q`, it evaluates the same model at
+the requested and zero electric fields and returns `Q(E) - Q(0)`. The correction
+therefore vanishes exactly at zero field while retaining polarization, BECs, and
+polarizability from the field-aware model.
+
+```python
+from symmetrix import FieldContributionCalculator, Symmetrix
+
+field_model = Symmetrix(
+    "macefield-dielectric.json",
+    use_kokkos=True,
+    dtype="float64",
+)
+atoms.calc = FieldContributionCalculator(field_model)
+
+field_energy = atoms.get_potential_energy()
+field_forces = atoms.get_forces()
+field_stress = atoms.get_stress()
+```
+
+`FieldAwareCalculator` adds that correction to any field-independent ASE
+calculator. The baseline supplies the zero-field energy landscape, forces,
+phonons, and elastic response, while MACEField supplies the finite-field
+coupling and electrical response.
+
+```python
+from mace.calculators import MACECalculator
+from symmetrix import FieldAwareCalculator, Symmetrix
+
+base = MACECalculator(model_paths=["more-accurate-mechanical.model"])
+field_model = Symmetrix(
+    "macefield-dielectric.json",
+    use_kokkos=True,
+    dtype="float64",
+)
+atoms.calc = FieldAwareCalculator(
+    base,
+    field_model,
+    electric_field=[0.01, -0.02, 0.03],
+)
+
+total_energy = atoms.get_potential_energy()
+total_forces = atoms.get_forces()
+total_stress = atoms.get_stress()
+born_effective_charges = atoms.calc.get_property("becs", atoms)
+
+# The override remains mutable for finite-field simulations.
+atoms.calc.electric_field = [0.02, -0.02, 0.03]
+```
+
+At nonzero field, an exact correction needs two MACEField evaluations for each
+new geometry, plus one baseline evaluation. The zero-field MACEField result is
+cached across field-only changes, and zero-field additive requests skip the
+MACEField evaluation entirely. The baseline must not contain its own electric
+field coupling, otherwise that coupling would be counted twice.
