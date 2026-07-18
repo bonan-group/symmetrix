@@ -14,7 +14,7 @@ from ase.build import bulk
 from ase.stress import full_3x3_to_voigt_6_stress
 
 try:
-    from symmetrix import Symmetrix
+    from symmetrix import FieldAwareCalculator, FieldContributionCalculator, Symmetrix
 except ModuleNotFoundError as exc:
     if "No module named 'symmetrix.symmetrix'" in str(exc):
         raise RuntimeError("Can't import symmetrix.symmetrix, probably need to run pytest in venv "
@@ -210,6 +210,91 @@ def test_macefield_native_json_ase_energy_forces_match_pytorch(macefield_model_p
 
     assert np.allclose(atoms_sym.get_potential_energy(), atoms_torch.get_potential_energy(), atol=1e-3)
     assert np.allclose(atoms_sym.get_forces(), atoms_torch.get_forces(), atol=2e-3)
+
+
+@pytest.mark.skipif(mace is None, reason="mace-field is not available")
+@pytest.mark.parametrize("use_kokkos", [False, True])
+def test_macefield_field_contribution_matches_explicit_difference(
+    macefield_model_path,
+    tmp_path,
+    use_kokkos,
+):
+    from symmetrix import symmetrix as native_symmetrix
+    from symmetrix.extract_mace_data import extract_mace_data
+
+    if use_kokkos and not hasattr(native_symmetrix, "MACEKokkos"):
+        pytest.skip("Symmetrix was built without Kokkos bindings.")
+
+    json_path = tmp_path / "macefield.json"
+    json_path.write_text(json.dumps(extract_mace_data(
+        macefield_model_path,
+        species=[7, 13],
+        head="mp-dielectric",
+    )))
+
+    atoms = bulk("AlN", "wurtzite", a=3.112, c=4.982)
+    electric_field = np.array([0.01, -0.02, 0.03])
+
+    direct_atoms = atoms.copy()
+    direct_calculator = Symmetrix(json_path, use_kokkos=use_kokkos, dtype="float64")
+    direct_atoms.calc = direct_calculator
+    direct_calculator.electric_field = electric_field
+    field_results = {
+        prop: direct_calculator.get_property(prop, direct_atoms)
+        for prop in ("energy", "forces", "stress")
+    }
+    direct_calculator.electric_field = np.zeros(3)
+    zero_results = {
+        prop: direct_calculator.get_property(prop, direct_atoms)
+        for prop in ("energy", "forces", "stress")
+    }
+
+    contribution_atoms = atoms.copy()
+    contribution = FieldContributionCalculator(
+        Symmetrix(json_path, use_kokkos=use_kokkos, dtype="float64"),
+        electric_field=electric_field,
+    )
+    contribution_atoms.calc = contribution
+    contribution_results = contribution_atoms.get_properties(["energy", "forces", "stress"])
+
+    for prop in ("energy", "forces", "stress"):
+        expected = np.asarray(field_results[prop]) - np.asarray(zero_results[prop])
+        assert np.allclose(contribution_results[prop], expected, atol=1e-12, rtol=1e-12)
+
+    step = 1e-4
+    positions = contribution_atoms.positions.copy()
+    contribution_atoms.positions[0, 0] += step
+    energy_plus = contribution_atoms.get_potential_energy()
+    contribution_atoms.positions[0, 0] -= 2.0 * step
+    energy_minus = contribution_atoms.get_potential_energy()
+    contribution_atoms.positions = positions
+    force_fd = -(energy_plus - energy_minus) / (2.0 * step)
+    assert np.isclose(contribution_results["forces"][0, 0], force_fd, atol=1e-7)
+
+    cell = contribution_atoms.cell.copy()
+    volume = contribution_atoms.get_volume()
+    deformation = np.eye(3)
+    deformation[0, 0] += step
+    contribution_atoms.set_cell(cell @ deformation, scale_atoms=True)
+    energy_plus = contribution_atoms.get_potential_energy()
+    deformation[0, 0] -= 2.0 * step
+    contribution_atoms.set_cell(cell @ deformation, scale_atoms=True)
+    energy_minus = contribution_atoms.get_potential_energy()
+    contribution_atoms.set_cell(cell, scale_atoms=True)
+    stress_fd = (energy_plus - energy_minus) / (2.0 * step * volume)
+    assert np.isclose(contribution_results["stress"][0], stress_fd, atol=1e-7)
+
+    base = Symmetrix(json_path, use_kokkos=use_kokkos, dtype="float64")
+    combined = FieldAwareCalculator(base, contribution)
+    combined_atoms = atoms.copy()
+    combined_atoms.calc = combined
+    combined_results = combined_atoms.get_properties(["energy", "forces", "stress"])
+    for prop in ("energy", "forces", "stress"):
+        expected = base.get_property(prop, combined_atoms) + contribution.get_property(
+            prop,
+            combined_atoms,
+        )
+        assert np.allclose(combined_results[prop], expected, atol=1e-12, rtol=1e-12)
 
 
 @pytest.mark.skipif(mace is None, reason="mace-field is not available")
