@@ -12,12 +12,22 @@ public:
 
     int input_size() const;
     int output_size() const;
-    AffineMLP condition_suffix(
-        int dynamic_input_size,
-        const std::vector<double>& fixed_suffix) const;
+    bool supports_conditioned_input(int dynamic_input_size) const;
+    std::vector<double> first_layer_contribution(
+        int input_offset,
+        const std::vector<double>& values) const;
     std::vector<double> evaluate(const std::vector<double>& input) const;
+    std::vector<double> evaluate_conditioned(
+        const std::vector<double>& input,
+        const std::vector<double>& first_contribution,
+        const std::vector<double>& second_contribution) const;
     std::vector<double> evaluate_gradient(
         const std::vector<double>& input,
+        const std::vector<double>& output_adjoint) const;
+    std::vector<double> evaluate_gradient_conditioned(
+        const std::vector<double>& input,
+        const std::vector<double>& first_contribution,
+        const std::vector<double>& second_contribution,
         const std::vector<double>& output_adjoint) const;
 
 private:
@@ -32,4 +42,14 @@ private:
     };
 
     std::vector<Layer> layers;
+    std::vector<double> evaluate_impl(
+        const std::vector<double>& input,
+        const std::vector<double>* first_contribution,
+        const std::vector<double>* second_contribution,
+        std::vector<std::vector<double>>* tape) const;
+    std::vector<double> evaluate_gradient_impl(
+        const std::vector<double>& input,
+        const std::vector<double>* first_contribution,
+        const std::vector<double>* second_contribution,
+        const std::vector<double>& output_adjoint) const;
 };

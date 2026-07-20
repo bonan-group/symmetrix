@@ -113,7 +113,7 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
     Kokkos::parallel_reduce("validate nonlinear neighbor total",num_nodes,KOKKOS_LAMBDA(int node,long long& total){total+=num_neigh(node);},edge_total);
     if(edge_total!=edges)throw std::invalid_argument("MACE_Nonlinear Kokkos neighbor counts do not match the edge arrays.");
     int invalid_edges=0;
-    Kokkos::parallel_reduce("validate nonlinear edges",edges,KOKKOS_LAMBDA(int edge,int& invalid){if(neigh_indices(edge)<0||neigh_indices(edge)>=num_nodes||neigh_types(edge)<0||neigh_types(edge)>=local_types||!Kokkos::isfinite(distances(edge))||!(distances(edge)>0.0)||!Kokkos::isfinite(xyz(3*edge))||!Kokkos::isfinite(xyz(3*edge+1))||!Kokkos::isfinite(xyz(3*edge+2)))++invalid;},invalid_edges);
+    Kokkos::parallel_reduce("validate nonlinear edges",edges,KOKKOS_LAMBDA(int edge,int& invalid){if(neigh_indices(edge)<0||neigh_indices(edge)>=num_nodes||neigh_types(edge)<0||neigh_types(edge)>=local_types||neigh_types(edge)!=node_types(neigh_indices(edge))||!Kokkos::isfinite(distances(edge))||!(distances(edge)>0.0)||!Kokkos::isfinite(xyz(3*edge))||!Kokkos::isfinite(xyz(3*edge+1))||!Kokkos::isfinite(xyz(3*edge+2)))++invalid;},invalid_edges);
     if(invalid_edges)throw std::invalid_argument("MACE_Nonlinear Kokkos graph has an invalid edge index, type, distance, or vector.");
     compute_Y(xyz);
 

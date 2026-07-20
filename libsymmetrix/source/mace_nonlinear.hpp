@@ -58,8 +58,10 @@ private:
         E3TensorProduct convolution;
         AffineMLP convolution_weights;
         AffineMLP density;
-        std::vector<AffineMLP> pair_convolution_weights;
-        std::vector<AffineMLP> pair_density;
+        std::vector<std::vector<double>> convolution_source_contributions;
+        std::vector<std::vector<double>> convolution_target_contributions;
+        std::vector<std::vector<double>> density_source_contributions;
+        std::vector<std::vector<double>> density_target_contributions;
         int active_type_count = 0;
         Gate gate;
         double alpha;
@@ -69,8 +71,11 @@ private:
             int radial_size,
             int model_element_count,
             const std::vector<int>& selected_model_indices);
+        bool supports_pair_conditioning(
+            int radial_size,
+            int model_element_count) const;
         bool has_pair_conditioning() const { return active_type_count > 0; }
-        int pair_index(int source_type, int target_type) const;
+        void validate_conditioned_type(int type) const;
     };
     struct Readout {
         bool nonlinear;

@@ -59,6 +59,18 @@ def mh1_si_artifact(tmp_path_factory):
     return data, path
 
 
+@pytest.fixture(scope="module")
+def mh1_h_si_artifact(tmp_path_factory):
+    data = extract_mace_data(
+        _mh1_model_path(),
+        species=[14, 1],
+        head="matpes_r2scan",
+    )
+    path = tmp_path_factory.mktemp("mh1-h-si") / "mh1-h-si.json"
+    path.write_text(json.dumps(data, separators=(",", ":")))
+    return data, path
+
+
 def test_mh1_rejects_malformed_nonlinear_json(tmp_path):
     path = tmp_path / "malformed-nonlinear.json"
     path.write_text(json.dumps({
@@ -165,11 +177,15 @@ def test_mh1_extracts_and_evaluates_each_head(head, tmp_path):
     assert np.allclose(actual.results["forces"], expected.results["forces"], atol=2e-5)
 
 
-def test_mh1_universal_extraction_preserves_all_species():
+def test_mh1_universal_extraction_preserves_all_species(tmp_path):
     data = extract_mace_data(_mh1_model_path(), head="matpes_r2scan")
     assert data["atomic_numbers"] == data["model_atomic_numbers"]
     assert data["model_indices"] == list(range(len(data["model_atomic_numbers"])))
     assert len(data["atomic_numbers"]) == 89
+    path = tmp_path / "mh1-universal.json"
+    path.write_text(json.dumps(data, separators=(",", ":")))
+    evaluator = native_symmetrix.MACENonlinear(str(path))
+    assert evaluator.uses_mh1_fast_path
 
 
 def test_mh1_rejects_legacy_pair_spline_extraction():
@@ -206,6 +222,38 @@ def test_mh1_serial_fast_path_requires_exact_architecture(mh1_si_artifact, tmp_p
     changed["interactions"][0]["hidden_irreps"] = "512x0e"
     path = tmp_path / "near-mh1.json"
     path.write_text(json.dumps(changed))
+    evaluator = native_symmetrix.MACENonlinear(str(path))
+    assert not evaluator.uses_mh1_fast_path
+
+
+def test_mh1_serial_fast_path_accepts_equivalent_irrep_formatting(
+    mh1_si_artifact, tmp_path
+):
+    data, _ = mh1_si_artifact
+    changed = json.loads(json.dumps(data))
+    changed["interactions"][1]["node_feats_irreps"] = " 512x0e + 512x1o "
+    changed["interactions"][0]["gate"]["irreps_out"] = (
+        " 512x0e + 512x1o + 512x2e + 512x3o "
+    )
+    path = tmp_path / "mh1-equivalent-irreps.json"
+    path.write_text(json.dumps(changed, separators=(",", ":")))
+    evaluator = native_symmetrix.MACENonlinear(str(path))
+    assert evaluator.uses_mh1_fast_path
+
+
+def test_mh1_serial_fast_path_requires_conditionable_edge_mlp(mh1_si_artifact, tmp_path):
+    data, _ = mh1_si_artifact
+    changed = json.loads(json.dumps(data))
+    width = changed["interactions"][0]["conv_tp_weights"]["layers"][0]["weight"]["shape"][1]
+    changed["interactions"][0]["conv_tp_weights"]["layers"].insert(0, {
+        "type": "layer_norm",
+        "normalized_shape": [width],
+        "eps": 1e-5,
+        "weight": {"shape": [width], "values": [1.0] * width},
+        "bias": {"shape": [width], "values": [0.0] * width},
+    })
+    path = tmp_path / "near-mh1-unconditionable.json"
+    path.write_text(json.dumps(changed, separators=(",", ":")))
     evaluator = native_symmetrix.MACENonlinear(str(path))
     assert not evaluator.uses_mh1_fast_path
 
@@ -325,27 +373,34 @@ def test_mh1_kokkos_repeated_calculations(mh1_si_artifact):
             assert kokkos.results["energy"] != pytest.approx(first_energy, abs=1e-8)
 
 
-def test_mh1_kokkos_handles_changes_in_supported_species(tmp_path):
-    data = extract_mace_data(
-        _mh1_model_path(),
-        species=[1, 14],
-        head="matpes_r2scan",
-    )
-    model_path = tmp_path / "mh1-h-si.json"
-    model_path.write_text(json.dumps(data, separators=(",", ":")))
+def test_mh1_kokkos_handles_changes_in_supported_species(mh1_h_si_artifact):
+    _, model_path = mh1_h_si_artifact
     serial = Symmetrix(model_path, use_kokkos=False, dtype="float64")
     kokkos = Symmetrix(model_path, use_kokkos=True, dtype="float64")
-    for symbols, distance in (("Si2", 2.2), ("H2", 0.8), ("Si2", 2.4)):
+    upstream = MACECalculator(
+        model_paths=str(_mh1_model_path()),
+        device="cpu",
+        default_dtype="float64",
+        head="matpes_r2scan",
+    )
+    for symbols, distance in (
+        ("Si2", 2.2), ("H2", 0.8), ("SiH", 1.5), ("HSi", 1.5), ("Si2", 2.4)
+    ):
         atoms = Atoms(
             symbols,
             positions=[[0.0, 0.0, 0.0], [distance, 0.1, 0.0]],
-            cell=[10.0, 10.0, 10.0],
-            pbc=False,
+            cell=[14.0, 14.0, 14.0],
+            pbc=True,
         )
-        serial.calculate(atoms, properties=["energy", "forces"])
-        kokkos.calculate(atoms, properties=["energy", "forces"])
+        upstream.calculate(atoms.copy(), properties=["energy", "forces", "stress"])
+        serial.calculate(atoms, properties=["energy", "forces", "stress"])
+        kokkos.calculate(atoms, properties=["energy", "forces", "stress"])
+        assert serial.results["energy"] == pytest.approx(upstream.results["energy"], abs=2e-5)
+        assert np.allclose(serial.results["forces"], upstream.results["forces"], atol=2e-5)
+        assert np.allclose(serial.results["stress"], upstream.results["stress"], atol=2e-5)
         assert kokkos.results["energy"] == pytest.approx(serial.results["energy"], abs=2e-12)
         assert np.allclose(kokkos.results["forces"], serial.results["forces"], atol=2e-12)
+        assert np.allclose(kokkos.results["stress"], serial.results["stress"], atol=2e-12)
 
 
 @pytest.mark.parametrize("use_kokkos", [False, True])
@@ -536,14 +591,19 @@ def test_mh1_native_rejects_inconsistent_graph_metadata(mh1_si_artifact, use_kok
         evaluator.compute_node_energies_forces(1, [0], [1], [], [], [], [])
 
 
-def test_mh1_product_basis_forward_and_reverse_match_autograd(mh1_si_artifact):
+@pytest.mark.parametrize("product_index", [0, 1])
+def test_mh1_product_basis_forward_and_reverse_match_autograd(
+    mh1_si_artifact, product_index
+):
     data, _ = mh1_si_artifact
     model = torch.load(
         _mh1_model_path(), map_location=torch.device("cpu"), weights_only=False
     ).to(torch.float64)
     model = remove_pt_head(model, "matpes_r2scan")
-    torch_module = model.products[1]
-    native_module = native_symmetrix.E3ProductBasis(json.dumps(data["products"][1]))
+    torch_module = model.products[product_index]
+    native_module = native_symmetrix.E3ProductBasis(
+        json.dumps(data["products"][product_index])
+    )
     assert native_module.uses_compiled_plan
     assert native_module.compiled_term_count > 0
     rng = np.random.default_rng(456)
@@ -578,20 +638,50 @@ def test_mh1_conditioned_affine_mlp_matches_full_input(mh1_si_artifact):
     rng = np.random.default_rng(918)
     dynamic_size = len(data["radial_embedding"]["basis"]["weights"]["values"])
     dynamic = rng.normal(scale=0.1, size=dynamic_size)
-    suffix = rng.normal(scale=0.1, size=full.input_size-dynamic_size)
+    source = rng.normal(scale=0.1, size=512)
+    target = rng.normal(scale=0.1, size=full.input_size-dynamic_size-len(source))
     seed = rng.normal(scale=0.1, size=full.output_size)
-    conditioned = full.condition_suffix(dynamic_size, suffix)
-    assert conditioned.input_size == dynamic_size
+    assert full.supports_conditioned_input(dynamic_size)
+    source_contribution = full.first_layer_contribution(dynamic_size, source)
+    target_contribution = full.first_layer_contribution(dynamic_size+len(source), target)
+    complete = np.concatenate([dynamic, source, target])
     assert np.allclose(
-        conditioned.evaluate(dynamic),
-        full.evaluate(np.concatenate([dynamic, suffix])),
+        full.evaluate_conditioned(dynamic, source_contribution, target_contribution),
+        full.evaluate(complete),
         atol=2e-12,
     )
     assert np.allclose(
-        conditioned.reverse(dynamic, seed),
-        full.reverse(np.concatenate([dynamic, suffix]), seed)[:dynamic_size],
+        full.reverse_conditioned(
+            dynamic, source_contribution, target_contribution, seed
+        ),
+        full.reverse(complete, seed)[:dynamic_size],
         atol=2e-12,
     )
+
+
+@pytest.mark.parametrize("use_kokkos", [False, True])
+def test_mh1_native_rejects_neighbor_source_type_mismatch(
+    mh1_h_si_artifact, use_kokkos
+):
+    _, model_path = mh1_h_si_artifact
+    if use_kokkos:
+        if not hasattr(native_symmetrix, "MACENonlinearKokkos"):
+            pytest.skip("Symmetrix was built without Kokkos support")
+        if not native_symmetrix._kokkos_is_initialized():
+            native_symmetrix._init_kokkos()
+        evaluator = native_symmetrix.MACENonlinearKokkos(str(model_path))
+    else:
+        evaluator = native_symmetrix.MACENonlinear(str(model_path))
+    with pytest.raises(ValueError, match="invalid edge index, type"):
+        evaluator.compute_node_energies_forces(
+            2,
+            [0, 1],
+            [1, 0],
+            [1],
+            [0],
+            [1.5, 0.0, 0.0],
+            [1.5],
+        )
 
 
 def test_mh1_float32_is_rejected(mh1_si_artifact):

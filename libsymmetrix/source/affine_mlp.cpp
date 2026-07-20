@@ -102,46 +102,78 @@ int AffineMLP::output_size() const
     throw std::logic_error("AffineMLP has no sized layer.");
 }
 
-AffineMLP AffineMLP::condition_suffix(
-    int dynamic_input_size,
-    const std::vector<double>& fixed_suffix) const
+bool AffineMLP::supports_conditioned_input(int dynamic_input_size) const
+{
+    return !layers.empty() && layers.front().type == Layer::Type::Linear
+        && dynamic_input_size > 0 && dynamic_input_size < layers.front().input_size;
+}
+
+std::vector<double> AffineMLP::first_layer_contribution(
+    int input_offset,
+    const std::vector<double>& values) const
 {
     if (layers.empty() || layers.front().type != Layer::Type::Linear
-        || dynamic_input_size <= 0
-        || dynamic_input_size+static_cast<int>(fixed_suffix.size())
-            != layers.front().input_size)
-        throw std::invalid_argument("AffineMLP conditioned input dimensions are inconsistent.");
-
-    AffineMLP result = *this;
-    auto& first = result.layers.front();
-    const int original_input_size = first.input_size;
-    std::vector<double> dynamic_weights(first.output_size*dynamic_input_size);
-    for (int row=0; row<first.output_size; ++row) {
-        const int original_offset = row*original_input_size;
-        const int dynamic_offset = row*dynamic_input_size;
-        for (int column=0; column<dynamic_input_size; ++column)
-            dynamic_weights[dynamic_offset+column] = first.weight[original_offset+column];
-        for (int column=0; column<static_cast<int>(fixed_suffix.size()); ++column)
-            first.bias[row] += first.weight[original_offset+dynamic_input_size+column]
-                *fixed_suffix[column];
-    }
-    first.input_size = dynamic_input_size;
-    first.weight = std::move(dynamic_weights);
+        || input_offset < 0 || values.empty()
+        || input_offset+static_cast<int>(values.size()) > layers.front().input_size)
+        throw std::invalid_argument("AffineMLP first-layer contribution dimensions are inconsistent.");
+    const auto& first = layers.front();
+    std::vector<double> result(first.output_size, 0.0);
+    for (int row=0; row<first.output_size; ++row)
+        for (int column=0; column<static_cast<int>(values.size()); ++column)
+            result[row] += first.weight[row*first.input_size+input_offset+column]
+                *values[column];
     return result;
 }
 
 std::vector<double> AffineMLP::evaluate(const std::vector<double>& input) const
 {
-    if (static_cast<int>(input.size()) != input_size())
+    return evaluate_impl(input, nullptr, nullptr, nullptr);
+}
+
+std::vector<double> AffineMLP::evaluate_conditioned(
+    const std::vector<double>& input,
+    const std::vector<double>& first_contribution,
+    const std::vector<double>& second_contribution) const
+{
+    return evaluate_impl(input, &first_contribution, &second_contribution, nullptr);
+}
+
+std::vector<double> AffineMLP::evaluate_impl(
+    const std::vector<double>& input,
+    const std::vector<double>* first_contribution,
+    const std::vector<double>* second_contribution,
+    std::vector<std::vector<double>>* tape) const
+{
+    const bool conditioned = first_contribution != nullptr;
+    if ((!conditioned && static_cast<int>(input.size()) != input_size())
+        || (conditioned && !supports_conditioned_input(input.size())))
         throw std::invalid_argument("AffineMLP input size does not match the first layer.");
+    if (conditioned) {
+        const int width = layers.front().output_size;
+        if (static_cast<int>(first_contribution->size()) != width
+            || second_contribution == nullptr
+            || static_cast<int>(second_contribution->size()) != width)
+            throw std::invalid_argument("AffineMLP conditioned contributions have invalid dimensions.");
+    }
     auto values = input;
-    for (const auto& layer : layers) {
+    if (tape) {
+        tape->clear();
+        tape->reserve(layers.size()+1);
+        tape->push_back(values);
+    }
+    for (int layer_index=0; layer_index<static_cast<int>(layers.size()); ++layer_index) {
+        const auto& layer = layers[layer_index];
         if (layer.type == Layer::Type::Linear) {
-            if (static_cast<int>(values.size()) != layer.input_size)
+            const int active_input_size = conditioned && layer_index == 0
+                ? static_cast<int>(values.size()) : layer.input_size;
+            if (static_cast<int>(values.size()) != active_input_size)
                 throw std::logic_error("AffineMLP linear input size is inconsistent.");
             auto output = layer.bias;
+            if (conditioned && layer_index == 0)
+                for (int row=0; row<layer.output_size; ++row)
+                    output[row] += (*first_contribution)[row]+(*second_contribution)[row];
             for (int row=0; row<layer.output_size; ++row)
-                for (int column=0; column<layer.input_size; ++column)
+                for (int column=0; column<active_input_size; ++column)
                     output[row] += layer.weight[row*layer.input_size+column]*values[column];
             values = std::move(output);
         } else if (layer.type == Layer::Type::LayerNorm) {
@@ -160,6 +192,7 @@ std::vector<double> AffineMLP::evaluate(const std::vector<double>& input) const
             for (auto& value : values)
                 value = silu(value);
         }
+        if (tape) tape->push_back(values);
     }
     return values;
 }
@@ -168,47 +201,40 @@ std::vector<double> AffineMLP::evaluate_gradient(
     const std::vector<double>& input,
     const std::vector<double>& output_adjoint) const
 {
-    if (static_cast<int>(input.size()) != input_size()
-        || static_cast<int>(output_adjoint.size()) != output_size())
-        throw std::invalid_argument("AffineMLP gradient inputs have invalid dimensions.");
+    return evaluate_gradient_impl(input, nullptr, nullptr, output_adjoint);
+}
 
+std::vector<double> AffineMLP::evaluate_gradient_conditioned(
+    const std::vector<double>& input,
+    const std::vector<double>& first_contribution,
+    const std::vector<double>& second_contribution,
+    const std::vector<double>& output_adjoint) const
+{
+    return evaluate_gradient_impl(
+        input, &first_contribution, &second_contribution, output_adjoint);
+}
+
+std::vector<double> AffineMLP::evaluate_gradient_impl(
+    const std::vector<double>& input,
+    const std::vector<double>* first_contribution,
+    const std::vector<double>* second_contribution,
+    const std::vector<double>& output_adjoint) const
+{
+    if (static_cast<int>(output_adjoint.size()) != output_size())
+        throw std::invalid_argument("AffineMLP gradient inputs have invalid dimensions.");
     std::vector<std::vector<double>> values;
-    values.reserve(layers.size()+1);
-    values.push_back(input);
-    for (const auto& layer : layers) {
-        auto output = values.back();
-        if (layer.type == Layer::Type::Linear) {
-            output = layer.bias;
-            for (int row=0; row<layer.output_size; ++row)
-                for (int column=0; column<layer.input_size; ++column)
-                    output[row] += layer.weight[row*layer.input_size+column]*values.back()[column];
-        } else if (layer.type == Layer::Type::LayerNorm) {
-            double mean = 0.0;
-            for (const auto value : output)
-                mean += value;
-            mean /= output.size();
-            double variance = 0.0;
-            for (const auto value : output)
-                variance += (value-mean)*(value-mean);
-            variance /= output.size();
-            const double inverse_stddev = 1.0/std::sqrt(variance+layer.eps);
-            for (int index=0; index<layer.output_size; ++index)
-                output[index] = (output[index]-mean)*inverse_stddev*layer.weight[index]+layer.bias[index];
-        } else {
-            for (auto& value : output)
-                value = silu(value);
-        }
-        values.push_back(std::move(output));
-    }
+    evaluate_impl(input, first_contribution, second_contribution, &values);
 
     auto adjoint = output_adjoint;
     for (int layer_index=static_cast<int>(layers.size())-1; layer_index>=0; --layer_index) {
         const auto& layer = layers[layer_index];
         const auto& layer_input = values[layer_index];
         if (layer.type == Layer::Type::Linear) {
-            auto input_adjoint = std::vector<double>(layer.input_size, 0.0);
+            const int active_input_size = layer_index == 0 && first_contribution != nullptr
+                ? static_cast<int>(input.size()) : layer.input_size;
+            auto input_adjoint = std::vector<double>(active_input_size, 0.0);
             for (int row=0; row<layer.output_size; ++row)
-                for (int column=0; column<layer.input_size; ++column)
+                for (int column=0; column<active_input_size; ++column)
                     input_adjoint[column] += layer.weight[row*layer.input_size+column]*adjoint[row];
             adjoint = std::move(input_adjoint);
         } else if (layer.type == Layer::Type::LayerNorm) {

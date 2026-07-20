@@ -21,8 +21,11 @@ void bind_e3nn(py::module_& module)
         }))
         .def_property_readonly("input_size", &AffineMLP::input_size)
         .def_property_readonly("output_size", &AffineMLP::output_size)
-        .def("condition_suffix", &AffineMLP::condition_suffix)
+        .def("supports_conditioned_input", &AffineMLP::supports_conditioned_input)
+        .def("first_layer_contribution", &AffineMLP::first_layer_contribution)
         .def("evaluate", &AffineMLP::evaluate)
+        .def("evaluate_conditioned", &AffineMLP::evaluate_conditioned)
+        .def("reverse_conditioned", &AffineMLP::evaluate_gradient_conditioned)
         .def("reverse", &AffineMLP::evaluate_gradient);
 
     py::class_<E3Linear>(module, "E3Linear")
