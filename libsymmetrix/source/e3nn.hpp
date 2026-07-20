@@ -45,6 +45,11 @@ struct E3Instruction {
     int weight_offset = 0;
 };
 
+struct E3LinearBatchWorkspace {
+    std::vector<double> packed_input;
+    std::vector<double> packed_output;
+};
+
 class E3Linear {
 public:
     explicit E3Linear(const nlohmann::json& data);
@@ -52,6 +57,16 @@ public:
     int output_dimension() const { return output.dimension(); }
     std::vector<double> evaluate(const std::vector<double>& x) const;
     void reverse(const std::vector<double>& output_adj, std::vector<double>& input_adj) const;
+    void evaluate_batch(
+        const std::vector<double>& input_values,
+        int samples,
+        std::vector<double>& output_values,
+        E3LinearBatchWorkspace& workspace) const;
+    void reverse_batch(
+        const std::vector<double>& output_adjoint,
+        int samples,
+        std::vector<double>& input_adjoint,
+        E3LinearBatchWorkspace& workspace) const;
 
     Irreps input;
     Irreps output;

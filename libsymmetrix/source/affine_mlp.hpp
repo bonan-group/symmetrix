@@ -5,6 +5,17 @@
 
 #include "nlohmann/json.hpp"
 
+struct AffineMLPBatchTape {
+    int samples = 0;
+    int dynamic_input_size = 0;
+    std::vector<std::vector<double>> values;
+};
+
+struct AffineMLPBatchWorkspace {
+    std::vector<double> adjoint;
+    std::vector<double> scratch;
+};
+
 class AffineMLP {
 public:
     AffineMLP() = default;
@@ -29,6 +40,17 @@ public:
         const std::vector<double>& first_contribution,
         const std::vector<double>& second_contribution,
         const std::vector<double>& output_adjoint) const;
+    const std::vector<double>& evaluate_conditioned_batch(
+        const std::vector<double>& input,
+        int samples,
+        int dynamic_input_size,
+        const std::vector<double>& row_contributions,
+        AffineMLPBatchTape& tape) const;
+    void reverse_conditioned_batch(
+        const std::vector<double>& output_adjoint,
+        const AffineMLPBatchTape& tape,
+        std::vector<double>& input_adjoint,
+        AffineMLPBatchWorkspace& workspace) const;
 
 private:
     struct Layer {

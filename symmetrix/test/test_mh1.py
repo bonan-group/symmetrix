@@ -217,13 +217,29 @@ def test_mh1_json_dispatch_does_not_depend_on_filename_suffix(mh1_si_artifact, t
 
 
 def test_mh1_serial_fast_path_requires_exact_architecture(mh1_si_artifact, tmp_path):
-    data, _ = mh1_si_artifact
+    data, model_path = mh1_si_artifact
     changed = json.loads(json.dumps(data))
     changed["interactions"][0]["hidden_irreps"] = "512x0e"
     path = tmp_path / "near-mh1.json"
     path.write_text(json.dumps(changed))
     evaluator = native_symmetrix.MACENonlinear(str(path))
     assert not evaluator.uses_mh1_fast_path
+    atoms = Atoms(
+        "Si2",
+        positions=[[0.0, 0.0, 0.0], [2.2, 0.1, 0.0]],
+        cell=[10.0, 10.0, 10.0],
+        pbc=True,
+    )
+    fast = Symmetrix(model_path, use_kokkos=False, dtype="float64")
+    generic = Symmetrix(path, use_kokkos=False, dtype="float64")
+    fast.calculate(atoms.copy(), properties=["energy", "energies", "forces", "stress"])
+    generic.calculate(atoms.copy(), properties=["energy", "energies", "forces", "stress"])
+    assert fast.evaluator.uses_mh1_fast_path
+    assert not generic.evaluator.uses_mh1_fast_path
+    for property_name in ("energy", "energies", "forces", "stress"):
+        assert np.allclose(
+            generic.results[property_name], fast.results[property_name], atol=2e-12
+        )
 
 
 def test_mh1_serial_fast_path_accepts_equivalent_irrep_formatting(
@@ -403,6 +419,25 @@ def test_mh1_kokkos_handles_changes_in_supported_species(mh1_h_si_artifact):
         assert np.allclose(kokkos.results["stress"], serial.results["stress"], atol=2e-12)
 
 
+def test_mh1_serial_matches_upstream_for_isolated_atom(mh1_si_artifact):
+    _, model_path = mh1_si_artifact
+    atoms = Atoms("Si", positions=[[0.0, 0.0, 0.0]], cell=[10.0, 10.0, 10.0])
+    actual = Symmetrix(model_path, use_kokkos=False, dtype="float64")
+    expected = MACECalculator(
+        model_paths=str(_mh1_model_path()),
+        device="cpu",
+        default_dtype="float64",
+        head="matpes_r2scan",
+    )
+    actual.calculate(atoms.copy(), properties=["energy", "energies", "forces"])
+    expected.calculate(atoms.copy(), properties=["energy", "energies", "forces"])
+    assert actual.evaluator.uses_mh1_fast_path
+    assert len(actual.evaluator.node_forces) == 0
+    assert actual.results["energy"] == pytest.approx(expected.results["energy"], abs=2e-9)
+    assert np.allclose(actual.results["energies"], expected.results["energies"], atol=2e-9)
+    assert np.allclose(actual.results["forces"], expected.results["forces"], atol=2e-9)
+
+
 @pytest.mark.parametrize("use_kokkos", [False, True])
 def test_mh1_native_force_matches_finite_difference(mh1_si_artifact, use_kokkos):
     _, model_path = mh1_si_artifact
@@ -443,6 +478,57 @@ def test_mh1_affine_mlp_forward_and_reverse_match_autograd(mh1_si_artifact, modu
     (expected * torch.tensor(seed, dtype=torch.float64)).sum().backward()
     assert np.allclose(native_module.evaluate(values), expected.detach().numpy(), atol=2e-11)
     assert np.allclose(native_module.reverse(values, seed), torch_values.grad.numpy(), atol=2e-10)
+
+
+def test_mh1_e3_linear_batch_matches_repeated_scalar_calls():
+    definition = {
+        "irreps_in": "2x0e+2x0e+2x1o",
+        "irreps_out": "2x0e+2x1o",
+        "instructions": [
+            {
+                "i_in": 0,
+                "i_out": 0,
+                "path_weight": 0.75,
+                "path_shape": [2, 2],
+            },
+            {
+                "i_in": 1,
+                "i_out": 0,
+                "path_weight": 1.25,
+                "path_shape": [2, 2],
+            },
+            {
+                "i_in": 2,
+                "i_out": 1,
+                "path_weight": -0.4,
+                "path_shape": [2, 2],
+            },
+        ],
+        "weight": {
+            "shape": [12],
+            "values": [
+                0.2, -0.1, 0.5, 0.3,
+                -0.2, 0.4, 0.8, -0.5,
+                -0.4, 0.7, 0.1, 0.6,
+            ],
+        },
+        "bias": {"shape": [8], "values": [0.1, -0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]},
+        "output_mask": {
+            "shape": [8],
+            "values": [1.0, 0.5, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0],
+        },
+    }
+    module = native_symmetrix.E3Linear(json.dumps(definition))
+    rng = np.random.default_rng(1024)
+    samples = 7
+    values = rng.normal(size=(samples, module.input_dimension))
+    seeds = rng.normal(size=(samples, module.output_dimension))
+    expected = np.concatenate([module.evaluate(row) for row in values])
+    expected_adjoint = np.concatenate([module.reverse(row) for row in seeds])
+    assert np.allclose(module.evaluate_batch(values.ravel(), samples), expected, atol=2e-14)
+    assert np.allclose(
+        module.reverse_batch(seeds.ravel(), samples), expected_adjoint, atol=2e-14
+    )
 
 
 def test_mh1_tensor_product_forward_and_reverse_match_autograd(mh1_si_artifact):
@@ -576,6 +662,61 @@ def test_mh1_product_basis_rejects_malformed_tensor_layout(use_kokkos):
         product(json.dumps(definition))
 
 
+def test_mh1_generic_product_batch_supports_varying_elements_without_skip():
+    linear = {
+        "irreps_in": "2x0e",
+        "irreps_out": "2x0e",
+        "instructions": [{
+            "i_in": 0,
+            "i_out": 0,
+            "path_weight": 1.0,
+            "path_shape": [2, 2],
+        }],
+        "weight": {"shape": [4], "values": [1.0, 0.0, 0.0, 1.0]},
+        "bias": {"shape": [0], "values": []},
+        "output_mask": {"shape": [2], "values": [1.0, 1.0]},
+    }
+    definition = {
+        "node_feats_irreps": "2x0e",
+        "target_irreps": "2x0e",
+        "use_sc": False,
+        "use_agnostic_product": False,
+        "linear": linear,
+        "symmetric_contractions": {
+            "irreps_in": "2x0e",
+            "irreps_out": "2x0e",
+            "contractions": [{
+                "correlation": 1,
+                "weights": [],
+                "weights_max": {
+                    "shape": [2, 1, 2],
+                    "values": [2.0, 3.0, 5.0, 7.0],
+                },
+                "u_tensors": [{"shape": [1, 1], "values": [1.0]}],
+            }],
+        },
+    }
+    product = native_symmetrix.E3ProductBasis(json.dumps(definition))
+    features = np.array([[0.2, -0.4], [1.1, 0.3], [-0.7, 0.9]])
+    elements = [0, 1, 0]
+    seeds = np.array([[0.6, -0.1], [-0.2, 0.8], [0.4, 0.5]])
+    expected_values = np.concatenate([
+        product.evaluate(row, [], element)
+        for row, element in zip(features, elements)
+    ])
+    expected_adjoints = np.concatenate([
+        product.reverse(row, element, seed)[0]
+        for row, element, seed in zip(features, elements, seeds)
+    ])
+    actual_values = product.evaluate_batch(features.ravel(), [], elements, len(elements))
+    actual_adjoints, skip_adjoints = product.reverse_batch(
+        features.ravel(), elements, seeds.ravel(), len(elements)
+    )
+    assert np.allclose(actual_values, expected_values, atol=2e-14)
+    assert np.allclose(actual_adjoints, expected_adjoints, atol=2e-14)
+    assert np.allclose(skip_adjoints, 0.0)
+
+
 @pytest.mark.parametrize("use_kokkos", [False, True])
 def test_mh1_native_rejects_inconsistent_graph_metadata(mh1_si_artifact, use_kokkos):
     _, model_path = mh1_si_artifact
@@ -630,6 +771,29 @@ def test_mh1_product_basis_forward_and_reverse_match_autograd(
     assert np.allclose(feature_adj, torch_features.grad.numpy(), atol=2e-6)
     assert np.allclose(skip_adj, torch_skip.grad.numpy(), atol=2e-6)
 
+    batch_features = np.stack([features, 0.7 * features, -0.4 * features])
+    batch_skip = np.stack([skip, -0.2 * skip, 0.5 * skip])
+    batch_seed = np.stack([seed, 0.3 * seed, -0.6 * seed])
+    expected_batch = np.concatenate([
+        native_module.evaluate(node, node_skip, 0)
+        for node, node_skip in zip(batch_features, batch_skip)
+    ])
+    expected_feature_adjoints = []
+    expected_skip_adjoints = []
+    for node, node_seed in zip(batch_features, batch_seed):
+        node_adjoint, node_skip_adjoint = native_module.reverse(node, 0, node_seed)
+        expected_feature_adjoints.extend(node_adjoint)
+        expected_skip_adjoints.extend(node_skip_adjoint)
+    actual_batch = native_module.evaluate_batch(
+        batch_features.ravel(), batch_skip.ravel(), [0, 0, 0], 3
+    )
+    actual_feature_adjoints, actual_skip_adjoints = native_module.reverse_batch(
+        batch_features.ravel(), [0, 0, 0], batch_seed.ravel(), 3
+    )
+    assert np.allclose(actual_batch, expected_batch, atol=2e-12)
+    assert np.allclose(actual_feature_adjoints, expected_feature_adjoints, atol=2e-12)
+    assert np.allclose(actual_skip_adjoints, expected_skip_adjoints, atol=2e-12)
+
 
 def test_mh1_conditioned_affine_mlp_matches_full_input(mh1_si_artifact):
     data, _ = mh1_si_artifact
@@ -657,6 +821,50 @@ def test_mh1_conditioned_affine_mlp_matches_full_input(mh1_si_artifact):
         full.reverse(complete, seed)[:dynamic_size],
         atol=2e-12,
     )
+
+
+@pytest.mark.parametrize("layer", [0, 1])
+@pytest.mark.parametrize("module_name", ["conv_tp_weights", "density_fn"])
+def test_mh1_conditioned_affine_mlp_batch_matches_scalar_calls(
+    mh1_si_artifact, layer, module_name
+):
+    data, _ = mh1_si_artifact
+    module = native_symmetrix.AffineMLP(
+        json.dumps(data["interactions"][layer][module_name])
+    )
+    rng = np.random.default_rng(2048 + layer)
+    samples = 5
+    dynamic_size = len(data["radial_embedding"]["basis"]["weights"]["values"])
+    dynamic = rng.normal(scale=0.1, size=(samples, dynamic_size))
+    seeds = rng.normal(scale=0.1, size=(samples, module.output_size))
+    first_contributions = []
+    second_contributions = []
+    for _ in range(samples):
+        source = rng.normal(scale=0.1, size=512)
+        target = rng.normal(scale=0.1, size=512)
+        first_contributions.append(
+            module.first_layer_contribution(dynamic_size, source)
+        )
+        second_contributions.append(
+            module.first_layer_contribution(dynamic_size + 512, target)
+        )
+    row_contributions = np.asarray(first_contributions) + np.asarray(second_contributions)
+    expected_outputs = []
+    expected_adjoints = []
+    for row, first, second, seed in zip(
+        dynamic, first_contributions, second_contributions, seeds
+    ):
+        expected_outputs.extend(module.evaluate_conditioned(row, first, second))
+        expected_adjoints.extend(module.reverse_conditioned(row, first, second, seed))
+    outputs, adjoints = module.conditioned_batch(
+        dynamic.ravel(),
+        samples,
+        dynamic_size,
+        row_contributions.ravel(),
+        seeds.ravel(),
+    )
+    assert np.allclose(outputs, expected_outputs, atol=2e-12)
+    assert np.allclose(adjoints, expected_adjoints, atol=2e-12)
 
 
 @pytest.mark.parametrize("use_kokkos", [False, True])

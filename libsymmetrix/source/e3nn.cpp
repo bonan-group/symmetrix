@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <limits>
 #include <numeric>
 #include <stdexcept>
 
@@ -51,6 +52,16 @@ E3Instruction parse_instruction(const nlohmann::json& value, bool tensor_product
 void validate_vector_size(const std::vector<double>& value, int expected, const char* name)
 {
     if (static_cast<int>(value.size()) != expected)
+        throw std::invalid_argument(std::string("Invalid ") + name + " size in MACE_Nonlinear JSON.");
+}
+
+void validate_batch_size(
+    const std::vector<double>& value, int samples, int width, const char* name)
+{
+    if (samples < 0 || width < 0
+        || static_cast<std::size_t>(samples) > std::numeric_limits<std::size_t>::max()
+            / static_cast<std::size_t>(std::max(width, 1))
+        || value.size() != static_cast<std::size_t>(samples)*static_cast<std::size_t>(width))
         throw std::invalid_argument(std::string("Invalid ") + name + " size in MACE_Nonlinear JSON.");
 }
 
@@ -160,6 +171,99 @@ void E3Linear::reverse(const std::vector<double>& output_adj, std::vector<double
             masked_output_adjoint.data()+out.offset, width,
             1.0,
             input_adj.data()+in.offset, width);
+    }
+}
+
+void E3Linear::evaluate_batch(
+    const std::vector<double>& input_values,
+    int samples,
+    std::vector<double>& output_values,
+    E3LinearBatchWorkspace& workspace) const
+{
+    validate_batch_size(input_values, samples, input.dimension(), "linear batch input");
+    output_values.assign(static_cast<std::size_t>(samples)*output.dimension(), 0.0);
+    for (const auto& instruction : instructions) {
+        const auto& in = input.blocks[instruction.input_1];
+        const auto& out = output.blocks[instruction.output];
+        if (instruction.path_shape[0] != in.multiplicity
+            || instruction.path_shape[1] != out.multiplicity || in.l != out.l)
+            throw std::invalid_argument("Unsupported MACE_Nonlinear e3nn Linear path.");
+        const int width = 2*in.l+1;
+        if (samples > std::numeric_limits<int>::max()/width)
+            throw std::invalid_argument("MACE_Nonlinear linear batch is too large.");
+        const int columns = samples*width;
+        workspace.packed_input.resize(static_cast<std::size_t>(in.multiplicity)*columns);
+        workspace.packed_output.assign(static_cast<std::size_t>(out.multiplicity)*columns, 0.0);
+        for (int channel=0; channel<in.multiplicity; ++channel)
+            for (int sample=0; sample<samples; ++sample)
+                std::copy_n(
+                    input_values.data()+sample*input.dimension()+in.offset+channel*width,
+                    width,
+                    workspace.packed_input.data()+channel*columns+sample*width);
+        if (columns > 0)
+            cblas_dgemm(
+                CblasRowMajor, CblasTrans, CblasNoTrans,
+                out.multiplicity, columns, in.multiplicity,
+                instruction.path_weight,
+                weights.data()+instruction.weight_offset, out.multiplicity,
+                workspace.packed_input.data(), columns,
+                0.0,
+                workspace.packed_output.data(), columns);
+        for (int channel=0; channel<out.multiplicity; ++channel)
+            for (int sample=0; sample<samples; ++sample)
+                for (int component=0; component<width; ++component)
+                    output_values[sample*output.dimension()+out.offset+channel*width+component]
+                        += workspace.packed_output[channel*columns+sample*width+component];
+    }
+    for (int sample=0; sample<samples; ++sample)
+        for (int index=0; index<output.dimension(); ++index) {
+            const std::size_t offset = static_cast<std::size_t>(sample)*output.dimension()+index;
+            output_values[offset] = (output_values[offset]
+                +(bias.empty() ? 0.0 : bias[index]))*output_mask[index];
+        }
+}
+
+void E3Linear::reverse_batch(
+    const std::vector<double>& output_adjoint,
+    int samples,
+    std::vector<double>& input_adjoint,
+    E3LinearBatchWorkspace& workspace) const
+{
+    validate_batch_size(output_adjoint, samples, output.dimension(), "linear batch output adjoint");
+    const std::size_t input_size = static_cast<std::size_t>(samples)*input.dimension();
+    if (input_adjoint.size() != input_size)
+        input_adjoint.assign(input_size, 0.0);
+    for (const auto& instruction : instructions) {
+        const auto& in = input.blocks[instruction.input_1];
+        const auto& out = output.blocks[instruction.output];
+        const int width = 2*in.l+1;
+        if (samples > std::numeric_limits<int>::max()/width)
+            throw std::invalid_argument("MACE_Nonlinear linear batch is too large.");
+        const int columns = samples*width;
+        workspace.packed_output.resize(static_cast<std::size_t>(out.multiplicity)*columns);
+        workspace.packed_input.assign(static_cast<std::size_t>(in.multiplicity)*columns, 0.0);
+        for (int channel=0; channel<out.multiplicity; ++channel)
+            for (int sample=0; sample<samples; ++sample)
+                for (int component=0; component<width; ++component) {
+                    const int output_index = out.offset+channel*width+component;
+                    workspace.packed_output[channel*columns+sample*width+component]
+                        = output_mask[output_index]
+                        *output_adjoint[sample*output.dimension()+output_index];
+                }
+        if (columns > 0)
+            cblas_dgemm(
+                CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                in.multiplicity, columns, out.multiplicity,
+                instruction.path_weight,
+                weights.data()+instruction.weight_offset, out.multiplicity,
+                workspace.packed_output.data(), columns,
+                0.0,
+                workspace.packed_input.data(), columns);
+        for (int channel=0; channel<in.multiplicity; ++channel)
+            for (int sample=0; sample<samples; ++sample)
+                for (int component=0; component<width; ++component)
+                    input_adjoint[sample*input.dimension()+in.offset+channel*width+component]
+                        += workspace.packed_input[channel*columns+sample*width+component];
     }
 }
 

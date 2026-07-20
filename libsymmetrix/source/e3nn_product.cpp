@@ -249,7 +249,7 @@ void E3ProductBasis::evaluate_compiled(
 void E3ProductBasis::reverse_compiled(
     const std::vector<double>& feature_major,
     int element,
-    const std::vector<double>& contracted_adjoint,
+    std::span<const double> contracted_adjoint,
     std::vector<double>& feature_major_adjoint) const
 {
     for (int block_index=0; block_index<static_cast<int>(compiled_blocks.size()); ++block_index) {
@@ -293,11 +293,13 @@ void E3ProductBasis::reverse_compiled(
     }
 }
 
-std::vector<double> E3ProductBasis::make_feature_major(const std::vector<double>& node_features) const
+void E3ProductBasis::make_feature_major(
+    std::span<const double> node_features,
+    std::vector<double>& feature_major) const
 {
     if (static_cast<int>(node_features.size()) != input.dimension())
         throw std::invalid_argument("MACE_Nonlinear product feature size is invalid.");
-    std::vector<double> feature_major(num_features*angular_dimension);
+    feature_major.resize(num_features*angular_dimension);
     int angular_offset = 0;
     for (const auto& block : input.blocks) {
         const int width = 2*block.l+1;
@@ -307,12 +309,15 @@ std::vector<double> E3ProductBasis::make_feature_major(const std::vector<double>
                     = node_features[block.offset+feature*width+component];
         angular_offset += width;
     }
-    return feature_major;
 }
 
-std::vector<double> E3ProductBasis::make_irrep_major(const std::vector<double>& feature_major) const
+void E3ProductBasis::make_irrep_major(
+    const std::vector<double>& feature_major,
+    std::span<double> result) const
 {
-    std::vector<double> result(output.dimension(), 0.0);
+    if (static_cast<int>(result.size()) != output.dimension())
+        throw std::invalid_argument("MACE_Nonlinear product contracted size is invalid.");
+    std::fill(result.begin(), result.end(), 0.0);
     int angular_offset = 0;
     for (const auto& block : output.blocks) {
         const int width = 2*block.l+1;
@@ -322,7 +327,6 @@ std::vector<double> E3ProductBasis::make_irrep_major(const std::vector<double>& 
                     = feature_major[feature*angular_dimension+angular_offset+component];
         angular_offset += width;
     }
-    return result;
 }
 
 double E3ProductBasis::evaluate_term(
@@ -410,10 +414,32 @@ std::vector<double> E3ProductBasis::evaluate(
     const std::vector<double>& skip_connection,
     int element) const
 {
-    const auto features = make_feature_major(node_features);
-    std::vector<double> product_major(num_features*angular_dimension, 0.0);
+    std::vector<double> contracted(linear.input_dimension());
+    std::vector<double> feature_major;
+    std::vector<double> product_major;
+    evaluate_contraction(
+        node_features, element, contracted, feature_major, product_major);
+    auto result = linear.evaluate(contracted);
+    if (use_sc) {
+        if (skip_connection.size() != result.size())
+            throw std::invalid_argument("MACE_Nonlinear product skip connection size is invalid.");
+        for (int i=0; i<static_cast<int>(result.size()); ++i)
+            result[i] += skip_connection[i];
+    }
+    return result;
+}
+
+void E3ProductBasis::evaluate_contraction(
+    std::span<const double> node_features,
+    int element,
+    std::span<double> contracted,
+    std::vector<double>& feature_major,
+    std::vector<double>& product_major) const
+{
+    make_feature_major(node_features, feature_major);
+    product_major.assign(num_features*angular_dimension, 0.0);
     if (!compiled_blocks.empty()) {
-        evaluate_compiled(features, element, product_major);
+        evaluate_compiled(feature_major, element, product_major);
     } else {
         int output_angular_offset = 0;
         for (int block_index=0; block_index<static_cast<int>(output.blocks.size()); ++block_index) {
@@ -429,20 +455,13 @@ std::vector<double> E3ProductBasis::evaluate(
                             ? contraction.weights_max
                             : contraction.weights[contraction.correlation-degree-1];
                         product_major[feature*angular_dimension+output_angular_offset+component]
-                            += evaluate_term(u, weights, features,
+                            += evaluate_term(u, weights, feature_major,
                                              block.l == 0 ? -1 : component, feature, element);
                     }
             output_angular_offset += 2*block.l+1;
         }
     }
-    auto result = linear.evaluate(make_irrep_major(product_major));
-    if (use_sc) {
-        if (skip_connection.size() != result.size())
-            throw std::invalid_argument("MACE_Nonlinear product skip connection size is invalid.");
-        for (int i=0; i<static_cast<int>(result.size()); ++i)
-            result[i] += skip_connection[i];
-    }
-    return result;
+    make_irrep_major(product_major, contracted);
 }
 
 void E3ProductBasis::reverse(
@@ -456,10 +475,34 @@ void E3ProductBasis::reverse(
         throw std::invalid_argument("MACE_Nonlinear product output adjoint size is invalid.");
     std::vector<double> contracted_adjoint;
     linear.reverse(output_adjoint, contracted_adjoint);
-    const auto features = make_feature_major(node_features);
-    std::vector<double> feature_adjoint(num_features*angular_dimension, 0.0);
+    node_features_adjoint.assign(input.dimension(), 0.0);
+    std::vector<double> feature_major;
+    std::vector<double> feature_major_adjoint;
+    reverse_contraction(
+        node_features, element, contracted_adjoint, node_features_adjoint,
+        feature_major, feature_major_adjoint);
+    skip_connection_adjoint = use_sc
+        ? output_adjoint
+        : std::vector<double>(output.dimension(), 0.0);
+}
+
+void E3ProductBasis::reverse_contraction(
+    std::span<const double> node_features,
+    int element,
+    std::span<const double> contracted_adjoint,
+    std::span<double> node_features_adjoint,
+    std::vector<double>& feature_major,
+    std::vector<double>& feature_major_adjoint) const
+{
+    if (static_cast<int>(contracted_adjoint.size()) != linear.input_dimension())
+        throw std::invalid_argument("MACE_Nonlinear product contracted adjoint size is invalid.");
+    if (static_cast<int>(node_features_adjoint.size()) != input.dimension())
+        throw std::invalid_argument("MACE_Nonlinear product feature adjoint size is invalid.");
+    make_feature_major(node_features, feature_major);
+    feature_major_adjoint.assign(num_features*angular_dimension, 0.0);
     if (!compiled_blocks.empty()) {
-        reverse_compiled(features, element, contracted_adjoint, feature_adjoint);
+        reverse_compiled(
+            feature_major, element, contracted_adjoint, feature_major_adjoint);
     } else {
         for (int block_index=0; block_index<static_cast<int>(output.blocks.size()); ++block_index) {
             const auto& block = output.blocks[block_index];
@@ -472,24 +515,96 @@ void E3ProductBasis::reverse(
                         const auto& weights = degree == contraction.correlation
                             ? contraction.weights_max
                             : contraction.weights[contraction.correlation-degree-1];
-                        reverse_term(contraction.u_tensors[degree-1], weights, features,
+                        reverse_term(contraction.u_tensors[degree-1], weights, feature_major,
                                      block.l == 0 ? -1 : component, feature, element,
-                                     adjoint, feature_adjoint);
+                                     adjoint, feature_major_adjoint);
                     }
                 }
         }
     }
-    node_features_adjoint.assign(input.dimension(), 0.0);
+    std::fill(node_features_adjoint.begin(), node_features_adjoint.end(), 0.0);
     int angular_offset = 0;
     for (const auto& block : input.blocks) {
         const int width = 2*block.l+1;
         for (int feature=0; feature<num_features; ++feature)
             for (int component=0; component<width; ++component)
                 node_features_adjoint[block.offset+feature*width+component]
-                    = feature_adjoint[feature*angular_dimension+angular_offset+component];
+                    = feature_major_adjoint[
+                        feature*angular_dimension+angular_offset+component];
         angular_offset += width;
     }
-    skip_connection_adjoint = use_sc
-        ? output_adjoint
-        : std::vector<double>(output.dimension(), 0.0);
+}
+
+void E3ProductBasis::evaluate_batch(
+    const std::vector<double>& node_features,
+    const std::vector<double>& skip_connections,
+    const std::vector<int>& elements,
+    int samples,
+    std::vector<double>& output_values,
+    E3ProductBasisBatchWorkspace& workspace) const
+{
+    if (samples < 0
+        || node_features.size() != static_cast<std::size_t>(samples)*input.dimension()
+        || elements.size() != static_cast<std::size_t>(samples)
+        || (use_sc
+            && skip_connections.size() != static_cast<std::size_t>(samples)*output.dimension()))
+        throw std::invalid_argument("MACE_Nonlinear product batch input size is invalid.");
+    workspace.contracted.resize(static_cast<std::size_t>(samples)*linear.input_dimension());
+    for (int sample=0; sample<samples; ++sample) {
+        const std::span<const double> node(
+            node_features.data()+static_cast<std::size_t>(sample)*input.dimension(),
+            input.dimension());
+        const std::span<double> contracted(
+            workspace.contracted.data()
+                +static_cast<std::size_t>(sample)*linear.input_dimension(),
+            linear.input_dimension());
+        evaluate_contraction(
+            node, elements[sample], contracted,
+            workspace.feature_major, workspace.product_major);
+    }
+    linear.evaluate_batch(workspace.contracted, samples, output_values, workspace.linear);
+    if (use_sc)
+        for (std::size_t index=0; index<output_values.size(); ++index)
+            output_values[index] += skip_connections[index];
+}
+
+void E3ProductBasis::reverse_batch(
+    const std::vector<double>& node_features,
+    const std::vector<int>& elements,
+    const std::vector<double>& output_adjoint,
+    int samples,
+    std::vector<double>& node_features_adjoint,
+    std::vector<double>& skip_connection_adjoint,
+    E3ProductBasisBatchWorkspace& workspace) const
+{
+    if (samples < 0
+        || node_features.size() != static_cast<std::size_t>(samples)*input.dimension()
+        || output_adjoint.size() != static_cast<std::size_t>(samples)*output.dimension()
+        || elements.size() != static_cast<std::size_t>(samples))
+        throw std::invalid_argument("MACE_Nonlinear product batch input size is invalid.");
+    workspace.contracted.clear();
+    linear.reverse_batch(output_adjoint, samples, workspace.contracted, workspace.linear);
+    node_features_adjoint.assign(
+        static_cast<std::size_t>(samples)*input.dimension(), 0.0);
+    for (int sample=0; sample<samples; ++sample) {
+        const std::span<const double> node(
+            node_features.data()+static_cast<std::size_t>(sample)*input.dimension(),
+            input.dimension());
+        const std::span<const double> contracted_adjoint(
+            workspace.contracted.data()
+                +static_cast<std::size_t>(sample)*linear.input_dimension(),
+            linear.input_dimension());
+        const std::span<double> node_adjoint(
+            node_features_adjoint.data()
+                +static_cast<std::size_t>(sample)*input.dimension(),
+            input.dimension());
+        reverse_contraction(
+            node, elements[sample], contracted_adjoint, node_adjoint,
+            workspace.feature_major, workspace.feature_adjoint);
+    }
+    if (use_sc)
+        skip_connection_adjoint = output_adjoint;
+    else
+        skip_connection_adjoint.assign(
+            static_cast<std::size_t>(samples)*output.dimension(), 0.0);
 }

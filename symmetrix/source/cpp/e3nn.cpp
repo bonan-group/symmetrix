@@ -26,6 +26,22 @@ void bind_e3nn(py::module_& module)
         .def("evaluate", &AffineMLP::evaluate)
         .def("evaluate_conditioned", &AffineMLP::evaluate_conditioned)
         .def("reverse_conditioned", &AffineMLP::evaluate_gradient_conditioned)
+        .def("conditioned_batch", [](
+            const AffineMLP& self,
+            const std::vector<double>& input,
+            int samples,
+            int dynamic_input_size,
+            const std::vector<double>& row_contributions,
+            const std::vector<double>& output_adjoint) {
+            AffineMLPBatchTape tape;
+            const auto& output = self.evaluate_conditioned_batch(
+                input, samples, dynamic_input_size, row_contributions, tape);
+            AffineMLPBatchWorkspace workspace;
+            std::vector<double> input_adjoint;
+            self.reverse_conditioned_batch(
+                output_adjoint, tape, input_adjoint, workspace);
+            return py::make_tuple(output, input_adjoint);
+        })
         .def("reverse", &AffineMLP::evaluate_gradient);
 
     py::class_<E3Linear>(module, "E3Linear")
@@ -38,6 +54,24 @@ void bind_e3nn(py::module_& module)
         .def("reverse", [](const E3Linear& self, const std::vector<double>& output_adjoint) {
             std::vector<double> input_adjoint;
             self.reverse(output_adjoint, input_adjoint);
+            return input_adjoint;
+        })
+        .def("evaluate_batch", [](
+            const E3Linear& self,
+            const std::vector<double>& input_values,
+            int samples) {
+            E3LinearBatchWorkspace workspace;
+            std::vector<double> output_values;
+            self.evaluate_batch(input_values, samples, output_values, workspace);
+            return output_values;
+        })
+        .def("reverse_batch", [](
+            const E3Linear& self,
+            const std::vector<double>& output_adjoint,
+            int samples) {
+            E3LinearBatchWorkspace workspace;
+            std::vector<double> input_adjoint;
+            self.reverse_batch(output_adjoint, samples, input_adjoint, workspace);
             return input_adjoint;
         });
 
@@ -82,6 +116,33 @@ void bind_e3nn(py::module_& module)
             std::vector<double> skip_connection_adjoint;
             self.reverse(node_features, element, output_adjoint,
                          node_features_adjoint, skip_connection_adjoint);
+            return py::make_tuple(node_features_adjoint, skip_connection_adjoint);
+        })
+        .def("evaluate_batch", [](
+            const E3ProductBasis& self,
+            const std::vector<double>& node_features,
+            const std::vector<double>& skip_connections,
+            const std::vector<int>& elements,
+            int samples) {
+            E3ProductBasisBatchWorkspace workspace;
+            std::vector<double> output_values;
+            self.evaluate_batch(
+                node_features, skip_connections, elements, samples,
+                output_values, workspace);
+            return output_values;
+        })
+        .def("reverse_batch", [](
+            const E3ProductBasis& self,
+            const std::vector<double>& node_features,
+            const std::vector<int>& elements,
+            const std::vector<double>& output_adjoint,
+            int samples) {
+            E3ProductBasisBatchWorkspace workspace;
+            std::vector<double> node_features_adjoint;
+            std::vector<double> skip_connection_adjoint;
+            self.reverse_batch(
+                node_features, elements, output_adjoint, samples,
+                node_features_adjoint, skip_connection_adjoint, workspace);
             return py::make_tuple(node_features_adjoint, skip_connection_adjoint);
         });
 

@@ -1,9 +1,18 @@
 #pragma once
 
 #include <array>
+#include <span>
 #include <vector>
 
 #include "e3nn.hpp"
+
+struct E3ProductBasisBatchWorkspace {
+    E3LinearBatchWorkspace linear;
+    std::vector<double> contracted;
+    std::vector<double> feature_major;
+    std::vector<double> product_major;
+    std::vector<double> feature_adjoint;
+};
 
 // Product-basis evaluation used by EquivariantProductBasisBlock.  The MACE
 // schema stores the U tensors emitted by mace.tools.cg, allowing this class to
@@ -32,6 +41,21 @@ public:
         const std::vector<double>& output_adjoint,
         std::vector<double>& node_features_adjoint,
         std::vector<double>& skip_connection_adjoint) const;
+    void evaluate_batch(
+        const std::vector<double>& node_features,
+        const std::vector<double>& skip_connections,
+        const std::vector<int>& elements,
+        int samples,
+        std::vector<double>& output_values,
+        E3ProductBasisBatchWorkspace& workspace) const;
+    void reverse_batch(
+        const std::vector<double>& node_features,
+        const std::vector<int>& elements,
+        const std::vector<double>& output_adjoint,
+        int samples,
+        std::vector<double>& node_features_adjoint,
+        std::vector<double>& skip_connection_adjoint,
+        E3ProductBasisBatchWorkspace& workspace) const;
 
 private:
     struct Contraction {
@@ -55,8 +79,12 @@ private:
         std::vector<CompiledTerm> terms;
     };
 
-    std::vector<double> make_feature_major(const std::vector<double>& node_features) const;
-    std::vector<double> make_irrep_major(const std::vector<double>& feature_major) const;
+    void make_feature_major(
+        std::span<const double> node_features,
+        std::vector<double>& feature_major) const;
+    void make_irrep_major(
+        const std::vector<double>& feature_major,
+        std::span<double> result) const;
     double evaluate_term(
         const Tensor& u,
         const Tensor& weights,
@@ -82,7 +110,20 @@ private:
     void reverse_compiled(
         const std::vector<double>& feature_major,
         int element,
-        const std::vector<double>& contracted_adjoint,
+        std::span<const double> contracted_adjoint,
+        std::vector<double>& feature_major_adjoint) const;
+    void evaluate_contraction(
+        std::span<const double> node_features,
+        int element,
+        std::span<double> contracted,
+        std::vector<double>& feature_major,
+        std::vector<double>& product_major) const;
+    void reverse_contraction(
+        std::span<const double> node_features,
+        int element,
+        std::span<const double> contracted_adjoint,
+        std::span<double> node_features_adjoint,
+        std::vector<double>& feature_major,
         std::vector<double>& feature_major_adjoint) const;
 
     Irreps input;

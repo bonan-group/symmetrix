@@ -3,6 +3,7 @@
 #include <cmath>
 #include <stdexcept>
 
+#include "cblas.hpp"
 #include "nlohmann/json.hpp"
 
 namespace {
@@ -268,4 +269,149 @@ std::vector<double> AffineMLP::evaluate_gradient_impl(
         }
     }
     return adjoint;
+}
+
+const std::vector<double>& AffineMLP::evaluate_conditioned_batch(
+    const std::vector<double>& input,
+    int samples,
+    int dynamic_input_size,
+    const std::vector<double>& row_contributions,
+    AffineMLPBatchTape& tape) const
+{
+    if (samples < 0 || !supports_conditioned_input(dynamic_input_size)
+        || input.size() != static_cast<std::size_t>(samples)*dynamic_input_size)
+        throw std::invalid_argument("AffineMLP conditioned batch input dimensions are inconsistent.");
+    const int conditioning_width = layers.front().output_size;
+    if (row_contributions.size()
+        != static_cast<std::size_t>(samples)*conditioning_width)
+        throw std::invalid_argument("AffineMLP conditioned batch contributions have invalid dimensions.");
+
+    tape.samples = samples;
+    tape.dynamic_input_size = dynamic_input_size;
+    tape.values.resize(layers.size()+1);
+    tape.values.front() = input;
+    for (int layer_index=0; layer_index<static_cast<int>(layers.size()); ++layer_index) {
+        const auto& layer = layers[layer_index];
+        const auto& source = tape.values[layer_index];
+        auto& destination = tape.values[layer_index+1];
+        destination.resize(static_cast<std::size_t>(samples)*layer.output_size);
+        if (layer.type == Layer::Type::Linear) {
+            const int active_input_size = layer_index == 0
+                ? dynamic_input_size : layer.input_size;
+            if (samples > 0)
+                cblas_dgemm(
+                    CblasRowMajor, CblasNoTrans, CblasTrans,
+                    samples, layer.output_size, active_input_size,
+                    1.0,
+                    source.data(), active_input_size,
+                    layer.weight.data(), layer.input_size,
+                    0.0,
+                    destination.data(), layer.output_size);
+            for (int sample=0; sample<samples; ++sample)
+                for (int column=0; column<layer.output_size; ++column) {
+                    const std::size_t offset =
+                        static_cast<std::size_t>(sample)*layer.output_size+column;
+                    destination[offset] += layer.bias[column];
+                    if (layer_index == 0)
+                        destination[offset] += row_contributions[offset];
+                }
+        } else if (layer.type == Layer::Type::LayerNorm) {
+            for (int sample=0; sample<samples; ++sample) {
+                const double* values = source.data()
+                    +static_cast<std::size_t>(sample)*layer.input_size;
+                double mean = 0.0;
+                for (int column=0; column<layer.input_size; ++column)
+                    mean += values[column];
+                mean /= layer.input_size;
+                double variance = 0.0;
+                for (int column=0; column<layer.input_size; ++column)
+                    variance += (values[column]-mean)*(values[column]-mean);
+                variance /= layer.input_size;
+                const double inverse_stddev = 1.0/std::sqrt(variance+layer.eps);
+                for (int column=0; column<layer.input_size; ++column)
+                    destination[static_cast<std::size_t>(sample)*layer.input_size+column]
+                        = (values[column]-mean)*inverse_stddev*layer.weight[column]
+                        + layer.bias[column];
+            }
+        } else {
+            for (std::size_t index=0; index<source.size(); ++index)
+                destination[index] = silu(source[index]);
+        }
+    }
+    return tape.values.back();
+}
+
+void AffineMLP::reverse_conditioned_batch(
+    const std::vector<double>& output_adjoint,
+    const AffineMLPBatchTape& tape,
+    std::vector<double>& input_adjoint,
+    AffineMLPBatchWorkspace& workspace) const
+{
+    if (tape.samples < 0 || !supports_conditioned_input(tape.dynamic_input_size)
+        || tape.values.size() != layers.size()+1
+        || output_adjoint.size()
+            != static_cast<std::size_t>(tape.samples)*output_size())
+        throw std::invalid_argument("AffineMLP conditioned batch tape dimensions are inconsistent.");
+    workspace.adjoint = output_adjoint;
+    for (int layer_index=static_cast<int>(layers.size())-1; layer_index>=0; --layer_index) {
+        const auto& layer = layers[layer_index];
+        const auto& layer_input = tape.values[layer_index];
+        const int active_input_size = layer_index == 0
+            ? tape.dynamic_input_size : layer.input_size;
+        if (layer_input.size()
+            != static_cast<std::size_t>(tape.samples)*active_input_size)
+            throw std::invalid_argument("AffineMLP conditioned batch tape dimensions are inconsistent.");
+        workspace.scratch.resize(
+            static_cast<std::size_t>(tape.samples)*active_input_size);
+        if (layer.type == Layer::Type::Linear) {
+            if (tape.samples > 0)
+                cblas_dgemm(
+                    CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                    tape.samples, active_input_size, layer.output_size,
+                    1.0,
+                    workspace.adjoint.data(), layer.output_size,
+                    layer.weight.data(), layer.input_size,
+                    0.0,
+                    workspace.scratch.data(), active_input_size);
+        } else if (layer.type == Layer::Type::LayerNorm) {
+            for (int sample=0; sample<tape.samples; ++sample) {
+                const double* values = layer_input.data()
+                    +static_cast<std::size_t>(sample)*layer.input_size;
+                const double* adjoint = workspace.adjoint.data()
+                    +static_cast<std::size_t>(sample)*layer.input_size;
+                double mean = 0.0;
+                for (int column=0; column<layer.input_size; ++column)
+                    mean += values[column];
+                mean /= layer.input_size;
+                double variance = 0.0;
+                for (int column=0; column<layer.input_size; ++column)
+                    variance += (values[column]-mean)*(values[column]-mean);
+                variance /= layer.input_size;
+                const double inverse_stddev = 1.0/std::sqrt(variance+layer.eps);
+                double sum_scaled = 0.0;
+                double sum_scaled_normalized = 0.0;
+                for (int column=0; column<layer.input_size; ++column) {
+                    const double normalized = (values[column]-mean)*inverse_stddev;
+                    const double scaled = adjoint[column]*layer.weight[column];
+                    sum_scaled += scaled;
+                    sum_scaled_normalized += scaled*normalized;
+                }
+                for (int column=0; column<layer.input_size; ++column) {
+                    const double normalized = (values[column]-mean)*inverse_stddev;
+                    const double scaled = adjoint[column]*layer.weight[column];
+                    workspace.scratch[
+                        static_cast<std::size_t>(sample)*layer.input_size+column]
+                        = inverse_stddev*(
+                            layer.input_size*scaled-sum_scaled
+                            -normalized*sum_scaled_normalized)/layer.input_size;
+                }
+            }
+        } else {
+            for (std::size_t index=0; index<layer_input.size(); ++index)
+                workspace.scratch[index] = workspace.adjoint[index]
+                    *silu_derivative(layer_input[index]);
+        }
+        workspace.adjoint.swap(workspace.scratch);
+    }
+    input_adjoint = workspace.adjoint;
 }

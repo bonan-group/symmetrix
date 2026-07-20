@@ -118,6 +118,9 @@ private:
     std::vector<E3ProductBasis> products;
     std::vector<bool> product_agnostic;
     std::vector<Readout> readouts;
+    E3LinearBatchWorkspace linear_batch_workspace;
+    E3ProductBasisBatchWorkspace product_batch_workspace;
+    AffineMLPBatchWorkspace affine_batch_workspace;
     bool mh1_fast_path = false;
     bool has_zbl = false;
     ZBL zbl;
