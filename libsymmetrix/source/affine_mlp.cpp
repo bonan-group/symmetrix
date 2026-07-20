@@ -102,6 +102,34 @@ int AffineMLP::output_size() const
     throw std::logic_error("AffineMLP has no sized layer.");
 }
 
+AffineMLP AffineMLP::condition_suffix(
+    int dynamic_input_size,
+    const std::vector<double>& fixed_suffix) const
+{
+    if (layers.empty() || layers.front().type != Layer::Type::Linear
+        || dynamic_input_size <= 0
+        || dynamic_input_size+static_cast<int>(fixed_suffix.size())
+            != layers.front().input_size)
+        throw std::invalid_argument("AffineMLP conditioned input dimensions are inconsistent.");
+
+    AffineMLP result = *this;
+    auto& first = result.layers.front();
+    const int original_input_size = first.input_size;
+    std::vector<double> dynamic_weights(first.output_size*dynamic_input_size);
+    for (int row=0; row<first.output_size; ++row) {
+        const int original_offset = row*original_input_size;
+        const int dynamic_offset = row*dynamic_input_size;
+        for (int column=0; column<dynamic_input_size; ++column)
+            dynamic_weights[dynamic_offset+column] = first.weight[original_offset+column];
+        for (int column=0; column<static_cast<int>(fixed_suffix.size()); ++column)
+            first.bias[row] += first.weight[original_offset+dynamic_input_size+column]
+                *fixed_suffix[column];
+    }
+    first.input_size = dynamic_input_size;
+    first.weight = std::move(dynamic_weights);
+    return result;
+}
+
 std::vector<double> AffineMLP::evaluate(const std::vector<double>& input) const
 {
     if (static_cast<int>(input.size()) != input_size())

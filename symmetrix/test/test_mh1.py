@@ -200,6 +200,16 @@ def test_mh1_json_dispatch_does_not_depend_on_filename_suffix(mh1_si_artifact, t
     assert type(calculator.evaluator).__name__ == "MACENonlinear"
 
 
+def test_mh1_serial_fast_path_requires_exact_architecture(mh1_si_artifact, tmp_path):
+    data, _ = mh1_si_artifact
+    changed = json.loads(json.dumps(data))
+    changed["interactions"][0]["hidden_irreps"] = "512x0e"
+    path = tmp_path / "near-mh1.json"
+    path.write_text(json.dumps(changed))
+    evaluator = native_symmetrix.MACENonlinear(str(path))
+    assert not evaluator.uses_mh1_fast_path
+
+
 def test_mh1_extraction_rejects_unsupported_architecture_features():
     from symmetrix.extract_mace_nonlinear import extract_mace_nonlinear_data
 
@@ -272,6 +282,8 @@ def test_mh1_native_serial_and_kokkos_match_upstream(mh1_si_artifact):
     native_results = {}
     for use_kokkos, evaluator_name in ((False, "MACENonlinear"), (True, "MACENonlinearKokkos")):
         actual = Symmetrix(model_path, use_kokkos=use_kokkos, dtype="float64")
+        if not use_kokkos:
+            assert actual.evaluator.uses_mh1_fast_path
         actual.calculate(atoms.copy(), properties=["energy", "energies", "forces", "stress"])
         assert type(actual.evaluator).__name__ == evaluator_name
         assert actual.cutoff == pytest.approx(expected.r_max)
@@ -532,6 +544,8 @@ def test_mh1_product_basis_forward_and_reverse_match_autograd(mh1_si_artifact):
     model = remove_pt_head(model, "matpes_r2scan")
     torch_module = model.products[1]
     native_module = native_symmetrix.E3ProductBasis(json.dumps(data["products"][1]))
+    assert native_module.uses_compiled_plan
+    assert native_module.compiled_term_count > 0
     rng = np.random.default_rng(456)
     features = rng.normal(scale=0.05, size=native_module.input_dimension)
     skip = rng.normal(scale=0.05, size=native_module.output_dimension)
@@ -555,6 +569,29 @@ def test_mh1_product_basis_forward_and_reverse_match_autograd(mh1_si_artifact):
     assert np.allclose(actual, expected.detach().numpy(), atol=2e-6)
     assert np.allclose(feature_adj, torch_features.grad.numpy(), atol=2e-6)
     assert np.allclose(skip_adj, torch_skip.grad.numpy(), atol=2e-6)
+
+
+def test_mh1_conditioned_affine_mlp_matches_full_input(mh1_si_artifact):
+    data, _ = mh1_si_artifact
+    definition = data["interactions"][0]["conv_tp_weights"]
+    full = native_symmetrix.AffineMLP(json.dumps(definition))
+    rng = np.random.default_rng(918)
+    dynamic_size = len(data["radial_embedding"]["basis"]["weights"]["values"])
+    dynamic = rng.normal(scale=0.1, size=dynamic_size)
+    suffix = rng.normal(scale=0.1, size=full.input_size-dynamic_size)
+    seed = rng.normal(scale=0.1, size=full.output_size)
+    conditioned = full.condition_suffix(dynamic_size, suffix)
+    assert conditioned.input_size == dynamic_size
+    assert np.allclose(
+        conditioned.evaluate(dynamic),
+        full.evaluate(np.concatenate([dynamic, suffix])),
+        atol=2e-12,
+    )
+    assert np.allclose(
+        conditioned.reverse(dynamic, seed),
+        full.reverse(np.concatenate([dynamic, suffix]), seed)[:dynamic_size],
+        atol=2e-12,
+    )
 
 
 def test_mh1_float32_is_rejected(mh1_si_artifact):

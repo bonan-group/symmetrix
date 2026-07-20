@@ -12,6 +12,9 @@ public:
 
     int input_size() const;
     int output_size() const;
+    AffineMLP condition_suffix(
+        int dynamic_input_size,
+        const std::vector<double>& fixed_suffix) const;
     std::vector<double> evaluate(const std::vector<double>& input) const;
     std::vector<double> evaluate_gradient(
         const std::vector<double>& input,

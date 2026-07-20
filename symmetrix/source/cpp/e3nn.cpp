@@ -21,6 +21,7 @@ void bind_e3nn(py::module_& module)
         }))
         .def_property_readonly("input_size", &AffineMLP::input_size)
         .def_property_readonly("output_size", &AffineMLP::output_size)
+        .def("condition_suffix", &AffineMLP::condition_suffix)
         .def("evaluate", &AffineMLP::evaluate)
         .def("reverse", &AffineMLP::evaluate_gradient);
 
@@ -66,6 +67,8 @@ void bind_e3nn(py::module_& module)
         }))
         .def_property_readonly("input_dimension", &E3ProductBasis::input_dimension)
         .def_property_readonly("output_dimension", &E3ProductBasis::output_dimension)
+        .def_property_readonly("uses_compiled_plan", &E3ProductBasis::uses_compiled_plan)
+        .def_property_readonly("compiled_term_count", &E3ProductBasis::compiled_term_count)
         .def("evaluate", &E3ProductBasis::evaluate)
         .def("reverse", [](
             const E3ProductBasis& self,

@@ -1,7 +1,10 @@
 #include "e3nn_product.hpp"
 
+#include <algorithm>
+#include <array>
 #include <functional>
 #include <limits>
+#include <map>
 #include <numeric>
 #include <stdexcept>
 
@@ -23,6 +26,21 @@ E3ProductBasis::Tensor tensor_from_json(const nlohmann::json& value)
         throw std::invalid_argument("MACE_Nonlinear product tensor has an invalid shape.");
     return tensor;
 }
+
+} // namespace
+
+namespace {
+
+struct MonomialKey {
+    int degree = 0;
+    std::array<int,3> indices{};
+
+    bool operator<(const MonomialKey& other) const
+    {
+        if (degree != other.degree) return degree < other.degree;
+        return indices < other.indices;
+    }
+};
 
 } // namespace
 
@@ -97,6 +115,181 @@ E3ProductBasis::E3ProductBasis(const nlohmann::json& data)
                 throw std::invalid_argument("MACE_Nonlinear product element dimensions are inconsistent.");
         }
         contractions.push_back(std::move(contraction));
+    }
+    if (has_mh1_product_layout(data)) compile_mh1_product();
+}
+
+int E3ProductBasis::compiled_term_count() const
+{
+    int result = 0;
+    for (const auto& block : compiled_blocks)
+        result += static_cast<int>(block.terms.size());
+    return result;
+}
+
+bool E3ProductBasis::has_mh1_product_layout(const nlohmann::json& data) const
+{
+    if (!use_sc || !data.value("use_agnostic_product", false)
+        || num_features != 512 || angular_dimension != 16
+        || input.blocks.size() != 4)
+        return false;
+    for (int index=0; index<4; ++index) {
+        const auto& block = input.blocks[index];
+        if (block.multiplicity != 512 || block.l != index
+            || block.parity != (index%2 == 0 ? 1 : -1))
+            return false;
+    }
+    const bool first_product = output.blocks.size() == 2
+        && output.blocks[0].multiplicity == 512 && output.blocks[0].l == 0
+        && output.blocks[0].parity == 1
+        && output.blocks[1].multiplicity == 512 && output.blocks[1].l == 1
+        && output.blocks[1].parity == -1;
+    const bool second_product = output.blocks.size() == 1
+        && output.blocks[0].multiplicity == 512 && output.blocks[0].l == 0
+        && output.blocks[0].parity == 1;
+    if (!first_product && !second_product) return false;
+    for (const auto& contraction : contractions)
+        if (contraction.correlation != 3 || contraction.weights_max.shape[0] != 1)
+            return false;
+    return true;
+}
+
+void E3ProductBasis::compile_mh1_product()
+{
+    compiled_blocks.clear();
+    int angular_offset = 0;
+    for (int block_index=0; block_index<static_cast<int>(output.blocks.size()); ++block_index) {
+        const auto& output_block = output.blocks[block_index];
+        const auto& contraction = contractions[block_index];
+        CompiledBlock compiled;
+        compiled.angular_offset = angular_offset;
+        compiled.width = 2*output_block.l+1;
+        compiled.num_elements = contraction.weights_max.shape[0];
+        compiled.component_offsets.push_back(0);
+
+        for (int component=0; component<compiled.width; ++component) {
+            std::map<MonomialKey,std::vector<double>> coefficients;
+            for (int degree=1; degree<=contraction.correlation; ++degree) {
+                const auto& u = contraction.u_tensors[degree-1];
+                const auto& weights = degree == contraction.correlation
+                    ? contraction.weights_max
+                    : contraction.weights[contraction.correlation-degree-1];
+                const int parameters = u.shape.back();
+                int tuples = 1;
+                for (int axis=0; axis<degree; ++axis) tuples *= angular_dimension;
+                const int component_offset = output_block.l == 0
+                    ? 0 : component*tuples*parameters;
+
+                for (int tuple=0; tuple<tuples; ++tuple) {
+                    MonomialKey key;
+                    key.degree = degree;
+                    int remainder = tuple;
+                    for (int axis=degree-1; axis>=0; --axis) {
+                        key.indices[axis] = remainder%angular_dimension;
+                        remainder /= angular_dimension;
+                    }
+                    std::sort(key.indices.begin(), key.indices.begin()+degree);
+                    for (int parameter=0; parameter<parameters; ++parameter) {
+                        const double u_value =
+                            u.values[component_offset+tuple*parameters+parameter];
+                        if (u_value == 0.0) continue;
+                        auto& values = coefficients[key];
+                        if (values.empty())
+                            values.assign(compiled.num_elements*num_features, 0.0);
+                        for (int element=0; element<compiled.num_elements; ++element) {
+                            const int weight_offset =
+                                (element*parameters+parameter)*num_features;
+                            const int coefficient_offset = element*num_features;
+                            for (int feature=0; feature<num_features; ++feature)
+                                values[coefficient_offset+feature] += u_value
+                                    *weights.values[weight_offset+feature];
+                        }
+                    }
+                }
+            }
+            for (auto& [key, values] : coefficients)
+                compiled.terms.push_back({key.degree, key.indices, std::move(values)});
+            compiled.component_offsets.push_back(static_cast<int>(compiled.terms.size()));
+        }
+        angular_offset += compiled.width;
+        compiled_blocks.push_back(std::move(compiled));
+    }
+}
+
+void E3ProductBasis::evaluate_compiled(
+    const std::vector<double>& feature_major,
+    int element,
+    std::vector<double>& product_major) const
+{
+    for (const auto& block : compiled_blocks) {
+        if (element < 0 || element >= block.num_elements)
+            throw std::out_of_range("MACE_Nonlinear product element index is out of range.");
+        for (int component=0; component<block.width; ++component) {
+            const int first = block.component_offsets[component];
+            const int last = block.component_offsets[component+1];
+            for (int term_index=first; term_index<last; ++term_index) {
+                const auto& term = block.terms[term_index];
+                const double* coefficients =
+                    term.coefficients.data()+element*num_features;
+                for (int feature=0; feature<num_features; ++feature) {
+                    const double* values =
+                        feature_major.data()+feature*angular_dimension;
+                    double monomial = values[term.indices[0]];
+                    if (term.degree > 1) monomial *= values[term.indices[1]];
+                    if (term.degree > 2) monomial *= values[term.indices[2]];
+                    product_major[feature*angular_dimension
+                                  +block.angular_offset+component]
+                        += coefficients[feature]*monomial;
+                }
+            }
+        }
+    }
+}
+
+void E3ProductBasis::reverse_compiled(
+    const std::vector<double>& feature_major,
+    int element,
+    const std::vector<double>& contracted_adjoint,
+    std::vector<double>& feature_major_adjoint) const
+{
+    for (int block_index=0; block_index<static_cast<int>(compiled_blocks.size()); ++block_index) {
+        const auto& block = compiled_blocks[block_index];
+        const auto& output_block = output.blocks[block_index];
+        if (element < 0 || element >= block.num_elements)
+            throw std::out_of_range("MACE_Nonlinear product element index is out of range.");
+        for (int component=0; component<block.width; ++component) {
+            const int first = block.component_offsets[component];
+            const int last = block.component_offsets[component+1];
+            for (int term_index=first; term_index<last; ++term_index) {
+                const auto& term = block.terms[term_index];
+                const double* coefficients =
+                    term.coefficients.data()+element*num_features;
+                for (int feature=0; feature<num_features; ++feature) {
+                    const double common = coefficients[feature]
+                        *contracted_adjoint[output_block.offset
+                            +feature*block.width+component];
+                    const int base = feature*angular_dimension;
+                    const int i0 = term.indices[0];
+                    if (term.degree == 1) {
+                        feature_major_adjoint[base+i0] += common;
+                        continue;
+                    }
+                    const int i1 = term.indices[1];
+                    const double x0 = feature_major[base+i0];
+                    const double x1 = feature_major[base+i1];
+                    if (term.degree == 2) {
+                        feature_major_adjoint[base+i0] += common*x1;
+                        feature_major_adjoint[base+i1] += common*x0;
+                        continue;
+                    }
+                    const int i2 = term.indices[2];
+                    const double x2 = feature_major[base+i2];
+                    feature_major_adjoint[base+i0] += common*x1*x2;
+                    feature_major_adjoint[base+i1] += common*x0*x2;
+                    feature_major_adjoint[base+i2] += common*x0*x1;
+                }
+            }
+        }
     }
 }
 
@@ -219,24 +412,28 @@ std::vector<double> E3ProductBasis::evaluate(
 {
     const auto features = make_feature_major(node_features);
     std::vector<double> product_major(num_features*angular_dimension, 0.0);
-    int output_angular_offset = 0;
-    for (int block_index=0; block_index<static_cast<int>(output.blocks.size()); ++block_index) {
-        const auto& block = output.blocks[block_index];
-        const auto& contraction = contractions[block_index];
-        if (element < 0 || element >= contraction.weights_max.shape[0])
-            throw std::out_of_range("MACE_Nonlinear product element index is out of range.");
-        for (int feature=0; feature<num_features; ++feature)
-            for (int component=0; component<2*block.l+1; ++component)
-                for (int degree=1; degree<=contraction.correlation; ++degree) {
-                    const auto& u = contraction.u_tensors[degree-1];
-                    const auto& weights = degree == contraction.correlation
-                        ? contraction.weights_max
-                        : contraction.weights[contraction.correlation-degree-1];
-                    product_major[feature*angular_dimension+output_angular_offset+component]
-                        += evaluate_term(u, weights, features,
-                                         block.l == 0 ? -1 : component, feature, element);
-                }
-        output_angular_offset += 2*block.l+1;
+    if (!compiled_blocks.empty()) {
+        evaluate_compiled(features, element, product_major);
+    } else {
+        int output_angular_offset = 0;
+        for (int block_index=0; block_index<static_cast<int>(output.blocks.size()); ++block_index) {
+            const auto& block = output.blocks[block_index];
+            const auto& contraction = contractions[block_index];
+            if (element < 0 || element >= contraction.weights_max.shape[0])
+                throw std::out_of_range("MACE_Nonlinear product element index is out of range.");
+            for (int feature=0; feature<num_features; ++feature)
+                for (int component=0; component<2*block.l+1; ++component)
+                    for (int degree=1; degree<=contraction.correlation; ++degree) {
+                        const auto& u = contraction.u_tensors[degree-1];
+                        const auto& weights = degree == contraction.correlation
+                            ? contraction.weights_max
+                            : contraction.weights[contraction.correlation-degree-1];
+                        product_major[feature*angular_dimension+output_angular_offset+component]
+                            += evaluate_term(u, weights, features,
+                                             block.l == 0 ? -1 : component, feature, element);
+                    }
+            output_angular_offset += 2*block.l+1;
+        }
     }
     auto result = linear.evaluate(make_irrep_major(product_major));
     if (use_sc) {
@@ -261,24 +458,26 @@ void E3ProductBasis::reverse(
     linear.reverse(output_adjoint, contracted_adjoint);
     const auto features = make_feature_major(node_features);
     std::vector<double> feature_adjoint(num_features*angular_dimension, 0.0);
-    int output_offset = 0;
-    for (int block_index=0; block_index<static_cast<int>(output.blocks.size()); ++block_index) {
-        const auto& block = output.blocks[block_index];
-        const auto& contraction = contractions[block_index];
-        const int width = 2*block.l+1;
-        for (int feature=0; feature<num_features; ++feature)
-            for (int component=0; component<width; ++component) {
-                const double adjoint = contracted_adjoint[block.offset+feature*width+component];
-                for (int degree=1; degree<=contraction.correlation; ++degree) {
-                    const auto& weights = degree == contraction.correlation
-                        ? contraction.weights_max
-                        : contraction.weights[contraction.correlation-degree-1];
-                    reverse_term(contraction.u_tensors[degree-1], weights, features,
-                                 block.l == 0 ? -1 : component, feature, element,
-                                 adjoint, feature_adjoint);
+    if (!compiled_blocks.empty()) {
+        reverse_compiled(features, element, contracted_adjoint, feature_adjoint);
+    } else {
+        for (int block_index=0; block_index<static_cast<int>(output.blocks.size()); ++block_index) {
+            const auto& block = output.blocks[block_index];
+            const auto& contraction = contractions[block_index];
+            const int width = 2*block.l+1;
+            for (int feature=0; feature<num_features; ++feature)
+                for (int component=0; component<width; ++component) {
+                    const double adjoint = contracted_adjoint[block.offset+feature*width+component];
+                    for (int degree=1; degree<=contraction.correlation; ++degree) {
+                        const auto& weights = degree == contraction.correlation
+                            ? contraction.weights_max
+                            : contraction.weights[contraction.correlation-degree-1];
+                        reverse_term(contraction.u_tensors[degree-1], weights, features,
+                                     block.l == 0 ? -1 : component, feature, element,
+                                     adjoint, feature_adjoint);
+                    }
                 }
-            }
-        output_offset += width;
+        }
     }
     node_features_adjoint.assign(input.dimension(), 0.0);
     int angular_offset = 0;

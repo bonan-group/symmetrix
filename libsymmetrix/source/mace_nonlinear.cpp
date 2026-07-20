@@ -49,6 +49,44 @@ const nlohmann::json& readout_linear(const nlohmann::json& data)
     throw std::invalid_argument(
         "MACE_Nonlinear readout class is unsupported: " + readout_class);
 }
+
+bool is_published_mh1_architecture(const nlohmann::json& data)
+{
+    if (data.at("num_interactions").get<int>() != 2
+        || data.at("l_max").get<int>() != 3
+        || data.at("radial_embedding").at("basis").at("weights").at("values").size() != 10
+        || data.at("interactions").size() != 2
+        || data.at("products").size() != 2
+        || data.at("readouts").size() != 2)
+        return false;
+    const auto& first = data.at("interactions").at(0);
+    const auto& second = data.at("interactions").at(1);
+    if (first.at("class").get<std::string>()
+            != "RealAgnosticResidualNonLinearInteractionBlock"
+        || second.at("class").get<std::string>()
+            != "RealAgnosticResidualNonLinearInteractionBlock"
+        || first.at("node_feats_irreps").get<std::string>() != "512x0e"
+        || second.at("node_feats_irreps").get<std::string>() != "512x0e+512x1o"
+        || first.at("edge_irreps").get<std::string>() != "128x0e"
+        || second.at("edge_irreps").get<std::string>() != "128x0e+128x1o"
+        || first.at("target_irreps").get<std::string>()
+            != "512x0e+512x1o+512x2e+512x3o"
+        || second.at("target_irreps").get<std::string>()
+            != "512x0e+512x1o+512x2e+512x3o"
+        || first.at("hidden_irreps").get<std::string>() != "512x0e+512x1o"
+        || second.at("hidden_irreps").get<std::string>() != "512x0e")
+        return false;
+    const std::string gate_input = "2048x0e+512x1o+512x2e+512x3o";
+    const std::string gate_output = "512x0e+512x1o+512x2e+512x3o";
+    for (const auto* interaction : {&first, &second})
+        if (interaction->at("gate").at("irreps_in").get<std::string>() != gate_input
+            || interaction->at("gate").at("irreps_out").get<std::string>() != gate_output)
+            return false;
+    return data.at("readouts").at(0).at("class").get<std::string>()
+            == "LinearReadoutBlock"
+        && data.at("readouts").at(1).at("class").get<std::string>()
+            == "NonLinearReadoutBlock";
+}
 } // namespace
 
 MaceNonlinear::Gate::Gate(const nlohmann::json& data)
@@ -154,6 +192,50 @@ MaceNonlinear::Interaction::Interaction(const nlohmann::json& data)
       beta(data.at("beta").get<double>())
 {}
 
+void MaceNonlinear::Interaction::prepare_pair_conditioning(
+    int radial_size,
+    int model_element_count,
+    const std::vector<int>& selected_model_indices)
+{
+    if (source_embedding.input_dimension() != model_element_count
+        || target_embedding.input_dimension() != model_element_count
+        || source_embedding.output_dimension() != 512
+        || target_embedding.output_dimension() != 512
+        || convolution_weights.input_size() != radial_size+1024
+        || density.input_size() != radial_size+1024)
+        throw std::invalid_argument("MACE-MH-1 pair-conditioned MLP dimensions are inconsistent.");
+
+    active_type_count = selected_model_indices.size();
+    std::vector<std::vector<double>> source_embeddings(active_type_count);
+    std::vector<std::vector<double>> target_embeddings(active_type_count);
+    for (int type=0; type<active_type_count; ++type) {
+        std::vector<double> attrs(model_element_count, 0.0);
+        attrs.at(selected_model_indices[type]) = 1.0;
+        source_embeddings[type] = source_embedding.evaluate(attrs);
+        target_embeddings[type] = target_embedding.evaluate(attrs);
+    }
+
+    pair_convolution_weights.reserve(active_type_count*active_type_count);
+    pair_density.reserve(active_type_count*active_type_count);
+    for (int source_type=0; source_type<active_type_count; ++source_type)
+        for (int target_type=0; target_type<active_type_count; ++target_type) {
+            auto suffix = source_embeddings[source_type];
+            suffix.insert(suffix.end(), target_embeddings[target_type].begin(),
+                          target_embeddings[target_type].end());
+            pair_convolution_weights.push_back(
+                convolution_weights.condition_suffix(radial_size, suffix));
+            pair_density.push_back(density.condition_suffix(radial_size, suffix));
+        }
+}
+
+int MaceNonlinear::Interaction::pair_index(int source_type, int target_type) const
+{
+    if (source_type < 0 || source_type >= active_type_count
+        || target_type < 0 || target_type >= active_type_count)
+        throw std::out_of_range("MACE-MH-1 pair-conditioned type is out of range.");
+    return source_type*active_type_count+target_type;
+}
+
 MaceNonlinear::Readout::Readout(const nlohmann::json& data)
     : nonlinear(data.at("class").get<std::string>() == "NonLinearReadoutBlock"),
       linear(readout_linear(data)),
@@ -244,6 +326,14 @@ MaceNonlinear::MaceNonlinear(const nlohmann::json& data)
     for (const auto& value : data.at("readouts")) readouts.emplace_back(value);
     if (interactions.size() != products.size() || interactions.size() != readouts.size())
         throw std::invalid_argument("MACE_Nonlinear layer counts are inconsistent.");
+    mh1_fast_path = is_published_mh1_architecture(data)
+        && interactions.size() == 2 && products.size() == 2
+        && products[0].uses_compiled_plan() && products[1].uses_compiled_plan()
+        && bessel_weights.size() == 10;
+    if (mh1_fast_path)
+        for (auto& interaction : interactions)
+            interaction.prepare_pair_conditioning(
+                bessel_weights.size(), model_num_elements, model_indices);
     has_zbl = data.at("has_zbl").get<bool>();
     if (has_zbl) {
         const auto& value = data.at("zbl");
@@ -437,8 +527,10 @@ void MaceNonlinear::compute_node_energies_forces(
         state.up.resize(num_nodes*up_width);
         state.residual.resize(num_nodes*interaction.linear_res.output_dimension());
         state.skip.resize(num_nodes*interaction.skip.output_dimension());
-        state.source_embeddings.resize(num_nodes);
-        state.target_embeddings.resize(num_nodes);
+        if (!mh1_fast_path) {
+            state.source_embeddings.resize(num_nodes);
+            state.target_embeddings.resize(num_nodes);
+        }
         for (int node=0; node<num_nodes; ++node) {
             const auto input = node_slice(features,node,input_width);
             const auto up_node = interaction.linear_up.evaluate(input);
@@ -447,8 +539,10 @@ void MaceNonlinear::compute_node_energies_forces(
             std::copy(residual_node.begin(),residual_node.end(),state.residual.begin()+node*residual_node.size());
             const auto skip_node = interaction.skip.evaluate(input);
             std::copy(skip_node.begin(),skip_node.end(),state.skip.begin()+node*skip_node.size());
-            state.source_embeddings[node] = interaction.source_embedding.evaluate(attrs[node]);
-            state.target_embeddings[node] = interaction.target_embedding.evaluate(attrs[node]);
+            if (!mh1_fast_path) {
+                state.source_embeddings[node] = interaction.source_embedding.evaluate(attrs[node]);
+                state.target_embeddings[node] = interaction.target_embedding.evaluate(attrs[node]);
+            }
         }
         state.messages.assign(num_nodes*message_width,0.0);
         state.densities.assign(num_nodes,0.0);
@@ -462,10 +556,23 @@ void MaceNonlinear::compute_node_energies_forces(
             for (int local=0; local<num_neigh[target]; ++local, ++edge) {
                 const int source = neigh_indices[edge];
                 auto edge_features = radial[edge];
-                edge_features.insert(edge_features.end(),state.source_embeddings[source].begin(),state.source_embeddings[source].end());
-                edge_features.insert(edge_features.end(),state.target_embeddings[target].begin(),state.target_embeddings[target].end());
+                const AffineMLP* convolution_mlp = &interaction.convolution_weights;
+                const AffineMLP* density_mlp = &interaction.density;
+                if (mh1_fast_path) {
+                    const int pair = interaction.pair_index(
+                        neigh_types[edge], node_types[target]);
+                    convolution_mlp = &interaction.pair_convolution_weights[pair];
+                    density_mlp = &interaction.pair_density[pair];
+                } else {
+                    edge_features.insert(
+                        edge_features.end(), state.source_embeddings[source].begin(),
+                        state.source_embeddings[source].end());
+                    edge_features.insert(
+                        edge_features.end(), state.target_embeddings[target].begin(),
+                        state.target_embeddings[target].end());
+                }
                 state.edge_features[edge] = edge_features;
-                auto weights = interaction.convolution_weights.evaluate(edge_features);
+                auto weights = convolution_mlp->evaluate(edge_features);
                 state.raw_weights[edge] = weights;
                 if (!apply_cutoff) for (double& value : weights) value *= cutoffs[edge];
                 state.weights[edge] = weights;
@@ -474,7 +581,7 @@ void MaceNonlinear::compute_node_energies_forces(
                     spherical_harmonics.begin()+edge*num_lm,
                     spherical_harmonics.begin()+(edge+1)*num_lm);
                 add_node_slice(state.messages,target,interaction.convolution.evaluate(up_source,harmonics,weights));
-                const double density_raw = interaction.density.evaluate(edge_features).at(0);
+                const double density_raw = density_mlp->evaluate(edge_features).at(0);
                 state.density_raw[edge] = density_raw;
                 double density_value = std::tanh(density_raw*density_raw);
                 state.density_base[edge] = density_value;
@@ -600,7 +707,15 @@ void MaceNonlinear::compute_node_energies_forces(
                         weights_adj[index] *= cutoffs[edge];
                     }
                 }
-                auto edge_feature_adj = interaction.convolution_weights.evaluate_gradient(
+                const AffineMLP* convolution_mlp = &interaction.convolution_weights;
+                const AffineMLP* density_mlp = &interaction.density;
+                if (mh1_fast_path) {
+                    const int pair = interaction.pair_index(
+                        neigh_types[edge], node_types[target]);
+                    convolution_mlp = &interaction.pair_convolution_weights[pair];
+                    density_mlp = &interaction.pair_density[pair];
+                }
+                auto edge_feature_adj = convolution_mlp->evaluate_gradient(
                     state.edge_features[edge],weights_adj);
                 const double raw = state.density_raw[edge];
                 double density_raw_adj = density_adj[target]
@@ -609,7 +724,7 @@ void MaceNonlinear::compute_node_energies_forces(
                     cutoff_adjoints[edge] += density_adj[target]*state.density_base[edge];
                     density_raw_adj *= cutoffs[edge];
                 }
-                const auto density_feature_adj = interaction.density.evaluate_gradient(
+                const auto density_feature_adj = density_mlp->evaluate_gradient(
                     state.edge_features[edge],{density_raw_adj});
                 for (int index=0; index<static_cast<int>(edge_feature_adj.size()); ++index)
                     edge_feature_adj[index] += density_feature_adj[index];

@@ -19,6 +19,7 @@ public:
     std::vector<double> node_forces;
     double r_cut = 0.0;
     bool has_field_coupling = false;
+    bool uses_mh1_fast_path() const { return mh1_fast_path; }
 
     void compute_node_energies_forces(
         int num_nodes,
@@ -57,10 +58,19 @@ private:
         E3TensorProduct convolution;
         AffineMLP convolution_weights;
         AffineMLP density;
+        std::vector<AffineMLP> pair_convolution_weights;
+        std::vector<AffineMLP> pair_density;
+        int active_type_count = 0;
         Gate gate;
         double alpha;
         double beta;
         explicit Interaction(const nlohmann::json& data);
+        void prepare_pair_conditioning(
+            int radial_size,
+            int model_element_count,
+            const std::vector<int>& selected_model_indices);
+        bool has_pair_conditioning() const { return active_type_count > 0; }
+        int pair_index(int source_type, int target_type) const;
     };
     struct Readout {
         bool nonlinear;
@@ -103,6 +113,7 @@ private:
     std::vector<E3ProductBasis> products;
     std::vector<bool> product_agnostic;
     std::vector<Readout> readouts;
+    bool mh1_fast_path = false;
     bool has_zbl = false;
     ZBL zbl;
     std::vector<double> spherical_harmonics;

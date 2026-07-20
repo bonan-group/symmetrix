@@ -6,6 +6,8 @@
 #include <numeric>
 #include <stdexcept>
 
+#include "cblas.hpp"
+
 namespace {
 
 std::vector<double> tensor_values(const nlohmann::json& tensor)
@@ -124,12 +126,14 @@ std::vector<double> E3Linear::evaluate(const std::vector<double>& x) const
         if (instruction.path_shape[0] != in.multiplicity || instruction.path_shape[1] != out.multiplicity || in.l != out.l)
             throw std::invalid_argument("Unsupported MACE_Nonlinear e3nn Linear path.");
         const int width = 2*in.l + 1;
-        for (int source=0; source<in.multiplicity; ++source)
-            for (int target=0; target<out.multiplicity; ++target) {
-                const double weight = instruction.path_weight * weights[instruction.weight_offset + source*out.multiplicity + target];
-                for (int component=0; component<width; ++component)
-                    result[out.offset + target*width + component] += weight * x[in.offset + source*width + component];
-            }
+        cblas_dgemm(
+            CblasRowMajor, CblasTrans, CblasNoTrans,
+            out.multiplicity, width, in.multiplicity,
+            instruction.path_weight,
+            weights.data()+instruction.weight_offset, out.multiplicity,
+            x.data()+in.offset, width,
+            1.0,
+            result.data()+out.offset, width);
     }
     for (int i=0; i<output.dimension(); ++i)
         result[i] = (result[i] + (bias.empty() ? 0.0 : bias[i])) * output_mask[i];
@@ -141,16 +145,21 @@ void E3Linear::reverse(const std::vector<double>& output_adj, std::vector<double
     validate_vector_size(output_adj, output.dimension(), "linear output adjoint");
     if (static_cast<int>(input_adj.size()) != input.dimension())
         input_adj.assign(input.dimension(), 0.0);
+    std::vector<double> masked_output_adjoint(output.dimension());
+    for (int index=0; index<output.dimension(); ++index)
+        masked_output_adjoint[index] = output_mask[index]*output_adj[index];
     for (const auto& instruction : instructions) {
         const auto& in = input.blocks[instruction.input_1];
         const auto& out = output.blocks[instruction.output];
         const int width = 2*in.l + 1;
-        for (int source=0; source<in.multiplicity; ++source)
-            for (int target=0; target<out.multiplicity; ++target) {
-                const double weight = instruction.path_weight * weights[instruction.weight_offset + source*out.multiplicity + target];
-                for (int component=0; component<width; ++component)
-                    input_adj[in.offset + source*width + component] += weight * output_mask[out.offset + target*width + component] * output_adj[out.offset + target*width + component];
-            }
+        cblas_dgemm(
+            CblasRowMajor, CblasNoTrans, CblasNoTrans,
+            in.multiplicity, width, out.multiplicity,
+            instruction.path_weight,
+            weights.data()+instruction.weight_offset, out.multiplicity,
+            masked_output_adjoint.data()+out.offset, width,
+            1.0,
+            input_adj.data()+in.offset, width);
     }
 }
 
@@ -176,6 +185,14 @@ E3TensorProduct::E3TensorProduct(const nlohmann::json& data)
         if (instruction.wigner_shape != expected_wigner_shape
             || product(instruction.wigner_shape) != static_cast<int>(instruction.wigner_3j.size()))
             throw std::invalid_argument("MACE_Nonlinear tensor-product has an invalid Wigner tensor.");
+        for (int a=0; a<expected_wigner_shape[0]; ++a)
+            for (int b=0; b<expected_wigner_shape[1]; ++b)
+                for (int c=0; c<expected_wigner_shape[2]; ++c) {
+                    const double value = instruction.wigner_3j[
+                        (a*expected_wigner_shape[1]+b)*expected_wigner_shape[2]+c];
+                    if (value != 0.0)
+                        instruction.nonzero_wigner.push_back({a,b,c,value});
+                }
         if (instruction.mode == "uvu") {
             if (out.multiplicity != in1.multiplicity
                 || instruction.path_shape != std::vector<int>{in1.multiplicity, in2.multiplicity})
@@ -229,13 +246,10 @@ std::vector<double> E3TensorProduct::evaluate(
                     ? weights[weight_index]
                     : 1.0;
                 const double scale = instruction.path_weight * path;
-                for (int a=0; a<d1; ++a)
-                    for (int b=0; b<d2; ++b)
-                        for (int c=0; c<d3; ++c)
-                            result[out.offset + w*d3 + c] += scale
-                                * instruction.wigner_3j[(a*d2 + b)*d3 + c]
-                                * x1[in1.offset + u*d1 + a]
-                                * x2[in2.offset + v*d2 + b];
+                for (const auto& entry : instruction.nonzero_wigner)
+                    result[out.offset+w*d3+entry.c] += scale*entry.value
+                        *x1[in1.offset+u*d1+entry.a]
+                        *x2[in2.offset+v*d2+entry.b];
             }
     }
     for (int i=0; i<output.dimension(); ++i)
@@ -271,18 +285,19 @@ void E3TensorProduct::reverse(
                 const int weight_index = instruction.weight_offset
                     + (instruction.mode == "uuu" ? u : u*in2.multiplicity + v);
                 const double path = instruction.has_weight ? weights[weight_index] : 1.0;
-                for (int a=0; a<d1; ++a)
-                    for (int b=0; b<d2; ++b)
-                        for (int c=0; c<d3; ++c) {
-                            const double common = instruction.path_weight
-                                * instruction.wigner_3j[(a*d2+b)*d3+c]
-                                * output_mask[out.offset+w*d3+c]
-                                * output_adj[out.offset+w*d3+c];
-                            input_1_adj[in1.offset+u*d1+a] += common * path * x2[in2.offset+v*d2+b];
-                            input_2_adj[in2.offset+v*d2+b] += common * path * x1[in1.offset+u*d1+a];
-                            if (instruction.has_weight)
-                                weights_adj[weight_index] += common * x1[in1.offset+u*d1+a] * x2[in2.offset+v*d2+b];
-                        }
+                for (const auto& entry : instruction.nonzero_wigner) {
+                    const double common = instruction.path_weight*entry.value
+                        *output_mask[out.offset+w*d3+entry.c]
+                        *output_adj[out.offset+w*d3+entry.c];
+                    input_1_adj[in1.offset+u*d1+entry.a] += common*path
+                        *x2[in2.offset+v*d2+entry.b];
+                    input_2_adj[in2.offset+v*d2+entry.b] += common*path
+                        *x1[in1.offset+u*d1+entry.a];
+                    if (instruction.has_weight)
+                        weights_adj[weight_index] += common
+                            *x1[in1.offset+u*d1+entry.a]
+                            *x2[in2.offset+v*d2+entry.b];
+                }
             }
     }
 }

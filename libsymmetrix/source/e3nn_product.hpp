@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <vector>
 
 #include "e3nn.hpp"
@@ -19,6 +20,8 @@ public:
 
     int input_dimension() const { return input.dimension(); }
     int output_dimension() const { return output.dimension(); }
+    bool uses_compiled_plan() const { return !compiled_blocks.empty(); }
+    int compiled_term_count() const;
     std::vector<double> evaluate(
         const std::vector<double>& node_features,
         const std::vector<double>& skip_connection,
@@ -36,6 +39,20 @@ private:
         std::vector<Tensor> weights;
         Tensor weights_max;
         std::vector<Tensor> u_tensors;
+    };
+
+    struct CompiledTerm {
+        int degree = 0;
+        std::array<int,3> indices{};
+        std::vector<double> coefficients;
+    };
+
+    struct CompiledBlock {
+        int angular_offset = 0;
+        int width = 0;
+        int num_elements = 0;
+        std::vector<int> component_offsets;
+        std::vector<CompiledTerm> terms;
     };
 
     std::vector<double> make_feature_major(const std::vector<double>& node_features) const;
@@ -56,6 +73,17 @@ private:
         int element,
         double output_adjoint,
         std::vector<double>& feature_major_adjoint) const;
+    bool has_mh1_product_layout(const nlohmann::json& data) const;
+    void compile_mh1_product();
+    void evaluate_compiled(
+        const std::vector<double>& feature_major,
+        int element,
+        std::vector<double>& product_major) const;
+    void reverse_compiled(
+        const std::vector<double>& feature_major,
+        int element,
+        const std::vector<double>& contracted_adjoint,
+        std::vector<double>& feature_major_adjoint) const;
 
     Irreps input;
     Irreps output;
@@ -64,4 +92,5 @@ private:
     int num_features;
     int angular_dimension;
     std::vector<Contraction> contractions;
+    std::vector<CompiledBlock> compiled_blocks;
 };

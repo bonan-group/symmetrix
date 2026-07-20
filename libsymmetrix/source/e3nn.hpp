@@ -26,6 +26,12 @@ private:
 };
 
 struct E3Instruction {
+    struct WignerEntry {
+        int a;
+        int b;
+        int c;
+        double value;
+    };
     int input_1 = -1;
     int input_2 = -1;
     int output = -1;
@@ -35,6 +41,7 @@ struct E3Instruction {
     std::vector<int> path_shape;
     std::vector<double> wigner_3j;
     std::vector<int> wigner_shape;
+    std::vector<WignerEntry> nonzero_wigner;
     int weight_offset = 0;
 };
 

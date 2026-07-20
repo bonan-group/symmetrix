@@ -106,6 +106,27 @@ from symmetrix import Symmetrix
 calc = Symmetrix("mace-mh-1.model", head="matpes_r2scan", dtype="float64")
 ```
 
+The non-Kokkos serial evaluator has a specialized CPU fast path for the
+published two-layer MACE-MH-1 architecture. It requires the checkpoint's fixed
+512 feature channels, 128 edge channels, `l_max=3`, correlation-three agnostic
+products, gated residual irreps, and LayerNorm/SiLU edge networks. Head
+selection and supported species subsets remain dynamic. Select this path with:
+
+```python
+calc = Symmetrix(
+    "mace-mh-1.model",
+    head="matpes_r2scan",
+    dtype="float64",
+    use_kokkos=False,
+)
+```
+
+Related nonlinear models that do not match the complete MH-1 architecture use
+the generic native serial evaluator. The Kokkos evaluator is also fully native
+and numerically supported, but does not yet use the sparse product and
+pair-conditioned CPU optimizations. An explicit `use_kokkos=True` request is
+never redirected to the serial evaluator.
+
 Loading a raw `.model` checkpoint requires `mace-torch` for checkpoint
 extraction. It is not used to evaluate energies or derivatives. To run without
 `mace-torch`, extract the selected head once and use the resulting JSON:

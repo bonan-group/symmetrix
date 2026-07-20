@@ -16,6 +16,7 @@ void bind_mace_nonlinear(py::module_& module)
         .def_readonly("atomic_energies", &MaceNonlinear::atomic_energies)
         .def_readonly("r_cut", &MaceNonlinear::r_cut)
         .def_readonly("has_field_coupling", &MaceNonlinear::has_field_coupling)
+        .def_property_readonly("uses_mh1_fast_path", &MaceNonlinear::uses_mh1_fast_path)
         .def_readonly("node_energies", &MaceNonlinear::node_energies)
         .def_readonly("node_forces", &MaceNonlinear::node_forces)
         .def("compute_node_energies_forces", [](
