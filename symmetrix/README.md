@@ -54,10 +54,12 @@ For multi-head models, choose the head explicitly:
 symmetrix_extract_mace --model my-mace.model --head mp-dielectric
 ```
 
-Compact files use Symmetrix format version 2. The spline resolution used for
-the transient active-composition cache defaults to 256 nodes and can be set
-with `--num-spline-points`. To generate the previous pair-table format, provide
-an explicit element list and request it directly:
+Legacy-interaction compact files use Symmetrix format version 2. Nonlinear
+MACE-MH-1-family models use the separate format-version-3 `MACE_Nonlinear`
+schema. The spline resolution used for the transient active-composition cache
+defaults to 256 nodes and can be set with `--num-spline-points`. To generate
+the previous pair-table format for a legacy interaction model, provide an
+explicit element list and request it directly:
 ```
 symmetrix_extract_mace --model my-mace.model \
     --atomic-numbers 1 8 \
@@ -89,6 +91,41 @@ An explicit species subset is strongly recommended for version 1 output
 because persisted pair tables scale quadratically with the number of retained
 elements. Updated Symmetrix readers support both unversioned version 1 and
 compact version 2 files.
+
+### MACE-MH-1 checkpoints
+
+`Symmetrix` accepts MACE-MH-1 `.model` checkpoints through the ASE calculator.
+The `RealAgnosticResidualNonLinearInteractionBlock` graph is evaluated natively
+by both the serial and Kokkos backends, including analytic forces and stress.
+Runtime evaluation requires `dtype="float64"`; the default `use_kokkos=True`
+selects the Kokkos evaluator. Select a model head explicitly when needed:
+
+```
+from symmetrix import Symmetrix
+
+calc = Symmetrix("mace-mh-1.model", head="matpes_r2scan", dtype="float64")
+```
+
+Loading a raw `.model` checkpoint requires `mace-torch` for checkpoint
+extraction. It is not used to evaluate energies or derivatives. To run without
+`mace-torch`, extract the selected head once and use the resulting JSON:
+
+```
+symmetrix_extract_mace --model mace-mh-1.model \
+    --head matpes_r2scan \
+    --output mace-mh-1-matpes-r2scan.json
+```
+
+Format-version-3 `MACE_Nonlinear` JSON can be used through the ASE calculator
+or the native `MACENonlinear` and `MACENonlinearKokkos` library classes. The
+LAMMPS pair styles do not support this model family in the current release and
+fail at `pair_coeff` with an explicit unsupported-model error.
+
+Native extraction supports the standard per-layer `LinearReadoutBlock` and
+SiLU `NonLinearReadoutBlock` layout used by MACE-MH-1. Checkpoints using joint
+embeddings, embedding readouts, `use_last_readout_only`, biased nonlinear
+readouts, or different interaction/readout gate activations are rejected with
+an explicit compatibility error rather than evaluated with changed semantics.
 
 ### ASE Calculator
 

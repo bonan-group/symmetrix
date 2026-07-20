@@ -14,6 +14,7 @@
 // Contributing author: Chuck Witt
 
 #include "pair_symmetrix_mace_kokkos.h"
+#include "model_metadata.hpp"
 
 #include "atom_kokkos.h"
 #include "atom_masks.h"
@@ -157,6 +158,9 @@ void PairSymmetrixMACEKokkos<DeviceType, Precision>::coeff(int narg, char **arg)
   if (!allocated) allocate();
   if (narg != atom->ntypes + 3)
     error->all(FLERR, "Incorrect args for pair coefficients");
+
+  if (symmetrix_is_nonlinear_mace_model(arg[2]))
+    error->all(FLERR, "MACE_Nonlinear models are not supported by pair_style symmetrix/mace/kk in this release");
 
   utils::logmesg(lmp, "Loading MACEKokkos model from \'{}\' ... ", arg[2]);
   mace = std::make_unique<MACEKokkos<Precision>>(arg[2]);

@@ -2048,6 +2048,9 @@ void MACE::load_from_json(
 {
     std::ifstream f(filename);
     nlohmann::json file = nlohmann::json::parse(f);
+    if (file.value("model_type", std::string("MACE")) == "MACE_Nonlinear")
+        throw std::invalid_argument(
+            "MACE_Nonlinear JSON must be loaded through the nonlinear MACE evaluator, not legacy MACE.");
 
     // Basic model information
     num_elements = file["num_elements"];

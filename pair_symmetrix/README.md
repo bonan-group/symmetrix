@@ -24,6 +24,10 @@ artifact must also work with an older Symmetrix/LAMMPS installation, generate
 it with `symmetrix_extract_mace --radial-format pair-splines` and an explicit
 element subset.
 
+Format-version-3 `MACE_Nonlinear` models, including MACE-MH-1, are currently
+supported by the Python ASE calculator and native library only. Both LAMMPS
+pair styles reject these models explicitly at `pair_coeff`.
+
 For MACEField JSON models, use the Kokkos pair style with an explicit
 uniform electric field:
 ```

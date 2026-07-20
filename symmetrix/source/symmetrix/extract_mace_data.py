@@ -72,6 +72,8 @@ def extract_mace_data(
             except ValueError as exc:
                 raise ValueError("Failed to parse {sp} as atomic number or chemical species") from exc
         atomic_numbers.append(Z)
+    if len(set(atomic_numbers)) != len(atomic_numbers):
+        raise ValueError("Duplicate species are not supported during MACE extraction.")
 
     # ensure that splines goes smoothly to 0 at outer cutoff
     spline_bc_type = ("not-a-knot", "clamped")
@@ -89,6 +91,28 @@ def extract_mace_data(
         type(model).__name__ == "MACEField"
         or (hasattr(model, "field_feats") and hasattr(model, "field_linear"))
     )
+
+    try:
+        from mace.modules.blocks import RealAgnosticResidualNonLinearInteractionBlock
+    except ImportError:
+        RealAgnosticResidualNonLinearInteractionBlock = ()
+    if (
+        not is_macefield
+        and RealAgnosticResidualNonLinearInteractionBlock
+        and len(model.interactions) > 0
+        and all(
+            isinstance(interaction, RealAgnosticResidualNonLinearInteractionBlock)
+            for interaction in model.interactions
+        )
+    ):
+        if radial_format != "compact":
+            raise ValueError(
+                "MACE_Nonlinear models require the format-version-3 compact schema; "
+                "pair-splines is only available for legacy MACE interactions."
+            )
+        from .extract_mace_nonlinear import extract_mace_nonlinear_data
+
+        return extract_mace_nonlinear_data(model, atomic_numbers)
 
     if len(model.interactions) != 2:
         raise RuntimeError("Currently, symmetrix only supports two-layer MACE models.")

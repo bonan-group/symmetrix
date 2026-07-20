@@ -41,7 +41,9 @@ add_subdirectory(external/pybind11)
 set(SYMMETRIX_BINDINGS
     source/cpp/cubic_spline.cpp
     source/cpp/cubic_spline_set.cpp
+    source/cpp/e3nn.cpp
     source/cpp/mace.cpp
+    source/cpp/mace_nonlinear.cpp
     source/cpp/multilayer_perceptron.cpp
     source/cpp/multivariate_polynomial.cpp
     source/cpp/spherical_harmonic.cpp
@@ -52,6 +54,7 @@ set(SYMMETRIX_BINDINGS_KOKKOS
     source/cpp/cubic_spline_kokkos.cpp
     source/cpp/cubic_spline_set_kokkos.cpp
     source/cpp/mace_kokkos.cpp
+    source/cpp/mace_nonlinear_kokkos.cpp
     source/cpp/multilayer_perceptron_kokkos.cpp
     source/cpp/multivariate_polynomial_kokkos.cpp
     # source/spherical_harmonic_kokkos.cpp

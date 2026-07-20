@@ -14,6 +14,7 @@
 // Contributing author: Chuck Witt
 
 #include "pair_symmetrix_mace.h"
+#include "model_metadata.hpp"
 
 #include "atom.h"
 #include "comm.h"
@@ -117,6 +118,9 @@ void PairSymmetrixMACE::coeff(int narg, char **arg)
   if (!allocated) allocate();
   if (narg != atom->ntypes + 3)
     error->all(FLERR, "Incorrect args for pair coefficients");
+
+  if (symmetrix_is_nonlinear_mace_model(arg[2]))
+    error->all(FLERR, "MACE_Nonlinear models are not supported by pair_style symmetrix/mace in this release");
 
   utils::logmesg(lmp, "Loading MACE model from \'{}\' ... ", arg[2]);
   mace = std::make_unique<MACE>(arg[2]);

@@ -24,10 +24,16 @@ endif()
 # ----- libsymmetrix -----
 
 set(SYMMETRIX_SOURCE_FILES
+    source/affine_mlp.cpp
+    source/e3nn.cpp
+    source/e3nn_product.cpp
+    source/model_metadata.cpp
     source/compact_radial.cpp
     source/cubic_spline.cpp
     source/cubic_spline_set.cpp
     source/mace.cpp
+    source/mace_nonlinear.cpp
+    source/mace_nonlinear_schema.cpp
     source/multilayer_perceptron.cpp
     source/multivariate_polynomial.cpp
     source/spherical_harmonic.cpp
@@ -36,9 +42,13 @@ set(SYMMETRIX_SOURCE_FILES
 
 if(SYMMETRIX_KOKKOS)
     list(APPEND SYMMETRIX_SOURCE_FILES
+        source/affine_mlp_kokkos.cpp
+        source/e3nn_kokkos.cpp
+        source/e3nn_product_kokkos.cpp
         source/cubic_spline_kokkos.cpp
         source/cubic_spline_set_kokkos.cpp
         source/mace_kokkos.cpp
+        source/mace_nonlinear_kokkos.cpp
         source/multilayer_perceptron_kokkos.cpp
         source/multivariate_polynomial_kokkos.cpp
         source/radial_function_set_kokkos.cpp
@@ -55,8 +65,8 @@ target_compile_options(symmetrix
 
 target_include_directories(symmetrix
     PUBLIC  source
-    PRIVATE external/json/single_include
-            external/sphericart/sphericart/include)
+            external/json/single_include
+    PRIVATE external/sphericart/sphericart/include)
 
 target_link_libraries(symmetrix
     PRIVATE ${BLAS_LIBRARIES}

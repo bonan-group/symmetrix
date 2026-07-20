@@ -65,29 +65,34 @@ class Symmetrix(Calculator):
             raise ValueError(f"Unsupported dtype '{dtype}'. Supported dtypes are 'float64' and 'float32'.")
         self._macefield_electric_field = None
         self._electric_field = kwargs.get("electric_field", None)
-        self._model_has_field_coupling = self._json_has_field_coupling(model_file)
+        json_metadata = self._json_metadata(model_file)
+        self._model_has_field_coupling = bool(
+            json_metadata.get("has_field_coupling", False)
+        ) if json_metadata is not None else False
 
         if use_kokkos and self._model_has_field_coupling:
             if dtype == "float32":
                 raise ValueError("MACEField JSON models require dtype 'float64' in the Kokkos field-aware path.")
 
         if use_kokkos and not hasattr(symmetrix, "MACEKokkos"):
-            if not str(model_file).endswith(".json"):
+            if json_metadata is None and not str(model_file).lower().endswith(".json"):
                 self._raise_if_macefield_checkpoint(model_file)
             raise RuntimeError("Symmetrix was built without Kokkos support.")
         self.use_kokkos = use_kokkos
-        if self.use_kokkos:
-            if not symmetrix._kokkos_is_initialized():
-                symmetrix._init_kokkos()
-            MACE = symmetrix.MACEKokkos if dtype == "float64" else symmetrix.MACEKokkosFloat
-        else:
-            if dtype == "float32":
-                raise ValueError(f"dtype '{dtype}' requires `use_kokkos = True`")
-            MACE = symmetrix.MACE
+        json_model_type = (
+            json_metadata.get("model_type", "MACE")
+            if json_metadata is not None
+            else None
+        )
+        MACE = self._native_evaluator_class(
+            json_model_type if json_model_type is not None else "MACE",
+            dtype,
+            use_kokkos,
+        )
         try:
             self.evaluator = MACE(str(model_file))
         except RuntimeError: # expecting json.exception.parse_error.101
-            if str(model_file).endswith(".json"):
+            if json_metadata is not None or str(model_file).lower().endswith(".json"):
                 raise
             self._raise_if_macefield_checkpoint(model_file)
 
@@ -100,9 +105,11 @@ class Symmetrix(Calculator):
                          'radial_format']}
             logging.warning(f"Converting model from pytorch model to symmetrix dict with {kwargs_extract}")
             data = extract_mace_data(model_file, **kwargs_extract)
+            MACE = self._native_evaluator_class(data.get("model_type", "MACE"), dtype, use_kokkos)
             with NamedTemporaryFile("w") as fout:
                 logging.warning(f"Converting via NamedTemporaryFile {fout.name}")
                 fout.write(json.dumps(data))
+                fout.flush()
                 self.evaluator = MACE(fout.name)
 
         self.cutoff = self.evaluator.r_cut
@@ -111,14 +118,39 @@ class Symmetrix(Calculator):
             self.implemented_properties.append('node_energy')
             self.implemented_properties.extend(self._macefield_response_properties)
 
-    def _json_has_field_coupling(self, model_file):
-        if not str(model_file).endswith(".json"):
-            return False
+    @staticmethod
+    def _native_evaluator_class(model_type, dtype, use_kokkos):
+        if model_type == "MACE_Nonlinear":
+            if dtype != "float64":
+                raise ValueError("MACE_Nonlinear models currently require dtype 'float64'.")
+            if use_kokkos:
+                if not hasattr(symmetrix, "MACENonlinearKokkos"):
+                    raise RuntimeError(
+                        "This Symmetrix build does not provide the native MACE_Nonlinear Kokkos evaluator.")
+                if not symmetrix._kokkos_is_initialized():
+                    symmetrix._init_kokkos()
+                return symmetrix.MACENonlinearKokkos
+            return symmetrix.MACENonlinear
+        if model_type not in ("MACE", "MACEField"):
+            raise ValueError(f"Unsupported Symmetrix model_type '{model_type}'.")
+        if use_kokkos:
+            if not symmetrix._kokkos_is_initialized():
+                symmetrix._init_kokkos()
+            return symmetrix.MACEKokkos if dtype == "float64" else symmetrix.MACEKokkosFloat
+        if dtype == "float32":
+            raise ValueError(f"dtype '{dtype}' requires `use_kokkos = True`")
+        return symmetrix.MACE
+
+    @staticmethod
+    def _json_metadata(model_file):
         try:
-            with open(model_file) as fin:
-                return bool(json.load(fin).get("has_field_coupling", False))
-        except (OSError, json.JSONDecodeError, AttributeError):
-            return False
+            model_type, has_field_coupling = symmetrix._model_metadata(str(model_file))
+            return {
+                "model_type": model_type,
+                "has_field_coupling": has_field_coupling,
+            }
+        except (OSError, RuntimeError, ValueError, TypeError, AttributeError):
+            return None
 
     def _raise_if_macefield_checkpoint(self, model_file):
         try:
