@@ -19,6 +19,7 @@ private:
     struct Instruction {
         int input_offset, output_offset, input_multiplicity, output_multiplicity, width, weight_offset;
         double path_weight;
+        mutable Kokkos::View<double**,Kokkos::LayoutRight> packed_input,packed_output;
     };
     int input_dimension_=0, output_dimension_=0;
     std::vector<Instruction> instructions;
@@ -33,6 +34,8 @@ public:
     int input_2_dimension() const { return input_2_dimension_; }
     int output_dimension() const { return output_dimension_; }
     int weight_size() const { return weight_size_; }
+    bool has_internal_weights() const { return !internal_weights.empty(); }
+    bool uses_mh1_fast_path() const { return mh1_fast_path; }
     void evaluate(Kokkos::View<const double**,Kokkos::LayoutRight> input_1,
                   Kokkos::View<const double**,Kokkos::LayoutRight> input_2,
                   Kokkos::View<const double**,Kokkos::LayoutRight> weights,
@@ -53,8 +56,13 @@ private:
         bool has_weight, uuu;
         double path_weight;
         Kokkos::View<double*> wigner;
+        Kokkos::View<int**,Kokkos::LayoutRight> sparse_indices;
+        Kokkos::View<double*> sparse_values;
+        Kokkos::View<int*> component_offsets;
+        int sparse_count=0;
     };
     int input_1_dimension_=0,input_2_dimension_=0,output_dimension_=0,weight_size_=0;
+    bool mh1_fast_path=false;
     std::vector<Instruction> instructions;
     Kokkos::View<double*> internal_weights, output_mask;
 };

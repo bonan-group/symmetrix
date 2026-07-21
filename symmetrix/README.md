@@ -106,11 +106,55 @@ from symmetrix import Symmetrix
 calc = Symmetrix("mace-mh-1.model", head="matpes_r2scan", dtype="float64")
 ```
 
-The non-Kokkos serial evaluator has a specialized CPU fast path for the
-published two-layer MACE-MH-1 architecture. It requires the checkpoint's fixed
+The serial and Kokkos CPU evaluators have specialized fast paths for the
+published two-layer MACE-MH-1 architecture. They require the checkpoint's fixed
 512 feature channels, 128 edge channels, `l_max=3`, correlation-three agnostic
-products, gated residual irreps, and LayerNorm/SiLU edge networks. Head
-selection and supported species subsets remain dynamic. Select this path with:
+products, gated residual irreps, LayerNorm/SiLU edge networks, and official
+`uvu [128, 1]` tensor products. Head selection and supported species subsets
+remain dynamic. Universal JSON with all 89 model elements is supported without
+providing an explicit species list.
+
+The Kokkos CPU path is selected by the default `use_kokkos=True`. It shares the
+serial model-load compiler for sparse product coefficients, then executes
+native Kokkos kernels for sparse products and tensor products, compact
+species-conditioned affine networks, packed equivariant linears, and analytic
+reverse propagation. `calculator.evaluator.uses_mh1_fast_path` reports whether
+the strict published topology selected the specialization. Configure CPU
+parallelism before Python initializes Kokkos, for example:
+
+```
+OMP_NUM_THREADS=4 KOKKOS_NUM_THREADS=4 python my_calculation.py
+```
+
+Keep BLAS single-threaded when Kokkos OpenMP provides the outer parallelism to
+avoid oversubscription.
+
+On a 12th Gen Intel Core i9-12900HK, a Release build with CUDA disabled, pinned
+physical cores, and single-threaded OpenBLAS produced the following warmed
+evaluator medians in milliseconds, including energies and analytic forces:
+
+| Atoms | Serial CPU | Kokkos 1 thread | Kokkos 2 threads | Kokkos 3 threads | Kokkos 4 threads |
+|---:|---:|---:|---:|---:|---:|
+| 2 | 16.1 | 87.8 | 49.0 | 36.3 | 30.7 |
+| 16 | 86.2 | 315.1 | 178.5 | 137.3 | 111.5 |
+| 54 | 281.9 | 870.3 | 505.9 | 379.2 | 301.5 |
+| 128 | 718.1 | 1980.8 | 1146.4 | 866.2 | 676.3 |
+
+The native serial backend is faster through 54 atoms; four-thread Kokkos is
+about 5.8 percent faster at 128 atoms. Kokkos one-to-four-thread speedups range
+from 2.83x to 2.93x. After capacities were warmed through the 54-atom graph, 40
+alternating 2/54-atom evaluations held resident memory constant at 880.4 MiB on
+that host. For example, run the following with a suitable physical-core list to
+reproduce the timing, thread-affinity metadata, and lifecycle RSS result:
+
+```
+SYMMETRIX_BENCHMARK_THREADS=4 python benchmarks/mh1_serial_benchmark.py \
+    mh1.json --backend kokkos --cpus 0,2,4,6 \
+    --lifecycle-sizes 1,3 --lifecycle-cycles 20 \
+    --max-lifecycle-growth-mib 16
+```
+
+The non-Kokkos specialization remains available with:
 
 ```python
 calc = Symmetrix(
@@ -122,10 +166,16 @@ calc = Symmetrix(
 ```
 
 Related nonlinear models that do not match the complete MH-1 architecture use
-the generic native serial evaluator. The Kokkos evaluator is also fully native
-and numerically supported, but does not yet use the sparse product and
-pair-conditioned CPU optimizations. An explicit `use_kokkos=True` request is
-never redirected to the serial evaluator.
+the generic native evaluator for the selected backend. An explicit
+`use_kokkos=True` request is never redirected to the serial evaluator. The
+specialized Kokkos CPU path is qualified with Kokkos Serial and OpenMP in
+float64. Builds whose Kokkos default execution space includes CUDA disable the
+MH-1 specialization and retain the generic native nonlinear evaluator; CUDA
+performance and specialized-kernel qualification are deferred.
+
+Native nonlinear evaluator objects retain mutable forward tapes and grow-only
+workspaces. Calls on one evaluator instance must be serialized; use a separate
+calculator/evaluator instance for each concurrently executing native thread.
 
 Loading a raw `.model` checkpoint requires `mace-torch` for checkpoint
 extraction. It is not used to evaluate energies or derivatives. To run without

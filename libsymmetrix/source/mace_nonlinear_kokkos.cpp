@@ -1,8 +1,11 @@
 #include "mace_nonlinear_kokkos.hpp"
 #include "mace_nonlinear_schema.hpp"
 
+#include <algorithm>
 #include <fstream>
+#include <utility>
 
+#include "affine_mlp.hpp"
 #include "sphericart.hpp"
 #include "sphericart_cuda.hpp"
 #include "tools_kokkos.hpp"
@@ -12,6 +15,23 @@ std::vector<double> tensor_values(const nlohmann::json& value){return value.at("
 nlohmann::json load_model_json(const std::string& filename){std::ifstream stream(filename);if(!stream)throw std::runtime_error("Could not open MACE_Nonlinear Kokkos model file: "+filename);return nlohmann::json::parse(stream);}
 const nlohmann::json& checked_interaction(const nlohmann::json& data){if(data.at("class").get<std::string>()!="RealAgnosticResidualNonLinearInteractionBlock")throw std::invalid_argument("MACE_Nonlinear Kokkos interaction class is unsupported.");return data;}
 const nlohmann::json& readout_component(const nlohmann::json& data,int component){const auto readout_class=data.at("class").get<std::string>();if(readout_class=="LinearReadoutBlock")return data.at("linear");if(readout_class=="NonLinearReadoutBlock")return data.at(component==2?"linear_2":"linear_1");throw std::invalid_argument("MACE_Nonlinear Kokkos readout class is unsupported: "+readout_class);}
+
+template<class View>
+void ensure_view(View& view,View& storage,int extent)
+{
+    if(storage.extent(0)<static_cast<std::size_t>(extent))
+        Kokkos::realloc(Kokkos::WithoutInitializing,storage,extent);
+    view=Kokkos::subview(storage,std::make_pair(0,extent));
+}
+
+template<class View>
+void ensure_view(View& view,View& storage,int first,int second)
+{
+    if(storage.extent(0)<static_cast<std::size_t>(first)
+        ||storage.extent(1)!=static_cast<std::size_t>(second))
+        Kokkos::realloc(Kokkos::WithoutInitializing,storage,first,second);
+    view=Kokkos::subview(storage,std::make_pair(0,first),Kokkos::ALL);
+}
 }
 
 struct MaceNonlinearKokkos::SphericalHarmonicsState {
@@ -19,7 +39,8 @@ struct MaceNonlinearKokkos::SphericalHarmonicsState {
     explicit SphericalHarmonicsState(int l_max) : calculator(l_max) {}
     sphericart::cuda::SphericalHarmonics<double> calculator;
 #else
-    explicit SphericalHarmonicsState(int) {}
+    explicit SphericalHarmonicsState(int l_max) : calculator(l_max) {}
+    sphericart::SphericalHarmonics<double> calculator;
 #endif
 };
 
@@ -55,21 +76,81 @@ void MaceNonlinearKokkos::Gate::reverse(Kokkos::View<const double**,Kokkos::Layo
 MaceNonlinearKokkos::Interaction::Interaction(const nlohmann::json& data)
     :source_embedding(checked_interaction(data).at("source_embedding")),target_embedding(data.at("target_embedding")),linear_up(data.at("linear_up")),skip(data.at("skip_tp")),linear_res(data.at("linear_res")),linear_1(data.at("linear_1")),linear_2(data.at("linear_2")),convolution(data.at("conv_tp")),convolution_weights(data.at("conv_tp_weights")),density(data.at("density_fn")),gate(data.at("gate")),alpha(data.at("alpha").get<double>()),beta(data.at("beta").get<double>()){}
 
+bool MaceNonlinearKokkos::Interaction::prepare_pair_conditioning(
+    const nlohmann::json& data,int radial_size,int model_element_count,
+    const std::vector<int>& selected_model_indices)
+{
+    AffineMLP convolution_mlp(data.at("conv_tp_weights"));
+    AffineMLP density_mlp(data.at("density_fn"));
+    if(!convolution_mlp.supports_conditioned_input(radial_size)
+        ||!density_mlp.supports_conditioned_input(radial_size))
+        return false;
+    E3Linear source_linear(data.at("source_embedding"));
+    E3Linear target_linear(data.at("target_embedding"));
+    const int types=selected_model_indices.size();
+    const int convolution_width=data.at("conv_tp_weights").at("layers").at(0)
+        .at("weight").at("shape").at(0).get<int>();
+    const int density_width=data.at("density_fn").at("layers").at(0)
+        .at("weight").at("shape").at(0).get<int>();
+    std::vector<double> convolution_source(types*convolution_width);
+    std::vector<double> convolution_target(types*convolution_width);
+    std::vector<double> density_source(types*density_width);
+    std::vector<double> density_target(types*density_width);
+    const int target_offset=radial_size+source_linear.output_dimension();
+    for(int type=0;type<types;++type) {
+        std::vector<double> attrs(model_element_count,0.0);
+        attrs.at(selected_model_indices.at(type))=1.0;
+        const auto source=source_linear.evaluate(attrs);
+        const auto target=target_linear.evaluate(attrs);
+        const auto convolution_source_row=
+            convolution_mlp.first_layer_contribution(radial_size,source);
+        const auto convolution_target_row=
+            convolution_mlp.first_layer_contribution(target_offset,target);
+        const auto density_source_row=
+            density_mlp.first_layer_contribution(radial_size,source);
+        const auto density_target_row=
+            density_mlp.first_layer_contribution(target_offset,target);
+        std::copy(convolution_source_row.begin(),convolution_source_row.end(),
+            convolution_source.begin()+type*convolution_width);
+        std::copy(convolution_target_row.begin(),convolution_target_row.end(),
+            convolution_target.begin()+type*convolution_width);
+        std::copy(density_source_row.begin(),density_source_row.end(),
+            density_source.begin()+type*density_width);
+        std::copy(density_target_row.begin(),density_target_row.end(),
+            density_target.begin()+type*density_width);
+    }
+    set_kokkos_view(
+        convolution_source_contributions,convolution_source,types,convolution_width);
+    set_kokkos_view(
+        convolution_target_contributions,convolution_target,types,convolution_width);
+    set_kokkos_view(density_source_contributions,density_source,types,density_width);
+    set_kokkos_view(density_target_contributions,density_target,types,density_width);
+    return true;
+}
+
 MaceNonlinearKokkos::Readout::Readout(const nlohmann::json& data)
     :nonlinear(data.at("class").get<std::string>()=="NonLinearReadoutBlock"),linear(readout_component(data,0)),linear_1(readout_component(data,1)),linear_2(readout_component(data,2))
 {if(nonlinear){if(data.at("activation").get<std::string>()!="silu")throw std::invalid_argument("MACE_Nonlinear Kokkos readout activation is unsupported.");activation_constant=data.at("activation_constants").at(0).get<double>();}}
 
 void MaceNonlinearKokkos::Readout::evaluate(Kokkos::View<const double**,Kokkos::LayoutRight> input,Kokkos::View<double*> output)
 {
-    if(!nonlinear){Kokkos::View<double**,Kokkos::LayoutRight> result("readout",input.extent(0),1);linear.evaluate(input,result);Kokkos::deep_copy(output,Kokkos::subview(result,Kokkos::ALL,0));return;}
-    Kokkos::View<double**,Kokkos::LayoutRight> hidden("readout hidden",input.extent(0),linear_1.output_dimension()),activated("readout activated",input.extent(0),linear_1.output_dimension()),result("readout result",input.extent(0),1);linear_1.evaluate(input,hidden);const double constant=activation_constant;Kokkos::parallel_for("readout silu",hidden.size(),KOKKOS_LAMBDA(int flat){const int i=flat/hidden.extent(1),j=flat%hidden.extent(1);const double x=hidden(i,j);activated(i,j)=constant*x/(1.0+Kokkos::exp(-x));});linear_2.evaluate(activated,result);Kokkos::deep_copy(output,Kokkos::subview(result,Kokkos::ALL,0));
+    ensure_view(result,result_storage,input.extent(0),1);
+    if(!nonlinear){linear.evaluate(input,result);Kokkos::deep_copy(output,Kokkos::subview(result,Kokkos::ALL,0));return;}
+    ensure_view(hidden,hidden_storage,input.extent(0),linear_1.output_dimension());
+    ensure_view(activated,activated_storage,input.extent(0),linear_1.output_dimension());
+    auto local_hidden=hidden;auto local_activated=activated;
+    linear_1.evaluate(input,hidden);const double constant=activation_constant;Kokkos::parallel_for("readout silu",hidden.size(),KOKKOS_LAMBDA(int flat){const int i=flat/local_hidden.extent(1),j=flat%local_hidden.extent(1);const double x=local_hidden(i,j);local_activated(i,j)=constant*x/(1.0+Kokkos::exp(-x));});linear_2.evaluate(activated,result);Kokkos::deep_copy(output,Kokkos::subview(result,Kokkos::ALL,0));
 }
 
 void MaceNonlinearKokkos::Readout::reverse(Kokkos::View<const double**,Kokkos::LayoutRight> input,double scale_value,Kokkos::View<double**,Kokkos::LayoutRight> input_adjoint)
 {
-    Kokkos::View<double**,Kokkos::LayoutRight> seed("readout seed",input.extent(0),1);Kokkos::deep_copy(seed,scale_value);
+    ensure_view(seed,seed_storage,input.extent(0),1);Kokkos::deep_copy(seed,scale_value);
     if(!nonlinear){linear.reverse(seed,input_adjoint);return;}
-    Kokkos::View<double**,Kokkos::LayoutRight> hidden("reverse readout hidden",input.extent(0),linear_1.output_dimension()),activated_adj("reverse readout activated adj",input.extent(0),linear_1.output_dimension()),hidden_adj("reverse readout hidden adj",input.extent(0),linear_1.output_dimension());linear_1.evaluate(input,hidden);linear_2.reverse(seed,activated_adj);const double constant=activation_constant;Kokkos::parallel_for("reverse readout silu",hidden.size(),KOKKOS_LAMBDA(int flat){const int i=flat/hidden.extent(1),j=flat%hidden.extent(1);const double x=hidden(i,j),probability=1.0/(1.0+Kokkos::exp(-x));hidden_adj(i,j)=activated_adj(i,j)*constant*(probability+x*probability*(1.0-probability));});linear_1.reverse(hidden_adj,input_adjoint);
+    ensure_view(hidden,hidden_storage,input.extent(0),linear_1.output_dimension());
+    ensure_view(activated_adj,activated_adj_storage,input.extent(0),linear_1.output_dimension());
+    ensure_view(hidden_adj,hidden_adj_storage,input.extent(0),linear_1.output_dimension());
+    auto local_hidden=hidden;auto local_activated_adj=activated_adj;auto local_hidden_adj=hidden_adj;
+    linear_1.evaluate(input,hidden);linear_2.reverse(seed,activated_adj);const double constant=activation_constant;Kokkos::parallel_for("reverse readout silu",hidden.size(),KOKKOS_LAMBDA(int flat){const int i=flat/local_hidden.extent(1),j=flat%local_hidden.extent(1);const double x=local_hidden(i,j),probability=1.0/(1.0+Kokkos::exp(-x));local_hidden_adj(i,j)=local_activated_adj(i,j)*constant*(probability+x*probability*(1.0-probability));});linear_1.reverse(hidden_adj,input_adjoint);
 }
 
 MaceNonlinearKokkos::MaceNonlinearKokkos(const std::string& filename)
@@ -86,15 +167,36 @@ MaceNonlinearKokkos::MaceNonlinearKokkos(const nlohmann::json& data)
     for(const auto& value:data.at("interactions"))interactions.emplace_back(value);for(const auto& value:data.at("products"))products.emplace_back(value);for(const auto& value:data.at("readouts"))readouts.emplace_back(value);
     if(interactions.size()!=products.size()||interactions.size()!=readouts.size())
         throw std::invalid_argument("MACE_Nonlinear Kokkos layer counts are inconsistent.");
+#ifdef KOKKOS_ENABLE_CUDA
+    mh1_fast_path=false;
+#else
+    mh1_fast_path=is_published_mh1_architecture(data)
+        &&std::all_of(products.begin(),products.end(),[](const auto& product) {
+            return product.uses_compiled_plan();
+        })
+        &&std::all_of(interactions.begin(),interactions.end(),[](const auto& interaction) {
+            return interaction.convolution.uses_mh1_fast_path();
+        });
+    if(mh1_fast_path)
+        for(int layer=0;layer<static_cast<int>(interactions.size());++layer)
+            mh1_fast_path=interactions[layer].prepare_pair_conditioning(
+                data.at("interactions").at(layer),num_bessel,model_num_elements,indices)
+                &&mh1_fast_path;
+#endif
     states.resize(interactions.size());has_zbl=data.at("has_zbl").get<bool>();if(has_zbl){const auto& value=data.at("zbl");zbl=ZBLKokkos(value.at("a_exp").get<double>(),value.at("a_prefactor").get<double>(),tensor_values(value.at("c")),tensor_values(value.at("covalent_radii")),static_cast<int>(tensor_values(value.at("p")).at(0)));}
     spherical_harmonics_state=std::make_unique<SphericalHarmonicsState>(l_max);
 }
 
 void MaceNonlinearKokkos::compute_Y(Kokkos::View<const double*> xyz)
 {
-    const int edges=xyz.size()/3;if(Y.size()!=edges*num_lm){Kokkos::realloc(Y,edges*num_lm);Kokkos::realloc(Y_grad,3*edges*num_lm);Kokkos::realloc(xyz_shuffled,3*edges);Kokkos::realloc(Y_grad_shuffled,3*edges*num_lm);}auto shuffled=xyz_shuffled;Kokkos::parallel_for("nonlinear shuffle xyz",edges,KOKKOS_LAMBDA(int i){shuffled(3*i)=xyz(3*i+2);shuffled(3*i+1)=xyz(3*i);shuffled(3*i+2)=xyz(3*i+1);});Kokkos::fence();
+    const int edges=xyz.size()/3;
+    ensure_view(Y,Y_storage,edges*num_lm);
+    ensure_view(Y_grad,Y_grad_storage,3*edges*num_lm);
+    ensure_view(xyz_shuffled,xyz_shuffled_storage,3*edges);
+    ensure_view(Y_grad_shuffled,Y_grad_shuffled_storage,3*edges*num_lm);
+    auto shuffled=xyz_shuffled;Kokkos::parallel_for("nonlinear shuffle xyz",edges,KOKKOS_LAMBDA(int i){shuffled(3*i)=xyz(3*i+2);shuffled(3*i+1)=xyz(3*i);shuffled(3*i+2)=xyz(3*i+1);});Kokkos::fence();
 #ifndef SYMMETRIX_SPHERICART_CUDA
-    auto host_xyz=Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),xyz_shuffled);auto host_y=Kokkos::create_mirror_view(Y);auto host_grad=Kokkos::create_mirror_view(Y_grad);sphericart::SphericalHarmonics<double> calculator(l_max);calculator.compute_array_with_gradients(host_xyz.data(),3*edges,host_y.data(),edges*num_lm,host_grad.data(),3*edges*num_lm);Kokkos::deep_copy(Y,host_y);Kokkos::deep_copy(Y_grad,host_grad);
+    auto host_xyz=Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),xyz_shuffled);auto host_y=Kokkos::create_mirror_view(Y);auto host_grad=Kokkos::create_mirror_view(Y_grad);spherical_harmonics_state->calculator.compute_array_with_gradients(host_xyz.data(),3*edges,host_y.data(),edges*num_lm,host_grad.data(),3*edges*num_lm);Kokkos::deep_copy(Y,host_y);Kokkos::deep_copy(Y_grad,host_grad);
 #else
     spherical_harmonics_state->calculator.compute_with_gradients(xyz_shuffled.data(),edges,Y.data(),Y_grad.data());
 #endif
@@ -117,8 +219,8 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
     if(invalid_edges)throw std::invalid_argument("MACE_Nonlinear Kokkos graph has an invalid edge index, type, distance, or vector.");
     compute_Y(xyz);
 
-    Kokkos::realloc(offsets,num_nodes+1);
-    Kokkos::realloc(targets,edges);
+    ensure_view(offsets,offsets_storage,num_nodes+1);
+    ensure_view(targets,targets_storage,edges);
     Kokkos::deep_copy(offsets,0);
     auto local_offsets=offsets;
     Kokkos::parallel_scan("nonlinear edge offsets",num_nodes,
@@ -136,9 +238,9 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
             local_targets(edge)=node;
     });
 
-    Kokkos::realloc(attrs,num_nodes,model_num_elements);
+    ensure_view(attrs,attrs_storage,num_nodes,model_num_elements);
     Kokkos::deep_copy(attrs,0.0);
-    Kokkos::realloc(product_elements,num_nodes);
+    ensure_view(product_elements,product_elements_storage,num_nodes);
     auto local_attrs=attrs;
     auto indices=model_indices;
     auto elements=product_elements;
@@ -147,12 +249,12 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
         local_attrs(node,element)=1.0;
         elements(node)=element;
     });
-    Kokkos::realloc(features,num_nodes,node_embedding.output_dimension());
+    ensure_view(features,features_storage,num_nodes,node_embedding.output_dimension());
     node_embedding.evaluate(attrs,features);
 
-    Kokkos::realloc(cutoffs,edges);
-    Kokkos::realloc(radial,edges,num_bessel);
-    Kokkos::realloc(edge_harmonics,edges,num_lm);
+    ensure_view(cutoffs,cutoffs_storage,edges);
+    ensure_view(radial,radial_storage,edges,num_bessel);
+    ensure_view(edge_harmonics,edge_harmonics_storage,edges,num_lm);
     auto local_cutoffs=cutoffs;
     auto local_radial=radial;
     auto local_harmonics=edge_harmonics;
@@ -188,7 +290,6 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
             local_harmonics(edge,lm)=flat_y(edge*nlm+lm);
     });
 
-    std::vector<Kokkos::View<int*>> agnostic_elements(interactions.size());
     for(int layer=0;layer<static_cast<int>(interactions.size());++layer) {
         auto& interaction=interactions[layer];
         auto& state=states[layer];
@@ -198,38 +299,69 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
         const int skip_width=interaction.skip.output_dimension();
         const int message_width=interaction.convolution.output_dimension();
         const int output_width=interaction.linear_2.output_dimension();
-        Kokkos::realloc(state.up,num_nodes,up_width);
-        Kokkos::realloc(state.residual,num_nodes,res_width);
-        Kokkos::realloc(state.skip,num_nodes,skip_width);
+        ensure_view(state.up,state.up_storage,num_nodes,up_width);
+        ensure_view(state.residual,state.residual_storage,num_nodes,res_width);
+        ensure_view(state.skip,state.skip_storage,num_nodes,skip_width);
         interaction.linear_up.evaluate(features,state.up);
         interaction.linear_res.evaluate(state.up,state.residual);
         interaction.skip.evaluate(features,state.skip);
 
-        Kokkos::realloc(state.source_embeddings,num_nodes,
-            interaction.source_embedding.output_dimension());
-        Kokkos::realloc(state.target_embeddings,num_nodes,
-            interaction.target_embedding.output_dimension());
-        interaction.source_embedding.evaluate(attrs,state.source_embeddings);
-        interaction.target_embedding.evaluate(attrs,state.target_embeddings);
-        const int edge_width=num_bessel+state.source_embeddings.extent(1)
-            +state.target_embeddings.extent(1);
-        Kokkos::realloc(state.edge_features,edges,edge_width);
-        auto source_embed=state.source_embeddings;
-        auto target_embed=state.target_embeddings;
-        auto edge_features=state.edge_features;
-        Kokkos::parallel_for("nonlinear edge features",edges,KOKKOS_LAMBDA(int edge) {
-            int column=0;
-            for(int k=0;k<nb;++k) edge_features(edge,column++)=local_radial(edge,k);
-            const int source=neigh_indices(edge),target=local_targets(edge);
-            for(int k=0;k<source_embed.extent(1);++k)
-                edge_features(edge,column++)=source_embed(source,k);
-            for(int k=0;k<target_embed.extent(1);++k)
-                edge_features(edge,column++)=target_embed(target,k);
-        });
+        if(mh1_fast_path) {
+            const int convolution_width=
+                interaction.convolution_source_contributions.extent(1);
+            const int density_width=interaction.density_source_contributions.extent(1);
+            ensure_view(state.convolution_contributions,
+                state.convolution_contributions_storage,edges,convolution_width);
+            ensure_view(state.density_contributions,
+                state.density_contributions_storage,edges,density_width);
+            auto convolution_source=interaction.convolution_source_contributions;
+            auto convolution_target=interaction.convolution_target_contributions;
+            auto density_source=interaction.density_source_contributions;
+            auto density_target=interaction.density_target_contributions;
+            auto convolution_contributions=state.convolution_contributions;
+            auto density_contributions=state.density_contributions;
+            Kokkos::parallel_for("nonlinear edge conditioning",edges,KOKKOS_LAMBDA(int edge) {
+                const int source_type=neigh_types(edge);
+                const int target_type=node_types(local_targets(edge));
+                for(int column=0;column<convolution_width;++column)
+                    convolution_contributions(edge,column)=
+                        convolution_source(source_type,column)+convolution_target(target_type,column);
+                for(int column=0;column<density_width;++column)
+                    density_contributions(edge,column)=
+                        density_source(source_type,column)+density_target(target_type,column);
+            });
+        } else {
+            ensure_view(state.source_embeddings,state.source_embeddings_storage,num_nodes,
+                interaction.source_embedding.output_dimension());
+            ensure_view(state.target_embeddings,state.target_embeddings_storage,num_nodes,
+                interaction.target_embedding.output_dimension());
+            interaction.source_embedding.evaluate(attrs,state.source_embeddings);
+            interaction.target_embedding.evaluate(attrs,state.target_embeddings);
+            const int edge_width=num_bessel+state.source_embeddings.extent(1)
+                +state.target_embeddings.extent(1);
+            ensure_view(state.edge_features,state.edge_features_storage,edges,edge_width);
+            auto source_embed=state.source_embeddings;
+            auto target_embed=state.target_embeddings;
+            auto edge_features=state.edge_features;
+            Kokkos::parallel_for("nonlinear edge features",edges,KOKKOS_LAMBDA(int edge) {
+                int column=0;
+                for(int k=0;k<nb;++k) edge_features(edge,column++)=local_radial(edge,k);
+                const int source=neigh_indices(edge),target=local_targets(edge);
+                for(int k=0;k<source_embed.extent(1);++k)
+                    edge_features(edge,column++)=source_embed(source,k);
+                for(int k=0;k<target_embed.extent(1);++k)
+                    edge_features(edge,column++)=target_embed(target,k);
+            });
+        }
 
-        Kokkos::realloc(state.raw_weights,edges,interaction.convolution.weight_size());
-        Kokkos::realloc(state.weights,edges,interaction.convolution.weight_size());
-        interaction.convolution_weights.evaluate(state.edge_features,state.raw_weights);
+        ensure_view(state.raw_weights,state.raw_weights_storage,edges,
+            interaction.convolution.weight_size());
+        ensure_view(state.weights,state.weights_storage,edges,
+            interaction.convolution.weight_size());
+        if(mh1_fast_path)
+            interaction.convolution_weights.evaluate_conditioned(
+                radial,state.convolution_contributions,state.raw_weights);
+        else interaction.convolution_weights.evaluate(state.edge_features,state.raw_weights);
         Kokkos::deep_copy(state.weights,state.raw_weights);
         if(!apply_cutoff) {
             auto weights=state.weights;
@@ -240,7 +372,7 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
                 });
         }
 
-        Kokkos::realloc(state.edge_up,edges,up_width);
+        ensure_view(state.edge_up,state.edge_up_storage,edges,up_width);
         auto edge_up=state.edge_up;
         auto up=state.up;
         Kokkos::parallel_for("nonlinear gather edge up",
@@ -248,42 +380,50 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
             KOKKOS_LAMBDA(int edge,int k) {
                 edge_up(edge,k)=up(neigh_indices(edge),k);
             });
-        Kokkos::realloc(state.edge_messages,edges,message_width);
+        ensure_view(state.edge_messages,state.edge_messages_storage,edges,message_width);
         interaction.convolution.evaluate(
             state.edge_up,edge_harmonics,state.weights,state.edge_messages);
-        Kokkos::realloc(state.messages,num_nodes,message_width);
-        Kokkos::deep_copy(state.messages,0.0);
+        ensure_view(state.messages,state.messages_storage,num_nodes,message_width);
         auto messages=state.messages;
         auto edge_messages=state.edge_messages;
-        Kokkos::parallel_for("nonlinear scatter messages",
-            Kokkos::MDRangePolicy<Kokkos::Rank<2>>({0,0},{edges,message_width}),
-            KOKKOS_LAMBDA(int edge,int k) {
-                Kokkos::atomic_add(&messages(local_targets(edge),k),edge_messages(edge,k));
+        Kokkos::parallel_for("nonlinear gather messages",
+            Kokkos::MDRangePolicy<Kokkos::Rank<2>>({0,0},{num_nodes,message_width}),
+            KOKKOS_LAMBDA(int node,int k) {
+                double value=0.0;
+                for(int edge=local_offsets(node);edge<local_offsets(node+1);++edge)
+                    value+=edge_messages(edge,k);
+                messages(node,k)=value;
             });
 
-        Kokkos::View<double**,Kokkos::LayoutRight> density_matrix(
-            "density raw matrix",edges,1);
-        Kokkos::realloc(state.density_raw,edges);
-        Kokkos::realloc(state.density_base,edges);
-        Kokkos::realloc(state.densities,num_nodes);
-        Kokkos::deep_copy(state.densities,0.0);
-        interaction.density.evaluate(state.edge_features,density_matrix);
+        ensure_view(state.density_matrix,state.density_matrix_storage,edges,1);
+        ensure_view(state.density_raw,state.density_raw_storage,edges);
+        ensure_view(state.density_base,state.density_base_storage,edges);
+        ensure_view(state.densities,state.densities_storage,num_nodes);
+        if(mh1_fast_path)
+            interaction.density.evaluate_conditioned(
+                radial,state.density_contributions,state.density_matrix);
+        else interaction.density.evaluate(state.edge_features,state.density_matrix);
         auto density_raw=state.density_raw;
         auto density_base=state.density_base;
         auto densities=state.densities;
+        auto density_matrix=state.density_matrix;
         Kokkos::parallel_for("nonlinear density",edges,KOKKOS_LAMBDA(int edge) {
             const double raw=density_matrix(edge,0);
             const double base=Kokkos::tanh(raw*raw);
             density_raw(edge)=raw;
             density_base(edge)=base;
-            Kokkos::atomic_add(&densities(local_targets(edge)),
-                base*(embed_cutoff?1.0:local_cutoffs(edge)));
+        });
+        Kokkos::parallel_for("nonlinear density gather",num_nodes,KOKKOS_LAMBDA(int node) {
+            double value=0.0;
+            for(int edge=local_offsets(node);edge<local_offsets(node+1);++edge)
+                value+=density_base(edge)*(embed_cutoff?1.0:local_cutoffs(edge));
+            densities(node)=value;
         });
 
-        Kokkos::realloc(state.linear_1_output,num_nodes,
+        ensure_view(state.linear_1_output,state.linear_1_output_storage,num_nodes,
             interaction.linear_1.output_dimension());
         interaction.linear_1.evaluate(state.messages,state.linear_1_output);
-        Kokkos::realloc(state.pre_gate,num_nodes,res_width);
+        ensure_view(state.pre_gate,state.pre_gate_storage,num_nodes,res_width);
         auto linear_value=state.linear_1_output;
         auto residual=state.residual;
         auto pre_gate=state.pre_gate;
@@ -294,36 +434,38 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
                 pre_gate(node,k)=linear_value(node,k)/(alpha+beta*densities(node))
                     +residual(node,k);
             });
-        Kokkos::realloc(state.gated,num_nodes,interaction.gate.output_size);
+        ensure_view(state.gated,state.gated_storage,num_nodes,interaction.gate.output_size);
         interaction.gate.evaluate(state.pre_gate,state.gated);
-        Kokkos::realloc(state.interaction_output,num_nodes,output_width);
+        ensure_view(state.interaction_output,state.interaction_output_storage,
+            num_nodes,output_width);
         interaction.linear_2.evaluate(state.gated,state.interaction_output);
-        Kokkos::realloc(state.output,num_nodes,products[layer].output_dimension());
+        ensure_view(state.output,state.output_storage,num_nodes,
+            products[layer].output_dimension());
         Kokkos::View<const int*> layer_elements=product_elements;
         if(products[layer].is_agnostic()) {
-            agnostic_elements[layer]=Kokkos::View<int*>("agnostic product elements",num_nodes);
-            Kokkos::deep_copy(agnostic_elements[layer],0);
-            layer_elements=agnostic_elements[layer];
+            ensure_view(state.agnostic_elements,state.agnostic_elements_storage,num_nodes);
+            Kokkos::deep_copy(state.agnostic_elements,0);
+            layer_elements=state.agnostic_elements;
         }
         products[layer].evaluate(
             state.interaction_output,state.skip,layer_elements,state.output);
         features=state.output;
     }
 
-    Kokkos::realloc(node_energies,num_nodes);
+    ensure_view(node_energies,node_energies_storage,num_nodes);
     Kokkos::deep_copy(node_energies,0.0);
-    Kokkos::View<double*> contribution("readout contribution",num_nodes);
-    std::vector<Kokkos::View<double**,Kokkos::LayoutRight>> layer_adjoints(
-        interactions.size());
+    ensure_view(readout_contribution,readout_contribution_storage,num_nodes);
     for(int layer=0;layer<static_cast<int>(readouts.size());++layer) {
-        readouts[layer].evaluate(states[layer].output,contribution);
+        auto& state=states[layer];
+        readouts[layer].evaluate(state.output,readout_contribution);
         auto energies=node_energies;
+        auto contribution=readout_contribution;
         Kokkos::parallel_for("sum readout",num_nodes,KOKKOS_LAMBDA(int node) {
             energies(node)+=contribution(node);
         });
-        layer_adjoints[layer]=Kokkos::View<double**,Kokkos::LayoutRight>(
-            "nonlinear layer adjoint",num_nodes,products[layer].output_dimension());
-        readouts[layer].reverse(states[layer].output,scale,layer_adjoints[layer]);
+        ensure_view(state.layer_adjoint,state.layer_adjoint_storage,num_nodes,
+            products[layer].output_dimension());
+        readouts[layer].reverse(state.output,scale,state.layer_adjoint);
     }
     auto energies=node_energies;
     auto e0=atomic_energies;
@@ -332,14 +474,15 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
         energies(node)=e0(node_types(node))+energy_scale*energies(node)+energy_shift;
     });
 
-    Kokkos::View<double**,Kokkos::LayoutRight> radial_adjoints(
-        "nonlinear radial adjoints",edges,num_bessel);
-    Kokkos::View<double**,Kokkos::LayoutRight> harmonic_adjoints(
-        "nonlinear harmonic adjoints",edges,num_lm);
-    Kokkos::View<double*> cutoff_adjoints("nonlinear cutoff adjoints",edges);
+    ensure_view(radial_adjoints,radial_adjoints_storage,edges,num_bessel);
+    ensure_view(harmonic_adjoints,harmonic_adjoints_storage,edges,num_lm);
+    ensure_view(cutoff_adjoints,cutoff_adjoints_storage,edges);
     Kokkos::deep_copy(radial_adjoints,0.0);
     Kokkos::deep_copy(harmonic_adjoints,0.0);
     Kokkos::deep_copy(cutoff_adjoints,0.0);
+    auto radial_adjoint_values=radial_adjoints;
+    auto harmonic_adjoint_values=harmonic_adjoints;
+    auto cutoff_adjoint_values=cutoff_adjoints;
 
     for(int layer=static_cast<int>(interactions.size())-1;layer>=0;--layer) {
         auto& interaction=interactions[layer];
@@ -351,28 +494,29 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
         const int pre_gate_width=state.pre_gate.extent(1);
         const int skip_width=interaction.skip.output_dimension();
 
-        Kokkos::View<double**,Kokkos::LayoutRight> interaction_output_adj(
-            "interaction output adjoint",num_nodes,interaction_width);
-        Kokkos::View<double**,Kokkos::LayoutRight> skip_adj(
-            "product skip adjoint",num_nodes,skip_width);
+        ensure_view(state.interaction_output_adj,state.interaction_output_adj_storage,
+            num_nodes,interaction_width);
+        ensure_view(state.skip_adj,state.skip_adj_storage,num_nodes,skip_width);
         Kokkos::View<const int*> layer_elements=products[layer].is_agnostic()
-            ?Kokkos::View<const int*>(agnostic_elements[layer])
+            ?Kokkos::View<const int*>(state.agnostic_elements)
             :Kokkos::View<const int*>(product_elements);
         products[layer].reverse(
-            state.interaction_output,layer_elements,layer_adjoints[layer],
-            interaction_output_adj,skip_adj);
+            state.interaction_output,layer_elements,state.layer_adjoint,
+            state.interaction_output_adj,state.skip_adj);
 
-        Kokkos::View<double**,Kokkos::LayoutRight> gated_adj(
-            "gated adjoint",num_nodes,state.gated.extent(1));
-        Kokkos::View<double**,Kokkos::LayoutRight> pre_gate_adj(
-            "pre gate adjoint",num_nodes,pre_gate_width);
-        interaction.linear_2.reverse(interaction_output_adj,gated_adj);
-        interaction.gate.reverse(state.pre_gate,gated_adj,pre_gate_adj);
+        ensure_view(state.gated_adj,state.gated_adj_storage,num_nodes,
+            state.gated.extent(1));
+        ensure_view(state.pre_gate_adj,state.pre_gate_adj_storage,num_nodes,
+            pre_gate_width);
+        interaction.linear_2.reverse(state.interaction_output_adj,state.gated_adj);
+        interaction.gate.reverse(state.pre_gate,state.gated_adj,state.pre_gate_adj);
 
-        Kokkos::View<double**,Kokkos::LayoutRight> linear_adj(
-            "normalized message adjoint",num_nodes,pre_gate_width);
-        Kokkos::View<double*> density_adj("density adjoint",num_nodes);
-        Kokkos::deep_copy(density_adj,0.0);
+        ensure_view(state.linear_adj,state.linear_adj_storage,num_nodes,pre_gate_width);
+        ensure_view(state.density_adj,state.density_adj_storage,num_nodes);
+        Kokkos::deep_copy(state.density_adj,0.0);
+        auto linear_adj=state.linear_adj;
+        auto density_adj=state.density_adj;
+        auto pre_gate_adj=state.pre_gate_adj;
         auto linear_forward=state.linear_1_output;
         auto layer_densities=state.densities;
         const double alpha=interaction.alpha,beta=interaction.beta;
@@ -388,34 +532,32 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
                 density_adj(node)=density_value;
             });
 
-        Kokkos::View<double**,Kokkos::LayoutRight> message_adj(
-            "message adjoint",num_nodes,message_width);
-        interaction.linear_1.reverse(linear_adj,message_adj);
-        Kokkos::View<double**,Kokkos::LayoutRight> residual_up_adj(
-            "residual up adjoint",num_nodes,up_width);
-        interaction.linear_res.reverse(pre_gate_adj,residual_up_adj);
-        Kokkos::View<double**,Kokkos::LayoutRight> up_adj(
-            "up adjoint",num_nodes,up_width);
-        Kokkos::deep_copy(up_adj,residual_up_adj);
+        ensure_view(state.message_adj,state.message_adj_storage,num_nodes,message_width);
+        interaction.linear_1.reverse(state.linear_adj,state.message_adj);
+        ensure_view(state.residual_up_adj,state.residual_up_adj_storage,num_nodes,up_width);
+        interaction.linear_res.reverse(state.pre_gate_adj,state.residual_up_adj);
+        ensure_view(state.up_adj,state.up_adj_storage,num_nodes,up_width);
+        Kokkos::deep_copy(state.up_adj,state.residual_up_adj);
 
-        Kokkos::View<double**,Kokkos::LayoutRight> edge_message_adj(
-            "edge message adjoint",edges,message_width);
-        auto local_message_adj=message_adj;
+        ensure_view(state.edge_message_adj,state.edge_message_adj_storage,edges,
+            message_width);
+        auto edge_message_adj=state.edge_message_adj;
+        auto local_message_adj=state.message_adj;
         Kokkos::parallel_for("gather edge message adjoint",
             Kokkos::MDRangePolicy<Kokkos::Rank<2>>({0,0},{edges,message_width}),
             KOKKOS_LAMBDA(int edge,int k) {
                 edge_message_adj(edge,k)=local_message_adj(local_targets(edge),k);
             });
-        Kokkos::View<double**,Kokkos::LayoutRight> edge_up_adj(
-            "edge up adjoint",edges,up_width);
-        Kokkos::View<double**,Kokkos::LayoutRight> edge_harmonic_adj(
-            "edge harmonic adjoint",edges,num_lm);
-        Kokkos::View<double**,Kokkos::LayoutRight> weight_adj(
-            "convolution weight adjoint",edges,interaction.convolution.weight_size());
+        ensure_view(state.edge_up_adj,state.edge_up_adj_storage,edges,up_width);
+        ensure_view(state.edge_harmonic_adj,state.edge_harmonic_adj_storage,edges,num_lm);
+        ensure_view(state.weight_adj,state.weight_adj_storage,edges,
+            interaction.convolution.weight_size());
         interaction.convolution.reverse(
-            state.edge_up,edge_harmonics,state.weights,edge_message_adj,
-            edge_up_adj,edge_harmonic_adj,weight_adj);
-        auto local_up_adj=up_adj;
+            state.edge_up,edge_harmonics,state.weights,state.edge_message_adj,
+            state.edge_up_adj,state.edge_harmonic_adj,state.weight_adj);
+        auto local_up_adj=state.up_adj;
+        auto edge_up_adj=state.edge_up_adj;
+        auto edge_harmonic_adj=state.edge_harmonic_adj;
         Kokkos::parallel_for("scatter edge up adjoint",
             Kokkos::MDRangePolicy<Kokkos::Rank<2>>({0,0},{edges,up_width}),
             KOKKOS_LAMBDA(int edge,int k) {
@@ -424,11 +566,13 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
         Kokkos::parallel_for("sum harmonic adjoints",
             Kokkos::MDRangePolicy<Kokkos::Rank<2>>({0,0},{edges,num_lm}),
             KOKKOS_LAMBDA(int edge,int lm) {
-                harmonic_adjoints(edge,lm)+=edge_harmonic_adj(edge,lm);
+                harmonic_adjoint_values(edge,lm)+=edge_harmonic_adj(edge,lm);
             });
 
-        Kokkos::View<double**,Kokkos::LayoutRight> raw_weight_adj(
-            "raw convolution weight adjoint",edges,interaction.convolution.weight_size());
+        ensure_view(state.raw_weight_adj,state.raw_weight_adj_storage,edges,
+            interaction.convolution.weight_size());
+        auto raw_weight_adj=state.raw_weight_adj;
+        auto weight_adj=state.weight_adj;
         auto raw_weights=state.raw_weights;
         if(!apply_cutoff) {
             Kokkos::parallel_for("reverse convolution cutoff",edges,
@@ -438,46 +582,55 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
                         cutoff_value+=weight_adj(edge,k)*raw_weights(edge,k);
                         raw_weight_adj(edge,k)=weight_adj(edge,k)*local_cutoffs(edge);
                     }
-                    cutoff_adjoints(edge)+=cutoff_value;
+                    cutoff_adjoint_values(edge)+=cutoff_value;
                 });
         } else Kokkos::deep_copy(raw_weight_adj,weight_adj);
 
-        Kokkos::View<double**,Kokkos::LayoutRight> edge_feature_adj(
-            "edge feature adjoint",edges,state.edge_features.extent(1));
-        interaction.convolution_weights.reverse(
-            state.edge_features,raw_weight_adj,edge_feature_adj);
-        Kokkos::View<double**,Kokkos::LayoutRight> density_raw_adj(
-            "density raw adjoint",edges,1);
+        const int edge_feature_width=mh1_fast_path?num_bessel:state.edge_features.extent(1);
+        ensure_view(state.edge_feature_adj,state.edge_feature_adj_storage,edges,
+            edge_feature_width);
+        if(mh1_fast_path)
+            interaction.convolution_weights.reverse_from_tape(
+                state.raw_weight_adj,state.edge_feature_adj);
+        else interaction.convolution_weights.reverse(
+            state.edge_features,state.raw_weight_adj,state.edge_feature_adj);
+        ensure_view(state.density_raw_adj,state.density_raw_adj_storage,edges,1);
+        auto density_raw_adj=state.density_raw_adj;
         auto density_raw=state.density_raw;
         auto density_base=state.density_base;
         Kokkos::parallel_for("reverse density envelope",edges,KOKKOS_LAMBDA(int edge) {
             double value=density_adj(local_targets(edge))
                 *(1.0-density_base(edge)*density_base(edge))*2.0*density_raw(edge);
             if(!embed_cutoff) {
-                cutoff_adjoints(edge)+=density_adj(local_targets(edge))*density_base(edge);
+                cutoff_adjoint_values(edge)+=density_adj(local_targets(edge))*density_base(edge);
                 value*=local_cutoffs(edge);
             }
             density_raw_adj(edge,0)=value;
         });
-        Kokkos::View<double**,Kokkos::LayoutRight> density_feature_adj(
-            "density feature adjoint",edges,state.edge_features.extent(1));
-        interaction.density.reverse(
-            state.edge_features,density_raw_adj,density_feature_adj);
+        ensure_view(state.density_feature_adj,state.density_feature_adj_storage,
+            edges,edge_feature_width);
+        if(mh1_fast_path)
+            interaction.density.reverse_from_tape(
+                state.density_raw_adj,state.density_feature_adj);
+        else interaction.density.reverse(
+            state.edge_features,state.density_raw_adj,state.density_feature_adj);
+        auto edge_feature_adj=state.edge_feature_adj;
+        auto density_feature_adj=state.density_feature_adj;
         Kokkos::parallel_for("sum radial adjoints",
             Kokkos::MDRangePolicy<Kokkos::Rank<2>>({0,0},{edges,num_bessel}),
             KOKKOS_LAMBDA(int edge,int k) {
-                radial_adjoints(edge,k)+=edge_feature_adj(edge,k)
+                radial_adjoint_values(edge,k)+=edge_feature_adj(edge,k)
                     +density_feature_adj(edge,k);
             });
 
-        Kokkos::View<double**,Kokkos::LayoutRight> up_input_adj(
-            "up input adjoint",num_nodes,input_width);
-        Kokkos::View<double**,Kokkos::LayoutRight> skip_input_adj(
-            "skip input adjoint",num_nodes,input_width);
-        interaction.linear_up.reverse(up_adj,up_input_adj);
-        interaction.skip.reverse(skip_adj,skip_input_adj);
+        ensure_view(state.up_input_adj,state.up_input_adj_storage,num_nodes,input_width);
+        ensure_view(state.skip_input_adj,state.skip_input_adj_storage,num_nodes,input_width);
+        interaction.linear_up.reverse(state.up_adj,state.up_input_adj);
+        interaction.skip.reverse(state.skip_adj,state.skip_input_adj);
         if(layer>0) {
-            auto previous=layer_adjoints[layer-1];
+            auto previous=states[layer-1].layer_adjoint;
+            auto up_input_adj=state.up_input_adj;
+            auto skip_input_adj=state.skip_input_adj;
             Kokkos::parallel_for("propagate layer adjoint",previous.size(),
                 KOKKOS_LAMBDA(int flat) {
                     const int node=flat/previous.extent(1),k=flat%previous.extent(1);
@@ -486,7 +639,7 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
         }
     }
 
-    Kokkos::realloc(node_forces,xyz.size());
+    ensure_view(node_forces,node_forces_storage,xyz.size());
     auto forces=node_forces;
     auto flat_grad=Y_grad;
     Kokkos::parallel_for("nonlinear edge forces",edges,KOKKOS_LAMBDA(int edge) {
@@ -512,7 +665,7 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
             transformed=1.0/(1.0+g);
             transform_derivative=-dgdx/(r0*(1.0+g)*(1.0+g));
         }
-        double distance_adjoint=cutoff_adjoints(edge)*envelope_derivative;
+        double distance_adjoint=cutoff_adjoint_values(edge)*envelope_derivative;
         for(int k=0;k<nb;++k) {
             const double weight=bw(k);
             const double base=prefactor*Kokkos::sin(weight*transformed)/transformed;
@@ -523,23 +676,26 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
             const double derivative=embed_cutoff
                 ?base_derivative*local_cutoffs(edge)+base*envelope_derivative
                 :base_derivative;
-            distance_adjoint+=radial_adjoints(edge,k)*derivative;
+            distance_adjoint+=radial_adjoint_values(edge,k)*derivative;
         }
         for(int component=0;component<3;++component) {
             double vector_adjoint=distance_adjoint*xyz(3*edge+component)/distance;
             for(int lm=0;lm<nlm;++lm)
-                vector_adjoint+=harmonic_adjoints(edge,lm)
+                vector_adjoint+=harmonic_adjoint_values(edge,lm)
                     *flat_grad((3*edge+component)*nlm+lm);
             forces(3*edge+component)=-vector_adjoint;
         }
     });
 
     if(has_zbl) {
-        Kokkos::View<double*> zbl_e("zbl e",num_nodes),zbl_f("zbl f",xyz.size());
-        Kokkos::deep_copy(zbl_e,0.0);
-        Kokkos::deep_copy(zbl_f,0.0);
+        ensure_view(zbl_energies,zbl_energies_storage,num_nodes);
+        ensure_view(zbl_forces,zbl_forces_storage,xyz.size());
+        Kokkos::deep_copy(zbl_energies,0.0);
+        Kokkos::deep_copy(zbl_forces,0.0);
         zbl.compute_ZBL(num_nodes,node_types,num_neigh,neigh_types,atomic_numbers,
-            distances,xyz,zbl_e,zbl_f);
+            distances,xyz,zbl_energies,zbl_forces);
+        auto zbl_e=zbl_energies;
+        auto zbl_f=zbl_forces;
         Kokkos::parallel_for("add zbl energy",num_nodes,KOKKOS_LAMBDA(int node) {
             energies(node)+=energy_scale*zbl_e(node);
         });

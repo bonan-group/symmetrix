@@ -25,12 +25,27 @@ public:
         int offset(const std::vector<int>& index) const;
     };
 
+    struct CompiledTerm {
+        int degree = 0;
+        std::array<int,3> indices{};
+        std::vector<double> coefficients;
+    };
+
+    struct CompiledBlock {
+        int angular_offset = 0;
+        int width = 0;
+        int num_elements = 0;
+        std::vector<int> component_offsets;
+        std::vector<CompiledTerm> terms;
+    };
+
     explicit E3ProductBasis(const nlohmann::json& data);
 
     int input_dimension() const { return input.dimension(); }
     int output_dimension() const { return output.dimension(); }
     bool uses_compiled_plan() const { return !compiled_blocks.empty(); }
     int compiled_term_count() const;
+    const std::vector<CompiledBlock>& compiled_plan() const { return compiled_blocks; }
     std::vector<double> evaluate(
         const std::vector<double>& node_features,
         const std::vector<double>& skip_connection,
@@ -63,20 +78,6 @@ private:
         std::vector<Tensor> weights;
         Tensor weights_max;
         std::vector<Tensor> u_tensors;
-    };
-
-    struct CompiledTerm {
-        int degree = 0;
-        std::array<int,3> indices{};
-        std::vector<double> coefficients;
-    };
-
-    struct CompiledBlock {
-        int angular_offset = 0;
-        int width = 0;
-        int num_elements = 0;
-        std::vector<int> component_offsets;
-        std::vector<CompiledTerm> terms;
     };
 
     void make_feature_major(

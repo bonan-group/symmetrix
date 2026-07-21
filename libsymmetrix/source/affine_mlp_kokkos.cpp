@@ -2,6 +2,7 @@
 #include "affine_mlp.hpp"
 
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 #include "tools_kokkos.hpp"
@@ -25,6 +26,10 @@ AffineMLPKokkos::AffineMLPKokkos(const nlohmann::json& definition)
     biases = decltype(biases)(Kokkos::view_alloc("affine mlp biases",Kokkos::SequentialHostInit),count);
     values = decltype(values)(Kokkos::view_alloc("affine mlp values",Kokkos::SequentialHostInit),count+1);
     adjoints = decltype(adjoints)(Kokkos::view_alloc("affine mlp adjoints",Kokkos::SequentialHostInit),count+1);
+    value_storage = decltype(value_storage)(
+        Kokkos::view_alloc("affine mlp value storage",Kokkos::SequentialHostInit),count+1);
+    adjoint_storage = decltype(adjoint_storage)(
+        Kokkos::view_alloc("affine mlp adjoint storage",Kokkos::SequentialHostInit),count+1);
     int previous = -1;
     for (int index=0; index<count; ++index) {
         const auto& layer = definition.at("layers").at(index);
@@ -55,24 +60,55 @@ AffineMLPKokkos::AffineMLPKokkos(const nlohmann::json& definition)
 
 int AffineMLPKokkos::input_size() const { return input_sizes(0); }
 int AffineMLPKokkos::output_size() const { return output_sizes(output_sizes.size()-1); }
-
-void AffineMLPKokkos::prepare(int batch_size)
+bool AffineMLPKokkos::supports_conditioned_input(int dynamic_input_size) const
 {
-    if (values(0).extent(0)!=batch_size || values(0).extent(1)!=input_size())
-        Kokkos::realloc(values(0),batch_size,input_size());
-    if (adjoints(0).extent(0)!=batch_size || adjoints(0).extent(1)!=input_size())
-        Kokkos::realloc(adjoints(0),batch_size,input_size());
+    return types.size()>0&&types(0)==Linear&&dynamic_input_size>0
+        &&dynamic_input_size<input_size();
+}
+
+void AffineMLPKokkos::prepare(int batch_size,int active_input_size)
+{
+    if (value_storage(0).extent(0)<batch_size
+        ||value_storage(0).extent(1)!=active_input_size)
+        Kokkos::realloc(value_storage(0),batch_size,active_input_size);
+    if (adjoint_storage(0).extent(0)<batch_size
+        ||adjoint_storage(0).extent(1)!=active_input_size)
+        Kokkos::realloc(adjoint_storage(0),batch_size,active_input_size);
+    values(0)=Kokkos::subview(
+        value_storage(0),std::make_pair(0,batch_size),Kokkos::ALL);
+    adjoints(0)=Kokkos::subview(
+        adjoint_storage(0),std::make_pair(0,batch_size),Kokkos::ALL);
     for (int layer=0; layer<types.size(); ++layer) {
-        if (values(layer+1).extent(0)!=batch_size || values(layer+1).extent(1)!=output_sizes(layer))
-            Kokkos::realloc(values(layer+1),batch_size,output_sizes(layer));
-        if (adjoints(layer+1).extent(0)!=batch_size || adjoints(layer+1).extent(1)!=output_sizes(layer))
-            Kokkos::realloc(adjoints(layer+1),batch_size,output_sizes(layer));
+        if (value_storage(layer+1).extent(0)<batch_size
+            ||value_storage(layer+1).extent(1)!=output_sizes(layer))
+            Kokkos::realloc(value_storage(layer+1),batch_size,output_sizes(layer));
+        if (adjoint_storage(layer+1).extent(0)<batch_size
+            ||adjoint_storage(layer+1).extent(1)!=output_sizes(layer))
+            Kokkos::realloc(adjoint_storage(layer+1),batch_size,output_sizes(layer));
+        values(layer+1)=Kokkos::subview(
+            value_storage(layer+1),std::make_pair(0,batch_size),Kokkos::ALL);
+        adjoints(layer+1)=Kokkos::subview(
+            adjoint_storage(layer+1),std::make_pair(0,batch_size),Kokkos::ALL);
     }
 }
 
 void AffineMLPKokkos::forward(Kokkos::View<const double**,Kokkos::LayoutRight> input)
 {
-    prepare(input.extent(0));
+    if(input.extent(1)!=static_cast<std::size_t>(input_size()))
+        throw std::invalid_argument("Kokkos affine MLP input dimensions are inconsistent.");
+    forward_impl(input,{});
+}
+
+void AffineMLPKokkos::forward_impl(
+    Kokkos::View<const double**,Kokkos::LayoutRight> input,
+    Kokkos::View<const double**,Kokkos::LayoutRight> row_contributions)
+{
+    const bool conditioned=row_contributions.data()!=nullptr;
+    if(conditioned&&(!supports_conditioned_input(input.extent(1))
+        ||row_contributions.extent(0)!=input.extent(0)
+        ||row_contributions.extent(1)!=static_cast<std::size_t>(output_sizes(0))))
+        throw std::invalid_argument("Kokkos affine MLP conditioned dimensions are inconsistent.");
+    prepare(input.extent(0),input.extent(1));
     Kokkos::deep_copy(values(0),input);
     for (int layer=0; layer<types.size(); ++layer) {
         auto source=values(layer); auto target=values(layer+1);
@@ -82,6 +118,7 @@ void AffineMLPKokkos::forward(Kokkos::View<const double**,Kokkos::LayoutRight> i
                 KOKKOS_LAMBDA(int sample,int row) {
                     double value=bias(row);
                     for (int column=0; column<source.extent(1); ++column) value+=weight(row,column)*source(sample,column);
+                    if(conditioned&&layer==0) value+=row_contributions(sample,row);
                     target(sample,row)=value;
                 });
         } else if (types(layer)==LayerNorm) {
@@ -96,6 +133,8 @@ void AffineMLPKokkos::forward(Kokkos::View<const double**,Kokkos::LayoutRight> i
             const int sample=flat/target.extent(1), column=flat%target.extent(1); const double value=source(sample,column); target(sample,column)=value/(1.0+Kokkos::exp(-value));
         });
     }
+    tape_batch_size=input.extent(0);
+    tape_input_size=input.extent(1);
 }
 
 void AffineMLPKokkos::evaluate(Kokkos::View<const double**,Kokkos::LayoutRight> input,Kokkos::View<double**,Kokkos::LayoutRight> output)
@@ -103,12 +142,35 @@ void AffineMLPKokkos::evaluate(Kokkos::View<const double**,Kokkos::LayoutRight> 
     forward(input); Kokkos::deep_copy(output,values(types.size()));
 }
 
+void AffineMLPKokkos::evaluate_conditioned(
+    Kokkos::View<const double**,Kokkos::LayoutRight> input,
+    Kokkos::View<const double**,Kokkos::LayoutRight> row_contributions,
+    Kokkos::View<double**,Kokkos::LayoutRight> output)
+{
+    forward_impl(input,row_contributions);
+    Kokkos::deep_copy(output,values(types.size()));
+}
+
 void AffineMLPKokkos::reverse(
     Kokkos::View<const double**,Kokkos::LayoutRight> input,
     Kokkos::View<const double**,Kokkos::LayoutRight> output_adjoint,
     Kokkos::View<double**,Kokkos::LayoutRight> input_adjoint)
 {
-    forward(input); Kokkos::deep_copy(adjoints(types.size()),output_adjoint);
+    forward(input);
+    reverse_from_tape(output_adjoint,input_adjoint);
+}
+
+void AffineMLPKokkos::reverse_from_tape(
+    Kokkos::View<const double**,Kokkos::LayoutRight> output_adjoint,
+    Kokkos::View<double**,Kokkos::LayoutRight> input_adjoint)
+{
+    if(tape_batch_size<0
+        ||output_adjoint.extent(0)!=static_cast<std::size_t>(tape_batch_size)
+        ||output_adjoint.extent(1)!=static_cast<std::size_t>(output_size())
+        ||input_adjoint.extent(0)!=static_cast<std::size_t>(tape_batch_size)
+        ||input_adjoint.extent(1)!=static_cast<std::size_t>(tape_input_size))
+        throw std::invalid_argument("Kokkos affine MLP reverse tape dimensions are inconsistent.");
+    Kokkos::deep_copy(adjoints(types.size()),output_adjoint);
     for (int layer=types.size()-1; layer>=0; --layer) {
         auto source=values(layer); auto source_adj=adjoints(layer); auto target_adj=adjoints(layer+1); Kokkos::deep_copy(source_adj,0.0);
         if (types(layer)==Linear) {

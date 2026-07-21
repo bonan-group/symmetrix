@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include "e3nn.hpp"
+
 namespace {
 
 const nlohmann::json& tensor(
@@ -41,7 +43,61 @@ void require_finite(double value, const char* name)
         throw std::invalid_argument(std::string("MACE_Nonlinear ") + name + " must be finite.");
 }
 
+bool irreps_equal(const std::string& actual, const std::string& expected)
+{
+    const Irreps left(actual);
+    const Irreps right(expected);
+    if (left.blocks.size() != right.blocks.size()) return false;
+    for (int index=0; index<static_cast<int>(left.blocks.size()); ++index) {
+        const auto& a = left.blocks[index];
+        const auto& b = right.blocks[index];
+        if (a.multiplicity != b.multiplicity || a.l != b.l || a.parity != b.parity)
+            return false;
+    }
+    return true;
+}
+
 } // namespace
+
+bool is_published_mh1_architecture(const nlohmann::json& data)
+{
+    if (data.at("num_interactions").get<int>() != 2
+        || data.at("l_max").get<int>() != 3
+        || data.at("radial_embedding").at("basis").at("weights").at("values").size() != 10
+        || data.at("interactions").size() != 2
+        || data.at("products").size() != 2
+        || data.at("readouts").size() != 2)
+        return false;
+    const auto& first = data.at("interactions").at(0);
+    const auto& second = data.at("interactions").at(1);
+    if (first.at("class").get<std::string>()
+            != "RealAgnosticResidualNonLinearInteractionBlock"
+        || second.at("class").get<std::string>()
+            != "RealAgnosticResidualNonLinearInteractionBlock"
+        || !irreps_equal(first.at("node_feats_irreps").get<std::string>(), "512x0e")
+        || !irreps_equal(second.at("node_feats_irreps").get<std::string>(), "512x0e+512x1o")
+        || !irreps_equal(first.at("edge_irreps").get<std::string>(), "128x0e")
+        || !irreps_equal(second.at("edge_irreps").get<std::string>(), "128x0e+128x1o")
+        || !irreps_equal(first.at("target_irreps").get<std::string>(),
+                         "512x0e+512x1o+512x2e+512x3o")
+        || !irreps_equal(second.at("target_irreps").get<std::string>(),
+                         "512x0e+512x1o+512x2e+512x3o")
+        || !irreps_equal(first.at("hidden_irreps").get<std::string>(), "512x0e+512x1o")
+        || !irreps_equal(second.at("hidden_irreps").get<std::string>(), "512x0e"))
+        return false;
+    const std::string gate_input = "2048x0e+512x1o+512x2e+512x3o";
+    const std::string gate_output = "512x0e+512x1o+512x2e+512x3o";
+    for (const auto* interaction : {&first, &second})
+        if (!irreps_equal(
+                interaction->at("gate").at("irreps_in").get<std::string>(), gate_input)
+            || !irreps_equal(
+                interaction->at("gate").at("irreps_out").get<std::string>(), gate_output))
+            return false;
+    return data.at("readouts").at(0).at("class").get<std::string>()
+            == "LinearReadoutBlock"
+        && data.at("readouts").at(1).at("class").get<std::string>()
+            == "NonLinearReadoutBlock";
+}
 
 void validate_mace_nonlinear_schema(const nlohmann::json& data)
 {

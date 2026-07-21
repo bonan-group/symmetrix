@@ -1,4 +1,4 @@
-"""Benchmark native serial MACE-MH-1 evaluator and ASE execution."""
+"""Benchmark native serial or Kokkos CPU MACE-MH-1 execution."""
 
 import argparse
 import hashlib
@@ -13,16 +13,27 @@ import time
 
 
 THREAD_COUNT = os.environ.get("SYMMETRIX_BENCHMARK_THREADS", "1")
-THREAD_VARIABLES = (
+KOKKOS_THREAD_VARIABLES = (
+    "KOKKOS_NUM_THREADS",
     "OMP_NUM_THREADS",
+)
+BLAS_THREAD_VARIABLES = (
     "OPENBLAS_NUM_THREADS",
     "MKL_NUM_THREADS",
     "BLIS_NUM_THREADS",
     "VECLIB_MAXIMUM_THREADS",
     "NUMEXPR_NUM_THREADS",
 )
-for variable in THREAD_VARIABLES:
+for variable in KOKKOS_THREAD_VARIABLES:
     os.environ[variable] = THREAD_COUNT
+for variable in BLAS_THREAD_VARIABLES:
+    os.environ[variable] = "1"
+os.environ.setdefault("OMP_PROC_BIND", "close")
+os.environ.setdefault("OMP_PLACES", "cores")
+THREAD_VARIABLES = KOKKOS_THREAD_VARIABLES + BLAS_THREAD_VARIABLES + (
+    "OMP_PROC_BIND",
+    "OMP_PLACES",
+)
 
 import numpy as np
 from ase.build import bulk
@@ -78,6 +89,7 @@ def _native_build_metadata(extension_path):
         "SYMMETRIX_SPHERICART_CUDA",
         "Kokkos_ENABLE_OPENMP",
         "Kokkos_ENABLE_SERIAL",
+        "Kokkos_ENABLE_CUDA",
     }
     values = {}
     if cache.is_file():
@@ -89,6 +101,32 @@ def _native_build_metadata(extension_path):
             if key in keys:
                 values[key] = value
     return {"cmake_cache": str(cache) if cache.is_file() else None, "values": values}
+
+
+def _thread_affinities():
+    task_directory = pathlib.Path("/proc/self/task")
+    if not task_directory.is_dir():
+        return None
+    affinities = {}
+    for task in task_directory.iterdir():
+        status = task / "status"
+        try:
+            lines = status.read_text().splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            if line.startswith("Cpus_allowed_list"):
+                affinities[task.name] = line.partition(":")[2].strip()
+                break
+    return affinities
+
+
+def _current_rss_bytes():
+    statm = pathlib.Path("/proc/self/statm")
+    if not statm.is_file():
+        raise RuntimeError("lifecycle RSS measurement requires Linux /proc/self/statm")
+    resident_pages = int(statm.read_text().split()[1])
+    return resident_pages * os.sysconf("SC_PAGE_SIZE")
 
 
 def _samples_summary(samples):
@@ -139,38 +177,110 @@ def _model_metadata(path):
     }
 
 
+def _parse_sizes(value, parser, option):
+    try:
+        sizes = [int(item) for item in value.split(",")]
+    except ValueError:
+        parser.error(f"{option} must be a comma-separated integer list")
+    if not sizes or any(size < 1 for size in sizes):
+        parser.error(f"{option} values must be positive")
+    return sizes
+
+
+def _lifecycle(calculator, sizes, cycles):
+    systems = [bulk("Si", "diamond", a=5.43).repeat((size,) * 3) for size in sizes]
+    for _ in range(3):
+        for atoms in systems:
+            calculator.calculate(atoms.copy(), properties=["energy", "forces", "stress"])
+    rss_bytes = []
+    for _ in range(cycles):
+        for atoms in systems:
+            calculator.calculate(atoms.copy(), properties=["energy", "forces", "stress"])
+        rss_bytes.append(_current_rss_bytes())
+    return {
+        "sizes": sizes,
+        "atoms": [len(atoms) for atoms in systems],
+        "cycles": cycles,
+        "evaluations": cycles * len(systems),
+        "rss_mib": [value / 2**20 for value in rss_bytes],
+        "min_rss_mib": min(rss_bytes) / 2**20,
+        "max_rss_mib": max(rss_bytes) / 2**20,
+        "growth_mib": (max(rss_bytes) - min(rss_bytes)) / 2**20,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("model", type=pathlib.Path, help="Extracted MACE-MH-1 JSON model")
+    parser.add_argument("--backend", choices=("serial", "kokkos"), default="serial")
     parser.add_argument("--reference-model", type=pathlib.Path, help="Optional native MH-0 JSON")
     parser.add_argument("--max-reference-ratio", type=float)
     parser.add_argument(
         "--cpu",
         type=int,
-        help="CPU to pin; required unless taskset already restricts the process to one CPU",
+        help="Single CPU to pin (equivalent to a one-entry --cpus list)",
+    )
+    parser.add_argument(
+        "--cpus",
+        help="Comma-separated CPU affinity for Kokkos threads",
     )
     parser.add_argument("--sizes", default="1,2,3")
     parser.add_argument("--repeats", type=int, default=5)
+    parser.add_argument(
+        "--lifecycle-sizes",
+        help="Comma-separated supercell sizes to alternate for RSS measurement",
+    )
+    parser.add_argument("--lifecycle-cycles", type=int, default=20)
+    parser.add_argument("--max-lifecycle-growth-mib", type=float)
     parser.add_argument("--output", type=pathlib.Path)
     args = parser.parse_args()
     if args.repeats < 1:
         parser.error("--repeats must be positive")
+    if args.lifecycle_cycles < 1:
+        parser.error("--lifecycle-cycles must be positive")
+    if args.max_lifecycle_growth_mib is not None and args.lifecycle_sizes is None:
+        parser.error("--max-lifecycle-growth-mib requires --lifecycle-sizes")
     if args.max_reference_ratio is not None and args.reference_model is None:
         parser.error("--max-reference-ratio requires --reference-model")
+    if args.cpu is not None and args.cpus is not None:
+        parser.error("--cpu and --cpus are mutually exclusive")
     if hasattr(os, "sched_getaffinity"):
         available_cpus = os.sched_getaffinity(0)
+        requested_cpus = None
         if args.cpu is not None:
-            if args.cpu not in available_cpus:
-                parser.error(f"--cpu {args.cpu} is outside the current affinity {sorted(available_cpus)}")
-            os.sched_setaffinity(0, {args.cpu})
-        elif len(available_cpus) != 1:
-            parser.error("use --cpu or launch under taskset to pin this benchmark to one CPU")
+            requested_cpus = {args.cpu}
+        elif args.cpus is not None:
+            try:
+                requested_cpus = {int(value) for value in args.cpus.split(",")}
+            except ValueError:
+                parser.error("--cpus must be a comma-separated integer list")
+            if not requested_cpus:
+                parser.error("--cpus cannot be empty")
+        if requested_cpus is not None:
+            try:
+                os.sched_setaffinity(0, requested_cpus)
+            except OSError as error:
+                parser.error(f"could not apply requested CPU affinity: {error}")
+            applied_cpus = os.sched_getaffinity(0)
+            if applied_cpus != requested_cpus:
+                parser.error(
+                    f"requested CPUs {sorted(requested_cpus)} produced affinity "
+                    f"{sorted(applied_cpus)}"
+                )
+        elif len(available_cpus) != int(THREAD_COUNT):
+            parser.error(
+                "use --cpu/--cpus or launch under taskset with exactly "
+                f"{THREAD_COUNT} available CPUs"
+            )
 
-    calculator = Symmetrix(args.model, use_kokkos=False, dtype="float64")
+    use_kokkos = args.backend == "kokkos"
+    calculator = Symmetrix(args.model, use_kokkos=use_kokkos, dtype="float64")
     if not getattr(calculator.evaluator, "uses_mh1_fast_path", False):
-        raise RuntimeError("Model does not match the specialized MACE-MH-1 CPU architecture")
+        raise RuntimeError(
+            f"Model does not match the specialized MACE-MH-1 {args.backend} CPU architecture"
+        )
     reference = (
-        Symmetrix(args.reference_model, use_kokkos=False, dtype="float64")
+        Symmetrix(args.reference_model, use_kokkos=use_kokkos, dtype="float64")
         if args.reference_model else None
     )
 
@@ -184,6 +294,8 @@ def main():
         "processor": _cpu_model(),
         "logical_cpu_count": os.cpu_count(),
         "cpu_affinity": sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None,
+        "thread_affinities": _thread_affinities(),
+        "backend": args.backend,
         "thread_environment": {name: os.environ.get(name) for name in THREAD_VARIABLES},
         "native_extension": str(extension_path),
         "native_build": _native_build_metadata(extension_path),
@@ -196,7 +308,7 @@ def main():
     }
 
     results = []
-    for size in (int(value) for value in args.sizes.split(",")):
+    for size in _parse_sizes(args.sizes, parser, "--sizes"):
         atoms = bulk("Si", "diamond", a=5.43).repeat((size,) * 3)
         record = _benchmark(calculator, atoms, args.repeats)
         if reference is not None:
@@ -220,7 +332,24 @@ def main():
         results.append(record)
         print(json.dumps(record), flush=True)
 
-    output = {"metadata": metadata, "systems": results}
+    lifecycle = None
+    if args.lifecycle_sizes is not None:
+        lifecycle = _lifecycle(
+            calculator,
+            _parse_sizes(args.lifecycle_sizes, parser, "--lifecycle-sizes"),
+            args.lifecycle_cycles,
+        )
+        print(json.dumps({"lifecycle": lifecycle}), flush=True)
+        if (
+            args.max_lifecycle_growth_mib is not None
+            and lifecycle["growth_mib"] > args.max_lifecycle_growth_mib
+        ):
+            raise RuntimeError(
+                f"lifecycle RSS growth {lifecycle['growth_mib']:.3f} MiB exceeds "
+                f"{args.max_lifecycle_growth_mib:.3f} MiB"
+            )
+
+    output = {"metadata": metadata, "systems": results, "lifecycle": lifecycle}
     if args.output:
         args.output.write_text(json.dumps(output, indent=2) + "\n")
 

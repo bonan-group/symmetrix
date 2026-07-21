@@ -150,6 +150,33 @@ jobs:
           test_symmetrix_calc.py::test_macefield_native_json_ase_response_properties_match_pytorch \
           test_symmetrix_calc.py::test_macefield_json_kokkos_response_properties_match_native
         deactivate
+    - name: Cache MACE-MH-1 checkpoint
+      if: matrix.mace-torch == 'mace-torch'
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/symmetrix/test-models/mace-mh-1.model
+        key: mace-mh-1-a522eb7f59c7879963d41586528f4980baf33e086c94aa92e3eafdeccad3be47
+    - name: Download and verify MACE-MH-1 checkpoint
+      if: matrix.mace-torch == 'mace-torch'
+      run: |
+        mkdir -p ~/.cache/symmetrix/test-models
+        if [ ! -f ~/.cache/symmetrix/test-models/mace-mh-1.model ]; then
+          curl --fail --location --retry 3 \
+            https://github.com/ACEsuit/mace-foundations/releases/download/mace_mh_1/mace-mh-1.model \
+            --output ~/.cache/symmetrix/test-models/mace-mh-1.model
+        fi
+        echo "a522eb7f59c7879963d41586528f4980baf33e086c94aa92e3eafdeccad3be47  $HOME/.cache/symmetrix/test-models/mace-mh-1.model" \
+          | sha256sum --check --strict
+    - name: Test native MACE-MH-1 checkpoint integration
+      if: matrix.mace-torch == 'mace-torch'
+      env:
+        TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD: "1"
+      run: |
+        source venv/bin/activate
+        cd symmetrix/test
+        SYMMETRIX_MH1_MODEL="$HOME/.cache/symmetrix/test-models/mace-mh-1.model" \
+          pytest -q test_mh1.py
+        deactivate
     - name: Test model extraction
       run: |
         source venv/bin/activate
