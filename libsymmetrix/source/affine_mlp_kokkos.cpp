@@ -5,6 +5,7 @@
 #include <utility>
 #include <vector>
 
+#include "KokkosBlas.hpp"
 #include "tools_kokkos.hpp"
 
 namespace {
@@ -92,6 +93,25 @@ void AffineMLPKokkos::prepare(int batch_size,int active_input_size)
     }
 }
 
+void AffineMLPKokkos::prepare_conditioned_weight(int active_input_size)
+{
+    if(conditioned_input_size==active_input_size) return;
+    if(!supports_conditioned_input(active_input_size))
+        throw std::invalid_argument("Kokkos affine MLP conditioned weight dimensions are inconsistent.");
+    Kokkos::realloc(
+        Kokkos::WithoutInitializing,conditioned_weight,output_sizes(0),active_input_size);
+    auto full_weight=weights(0);
+    auto compact_weight=conditioned_weight;
+    Kokkos::parallel_for(
+        "prepare conditioned affine weight",
+        Kokkos::MDRangePolicy<Kokkos::Rank<2>>(
+            {0,0},{output_sizes(0),active_input_size}),
+        KOKKOS_LAMBDA(int row,int column) {
+            compact_weight(row,column)=full_weight(row,column);
+        });
+    conditioned_input_size=active_input_size;
+}
+
 void AffineMLPKokkos::forward(Kokkos::View<const double**,Kokkos::LayoutRight> input)
 {
     if(input.extent(1)!=static_cast<std::size_t>(input_size()))
@@ -109,18 +129,64 @@ void AffineMLPKokkos::forward_impl(
         ||row_contributions.extent(1)!=static_cast<std::size_t>(output_sizes(0))))
         throw std::invalid_argument("Kokkos affine MLP conditioned dimensions are inconsistent.");
     prepare(input.extent(0),input.extent(1));
+    if(conditioned) prepare_conditioned_weight(input.extent(1));
     Kokkos::deep_copy(values(0),input);
-    for (int layer=0; layer<types.size(); ++layer) {
+    for (int layer=0; layer<types.size();) {
+        if(types(layer)==LayerNorm&&layer+1<types.size()&&types(layer+1)==SiLU) {
+            auto source=values(layer);
+            auto target=values(layer+2);
+            auto gamma=weights(layer);
+            auto beta=biases(layer);
+            const double epsilon=eps(layer);
+            Kokkos::parallel_for(
+                "affine fused layer norm silu",target.extent(0),
+                KOKKOS_LAMBDA(int sample) {
+                    double mean=0.0;
+                    for(int column=0;column<source.extent(1);++column)
+                        mean+=source(sample,column);
+                    mean/=source.extent(1);
+                    double variance=0.0;
+                    for(int column=0;column<source.extent(1);++column) {
+                        const double delta=source(sample,column)-mean;
+                        variance+=delta*delta;
+                    }
+                    variance/=source.extent(1);
+                    const double inverse=1.0/Kokkos::sqrt(variance+epsilon);
+                    for(int column=0;column<source.extent(1);++column) {
+                        const double value=(source(sample,column)-mean)*inverse
+                            *gamma(0,column)+beta(column);
+                        target(sample,column)=value/(1.0+Kokkos::exp(-value));
+                    }
+                });
+            layer+=2;
+            continue;
+        }
         auto source=values(layer); auto target=values(layer+1);
         if (types(layer)==Linear) {
             auto weight=weights(layer); auto bias=biases(layer);
-            Kokkos::parallel_for("affine linear",Kokkos::MDRangePolicy<Kokkos::Rank<2>>({0,0},{target.extent(0),target.extent(1)}),
-                KOKKOS_LAMBDA(int sample,int row) {
-                    double value=bias(row);
-                    for (int column=0; column<source.extent(1); ++column) value+=weight(row,column)*source(sample,column);
-                    if(conditioned&&layer==0) value+=row_contributions(sample,row);
-                    target(sample,row)=value;
-                });
+            const bool use_gemm=source.extent(0)>4;
+            if(use_gemm) {
+                if(conditioned&&layer==0)
+                    KokkosBlas::gemm(
+                        "N","T",1.0,source,conditioned_weight,0.0,target);
+                else
+                    KokkosBlas::gemm("N","T",1.0,source,weight,0.0,target);
+                Kokkos::parallel_for(
+                    "affine linear epilogue",target.size(),KOKKOS_LAMBDA(int flat) {
+                        const int sample=flat/target.extent(1);
+                        const int row=flat%target.extent(1);
+                        target(sample,row)+=bias(row)
+                            +(conditioned&&layer==0?row_contributions(sample,row):0.0);
+                    });
+            } else {
+                Kokkos::parallel_for("affine linear",Kokkos::MDRangePolicy<Kokkos::Rank<2>>({0,0},{target.extent(0),target.extent(1)}),
+                    KOKKOS_LAMBDA(int sample,int row) {
+                        double value=bias(row);
+                        for (int column=0; column<source.extent(1); ++column) value+=weight(row,column)*source(sample,column);
+                        if(conditioned&&layer==0) value+=row_contributions(sample,row);
+                        target(sample,row)=value;
+                    });
+            }
         } else if (types(layer)==LayerNorm) {
             auto gamma=weights(layer); auto beta=biases(layer); const double epsilon=eps(layer);
             Kokkos::parallel_for("affine layer norm",target.extent(0),KOKKOS_LAMBDA(int sample) {
@@ -132,6 +198,7 @@ void AffineMLPKokkos::forward_impl(
         } else Kokkos::parallel_for("affine silu",target.size(),KOKKOS_LAMBDA(int flat) {
             const int sample=flat/target.extent(1), column=flat%target.extent(1); const double value=source(sample,column); target(sample,column)=value/(1.0+Kokkos::exp(-value));
         });
+        ++layer;
     }
     tape_batch_size=input.extent(0);
     tape_input_size=input.extent(1);
@@ -171,15 +238,72 @@ void AffineMLPKokkos::reverse_from_tape(
         ||input_adjoint.extent(1)!=static_cast<std::size_t>(tape_input_size))
         throw std::invalid_argument("Kokkos affine MLP reverse tape dimensions are inconsistent.");
     Kokkos::deep_copy(adjoints(types.size()),output_adjoint);
-    for (int layer=types.size()-1; layer>=0; --layer) {
-        auto source=values(layer); auto source_adj=adjoints(layer); auto target_adj=adjoints(layer+1); Kokkos::deep_copy(source_adj,0.0);
+    for (int layer=types.size()-1; layer>=0;) {
+        if(types(layer)==SiLU&&layer>0&&types(layer-1)==LayerNorm) {
+            auto source=values(layer-1);
+            auto source_adj=adjoints(layer-1);
+            auto target_adj=adjoints(layer+1);
+            auto gamma=weights(layer-1);
+            auto beta=biases(layer-1);
+            const double epsilon=eps(layer-1);
+            Kokkos::parallel_for(
+                "affine fused reverse layer norm silu",source.extent(0),
+                KOKKOS_LAMBDA(int sample) {
+                    const int width=source.extent(1);
+                    double mean=0.0;
+                    for(int column=0;column<width;++column)
+                        mean+=source(sample,column);
+                    mean/=width;
+                    double variance=0.0;
+                    for(int column=0;column<width;++column) {
+                        const double delta=source(sample,column)-mean;
+                        variance+=delta*delta;
+                    }
+                    variance/=width;
+                    const double inverse=1.0/Kokkos::sqrt(variance+epsilon);
+                    double sum=0.0;
+                    double sum_normalized=0.0;
+                    for(int column=0;column<width;++column) {
+                        const double normalized=(source(sample,column)-mean)*inverse;
+                        const double value=normalized*gamma(0,column)+beta(column);
+                        const double probability=1.0/(1.0+Kokkos::exp(-value));
+                        const double scaled=target_adj(sample,column)
+                            *(probability+value*probability*(1.0-probability))
+                            *gamma(0,column);
+                        sum+=scaled;
+                        sum_normalized+=scaled*normalized;
+                    }
+                    for(int column=0;column<width;++column) {
+                        const double normalized=(source(sample,column)-mean)*inverse;
+                        const double value=normalized*gamma(0,column)+beta(column);
+                        const double probability=1.0/(1.0+Kokkos::exp(-value));
+                        const double scaled=target_adj(sample,column)
+                            *(probability+value*probability*(1.0-probability))
+                            *gamma(0,column);
+                        source_adj(sample,column)=inverse
+                            *(width*scaled-sum-normalized*sum_normalized)/width;
+                    }
+                });
+            layer-=2;
+            continue;
+        }
+        auto source=values(layer); auto source_adj=adjoints(layer); auto target_adj=adjoints(layer+1);
         if (types(layer)==Linear) {
             auto weight=weights(layer);
-            Kokkos::parallel_for("affine reverse linear",source_adj.size(),KOKKOS_LAMBDA(int flat) {
-                const int sample=flat/source_adj.extent(1), column=flat%source_adj.extent(1); double value=0.0;
-                for (int row=0; row<target_adj.extent(1); ++row) value+=weight(row,column)*target_adj(sample,row); source_adj(sample,column)=value;
-            });
+            if(source_adj.extent(0)>4) {
+                if(layer==0&&tape_input_size<input_size())
+                    KokkosBlas::gemm(
+                        "N","N",1.0,target_adj,conditioned_weight,0.0,source_adj);
+                else
+                    KokkosBlas::gemm("N","N",1.0,target_adj,weight,0.0,source_adj);
+            } else {
+                Kokkos::parallel_for("affine reverse linear",source_adj.size(),KOKKOS_LAMBDA(int flat) {
+                    const int sample=flat/source_adj.extent(1), column=flat%source_adj.extent(1); double value=0.0;
+                    for (int row=0; row<target_adj.extent(1); ++row) value+=weight(row,column)*target_adj(sample,row); source_adj(sample,column)=value;
+                });
+            }
         } else if (types(layer)==LayerNorm) {
+            Kokkos::deep_copy(source_adj,0.0);
             auto gamma=weights(layer); const double epsilon=eps(layer);
             Kokkos::parallel_for("affine reverse layer norm",source.extent(0),KOKKOS_LAMBDA(int sample) {
                 const int width=source.extent(1); double mean=0.0; for (int i=0;i<width;++i) mean+=source(sample,i); mean/=width;
@@ -188,9 +312,13 @@ void AffineMLPKokkos::reverse_from_tape(
                 for (int i=0;i<width;++i) { const double scaled=target_adj(sample,i)*gamma(0,i); sum+=scaled; sum_normalized+=scaled*(source(sample,i)-mean)*inverse; }
                 for (int i=0;i<width;++i) { const double scaled=target_adj(sample,i)*gamma(0,i); const double normalized=(source(sample,i)-mean)*inverse; source_adj(sample,i)=inverse*(width*scaled-sum-normalized*sum_normalized)/width; }
             });
-        } else Kokkos::parallel_for("affine reverse silu",source_adj.size(),KOKKOS_LAMBDA(int flat) {
-            const int sample=flat/source_adj.extent(1), column=flat%source_adj.extent(1); const double value=source(sample,column); const double probability=1.0/(1.0+Kokkos::exp(-value)); source_adj(sample,column)=target_adj(sample,column)*(probability+value*probability*(1.0-probability));
-        });
+        } else {
+            Kokkos::deep_copy(source_adj,0.0);
+            Kokkos::parallel_for("affine reverse silu",source_adj.size(),KOKKOS_LAMBDA(int flat) {
+                const int sample=flat/source_adj.extent(1), column=flat%source_adj.extent(1); const double value=source(sample,column); const double probability=1.0/(1.0+Kokkos::exp(-value)); source_adj(sample,column)=target_adj(sample,column)*(probability+value*probability*(1.0-probability));
+            });
+        }
+        --layer;
     }
     Kokkos::deep_copy(input_adjoint,adjoints(0));
 }

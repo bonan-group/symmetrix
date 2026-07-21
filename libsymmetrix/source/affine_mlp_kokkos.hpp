@@ -39,8 +39,11 @@ private:
     Kokkos::View<Kokkos::View<double**,Kokkos::LayoutRight>*,Kokkos::SharedSpace> adjoints;
     Kokkos::View<Kokkos::View<double**,Kokkos::LayoutRight>*,Kokkos::SharedSpace> value_storage;
     Kokkos::View<Kokkos::View<double**,Kokkos::LayoutRight>*,Kokkos::SharedSpace> adjoint_storage;
+    Kokkos::View<double**,Kokkos::LayoutRight> conditioned_weight;
+    int conditioned_input_size=-1;
     int tape_batch_size=-1,tape_input_size=-1;
     void prepare(int batch_size,int active_input_size);
+    void prepare_conditioned_weight(int active_input_size);
     void forward(Kokkos::View<const double**,Kokkos::LayoutRight> input);
     void forward_impl(
         Kokkos::View<const double**,Kokkos::LayoutRight> input,
