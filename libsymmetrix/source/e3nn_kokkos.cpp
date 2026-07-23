@@ -196,6 +196,14 @@ E3TensorProductKokkos::E3TensorProductKokkos(const nlohmann::json& data)
     Irreps in1(data.at("irreps_in1").get<std::string>()),in2(data.at("irreps_in2").get<std::string>()),out(data.at("irreps_out").get<std::string>());
     input_1_dimension_=in1.dimension(); input_2_dimension_=in2.dimension(); output_dimension_=out.dimension(); int offset=0;
     bool official_layout=!validated.instructions.empty();
+    std::vector<int> mh1_instruction_data_host;
+    std::vector<double> mh1_path_weights_host;
+    std::vector<int> mh1_component_offsets_host;
+    std::vector<int> mh1_sparse_indices_host;
+    std::vector<double> mh1_sparse_values_host;
+    struct HarmonicTerm { int instruction,a,c; double value; };
+    std::vector<std::vector<HarmonicTerm>> mh1_harmonic_terms_host(
+        input_2_dimension_);
     int instruction_index=0;
     for (const auto& value:data.at("instructions")) {
         const auto& a=in1.blocks.at(value.at("i_in1").get<int>()); const auto& b=in2.blocks.at(value.at("i_in2").get<int>()); const auto& c=out.blocks.at(value.at("i_out").get<int>());
@@ -228,47 +236,117 @@ E3TensorProductKokkos::E3TensorProductKokkos(const nlohmann::json& data)
             instruction.component_offsets=toKokkosView(
                 "e3 sparse component offsets",component_offsets);
             instruction.sparse_count=values.size();
+
+            const int component_base=mh1_component_offsets_host.size();
+            const int sparse_base=mh1_sparse_values_host.size();
+            mh1_instruction_data_host.insert(
+                mh1_instruction_data_host.end(),
+                {instruction.input_1_offset,instruction.input_2_offset,
+                    instruction.output_offset,instruction.width_1,
+                    instruction.output_width,instruction.weight_offset,
+                    component_base});
+            mh1_path_weights_host.push_back(instruction.path_weight);
+            for(const int component_offset:component_offsets)
+                mh1_component_offsets_host.push_back(
+                    sparse_base+component_offset);
+            for(int entry=0;entry<static_cast<int>(values.size());++entry) {
+                const int a=indices[3*entry];
+                const int b=indices[3*entry+1];
+                const int c=indices[3*entry+2];
+                mh1_sparse_indices_host.insert(
+                    mh1_sparse_indices_host.end(),{a,b,c});
+                mh1_sparse_values_host.push_back(values[entry]);
+                mh1_harmonic_terms_host.at(instruction.input_2_offset+b)
+                    .push_back({instruction_index,a,c,values[entry]});
+            }
         }
         instructions.push_back(instruction); if(has) offset+=shape_product(value.at("path_shape").get<std::vector<int>>());
         ++instruction_index;
     }
     weight_size_=offset; internal_weights=toKokkosView("e3 tensor weights",tensor_values(data.at("weight"))); output_mask=toKokkosView("e3 tensor mask",tensor_values(data.at("output_mask")));
-#ifdef KOKKOS_ENABLE_CUDA
+#if defined(KOKKOS_ENABLE_CUDA) || defined(KOKKOS_ENABLE_HIP) \
+    || defined(KOKKOS_ENABLE_SYCL) || defined(KOKKOS_ENABLE_OPENMPTARGET)
     mh1_fast_path=false;
 #else
     mh1_fast_path=official_layout&&internal_weights.empty();
 #endif
+    if(mh1_fast_path) {
+        mh1_instruction_count_=instructions.size();
+        set_kokkos_view(
+            mh1_instruction_data,mh1_instruction_data_host,
+            mh1_instruction_count_,7);
+        mh1_path_weights=toKokkosView(
+            "e3 mh1 path weights",mh1_path_weights_host);
+        mh1_component_offsets=toKokkosView(
+            "e3 mh1 component offsets",mh1_component_offsets_host);
+        set_kokkos_view(
+            mh1_sparse_indices,mh1_sparse_indices_host,
+            mh1_sparse_values_host.size(),3);
+        mh1_sparse_values=toKokkosView(
+            "e3 mh1 sparse values",mh1_sparse_values_host);
+
+        std::vector<int> harmonic_offsets(input_2_dimension_+1,0);
+        std::vector<int> harmonic_terms;
+        std::vector<double> harmonic_values;
+        for(int component=0;component<input_2_dimension_;++component) {
+            for(const auto& term:mh1_harmonic_terms_host[component]) {
+                harmonic_terms.insert(
+                    harmonic_terms.end(),{term.instruction,term.a,term.c});
+                harmonic_values.push_back(term.value);
+            }
+            harmonic_offsets[component+1]=harmonic_values.size();
+        }
+        mh1_harmonic_offsets=toKokkosView(
+            "e3 mh1 harmonic offsets",harmonic_offsets);
+        set_kokkos_view(
+            mh1_harmonic_terms,harmonic_terms,harmonic_values.size(),3);
+        mh1_harmonic_values=toKokkosView(
+            "e3 mh1 harmonic values",harmonic_values);
+    }
 }
 
 void E3TensorProductKokkos::evaluate(Kokkos::View<const double**,Kokkos::LayoutRight> input_1,Kokkos::View<const double**,Kokkos::LayoutRight> input_2,Kokkos::View<const double**,Kokkos::LayoutRight> dynamic_weights,Kokkos::View<double**,Kokkos::LayoutRight> output) const
 {
     Kokkos::deep_copy(output,0.0); auto mask=output_mask; auto fixed=internal_weights;
     if(mh1_fast_path) {
-        for(const auto& instruction:instructions) {
-            auto indices=instruction.sparse_indices;
-            auto values=instruction.sparse_values;
-            auto component_offsets=instruction.component_offsets;
-            Kokkos::parallel_for(
-                "e3 tensor product mh1",
-                Kokkos::MDRangePolicy<Kokkos::Rank<3>>(
-                    {0,0,0},{static_cast<int>(input_1.extent(0)),128,
-                        instruction.output_width}),
-                KOKKOS_LAMBDA(int sample,int channel,int component) {
-                    const int weight_index=instruction.weight_offset+channel;
-                    const double scale=instruction.path_weight
-                        *dynamic_weights(sample,weight_index);
-                    double result=0.0;
-                    for(int entry=component_offsets(component);
-                        entry<component_offsets(component+1);++entry)
-                        result+=values(entry)
-                            *input_1(sample,instruction.input_1_offset
-                                +channel*instruction.width_1+indices(entry,0))
-                            *input_2(sample,instruction.input_2_offset+indices(entry,1));
-                    const int output_index=instruction.output_offset
-                        +channel*instruction.output_width+component;
-                    output(sample,output_index)+=scale*result*mask(output_index);
-                });
-        }
+        auto plan=mh1_instruction_data;
+        auto paths=mh1_path_weights;
+        auto indices=mh1_sparse_indices;
+        auto values=mh1_sparse_values;
+        auto component_offsets=mh1_component_offsets;
+        const int instruction_count=mh1_instruction_count_;
+        Kokkos::parallel_for(
+            "e3 tensor product mh1 fused",
+            Kokkos::MDRangePolicy<Kokkos::Rank<2>>(
+                {0,0},{static_cast<int>(input_1.extent(0)),128}),
+            KOKKOS_LAMBDA(int sample,int channel) {
+                for(int instruction=0;instruction<instruction_count;
+                    ++instruction) {
+                    const int input_1_offset=plan(instruction,0);
+                    const int input_2_offset=plan(instruction,1);
+                    const int output_offset=plan(instruction,2);
+                    const int input_width=plan(instruction,3);
+                    const int output_width=plan(instruction,4);
+                    const int weight_offset=plan(instruction,5);
+                    const int component_base=plan(instruction,6);
+                    const double scale=paths(instruction)
+                        *dynamic_weights(sample,weight_offset+channel);
+                    for(int component=0;component<output_width;++component) {
+                        double result=0.0;
+                        for(int entry=component_offsets(component_base+component);
+                            entry<component_offsets(
+                                component_base+component+1);++entry)
+                            result+=values(entry)
+                                *input_1(sample,input_1_offset
+                                    +channel*input_width+indices(entry,0))
+                                *input_2(sample,input_2_offset+indices(entry,1));
+                        const int output_index=output_offset
+                            +channel*output_width+component;
+                        output(sample,output_index)+=
+                            scale*result*mask(output_index);
+                    }
+                }
+            });
         return;
     }
     for (const auto instruction:instructions) { auto wigner=instruction.wigner;
@@ -284,64 +362,82 @@ void E3TensorProductKokkos::reverse(Kokkos::View<const double**,Kokkos::LayoutRi
 {
     Kokkos::deep_copy(input_1_adjoint,0.0); Kokkos::deep_copy(input_2_adjoint,0.0); Kokkos::deep_copy(weights_adjoint,0.0); auto mask=output_mask; auto fixed=internal_weights;
     if(mh1_fast_path) {
-        for(const auto& instruction:instructions) {
-            auto indices=instruction.sparse_indices;
-            auto values=instruction.sparse_values;
-            const int sparse_count=instruction.sparse_count;
-            Kokkos::parallel_for(
-                "e3 tensor reverse mh1 channels",
-                Kokkos::MDRangePolicy<Kokkos::Rank<2>>(
-                    {0,0},{static_cast<int>(input_1.extent(0)),128}),
-                KOKKOS_LAMBDA(int sample,int channel) {
-                    double input_1_local[3]={0.0,0.0,0.0};
+        auto plan=mh1_instruction_data;
+        auto paths=mh1_path_weights;
+        auto indices=mh1_sparse_indices;
+        auto values=mh1_sparse_values;
+        auto component_offsets=mh1_component_offsets;
+        auto harmonic_offsets=mh1_harmonic_offsets;
+        auto harmonic_terms=mh1_harmonic_terms;
+        auto harmonic_values=mh1_harmonic_values;
+        const int instruction_count=mh1_instruction_count_;
+        Kokkos::parallel_for(
+            "e3 tensor reverse mh1 fused channels",
+            Kokkos::MDRangePolicy<Kokkos::Rank<2>>(
+                {0,0},{static_cast<int>(input_1.extent(0)),128}),
+            KOKKOS_LAMBDA(int sample,int channel) {
+                for(int instruction=0;instruction<instruction_count;
+                    ++instruction) {
+                    const int input_1_offset=plan(instruction,0);
+                    const int input_2_offset=plan(instruction,1);
+                    const int output_offset=plan(instruction,2);
+                    const int input_width=plan(instruction,3);
+                    const int output_width=plan(instruction,4);
+                    const int weight_offset=plan(instruction,5);
+                    const int component_base=plan(instruction,6);
+                    const int first_entry=component_offsets(component_base);
+                    const int last_entry=component_offsets(
+                        component_base+output_width);
+                    const double weight=dynamic_weights(
+                        sample,weight_offset+channel);
                     double weight_value=0.0;
-                    const int weight_index=instruction.weight_offset+channel;
-                    const double weight=dynamic_weights(sample,weight_index);
-                    for(int entry=0;entry<sparse_count;++entry) {
+                    for(int entry=first_entry;entry<last_entry;++entry) {
                         const int a=indices(entry,0);
                         const int b=indices(entry,1);
                         const int c=indices(entry,2);
-                        const int output_index=instruction.output_offset
-                            +channel*instruction.output_width+c;
-                        const double common=instruction.path_weight*values(entry)
+                        const int output_index=output_offset
+                            +channel*output_width+c;
+                        const double common=paths(instruction)*values(entry)
                             *mask(output_index)*output_adjoint(sample,output_index);
-                        const double first=input_1(sample,instruction.input_1_offset
-                            +channel*instruction.width_1+a);
-                        const double second=input_2(
-                            sample,instruction.input_2_offset+b);
-                        input_1_local[a]+=common*weight*second;
+                        const double first=input_1(sample,input_1_offset
+                            +channel*input_width+a);
+                        const double second=input_2(sample,input_2_offset+b);
+                        input_1_adjoint(sample,input_1_offset
+                            +channel*input_width+a)+=common*weight*second;
                         weight_value+=common*first*second;
                     }
-                    for(int a=0;a<instruction.width_1;++a)
-                        input_1_adjoint(sample,instruction.input_1_offset
-                            +channel*instruction.width_1+a)+=input_1_local[a];
-                    weights_adjoint(sample,weight_index)=weight_value;
-                });
-            Kokkos::parallel_for(
-                "e3 tensor reverse mh1 harmonics",
-                Kokkos::MDRangePolicy<Kokkos::Rank<2>>(
-                    {0,0},{static_cast<int>(input_1.extent(0)),instruction.width_2}),
-                KOKKOS_LAMBDA(int sample,int b) {
-                    double result=0.0;
-                    for(int channel=0;channel<128;++channel) {
-                        const double weight=dynamic_weights(
-                            sample,instruction.weight_offset+channel);
-                        for(int entry=0;entry<sparse_count;++entry) {
-                            if(indices(entry,1)!=b) continue;
-                            const int a=indices(entry,0);
-                            const int c=indices(entry,2);
-                            const int output_index=instruction.output_offset
-                                +channel*instruction.output_width+c;
-                            const double common=instruction.path_weight*values(entry)
-                                *mask(output_index)*output_adjoint(sample,output_index);
-                            result+=common*weight*input_1(
-                                sample,instruction.input_1_offset
-                                    +channel*instruction.width_1+a);
-                        }
+                    weights_adjoint(sample,weight_offset+channel)=weight_value;
+                }
+            });
+        Kokkos::parallel_for(
+            "e3 tensor reverse mh1 fused harmonics",
+            Kokkos::MDRangePolicy<Kokkos::Rank<2>>(
+                {0,0},{static_cast<int>(input_1.extent(0)),input_2_dimension_}),
+            KOKKOS_LAMBDA(int sample,int component) {
+                double result=0.0;
+                for(int channel=0;channel<128;++channel)
+                    for(int term=harmonic_offsets(component);
+                        term<harmonic_offsets(component+1);++term) {
+                        const int instruction=harmonic_terms(term,0);
+                        const int a=harmonic_terms(term,1);
+                        const int c=harmonic_terms(term,2);
+                        const int input_1_offset=plan(instruction,0);
+                        const int output_offset=plan(instruction,2);
+                        const int input_width=plan(instruction,3);
+                        const int output_width=plan(instruction,4);
+                        const int weight_offset=plan(instruction,5);
+                        const int output_index=output_offset
+                            +channel*output_width+c;
+                        const double common=paths(instruction)
+                            *harmonic_values(term)*mask(output_index)
+                            *output_adjoint(sample,output_index);
+                        result+=common
+                            *dynamic_weights(sample,weight_offset+channel)
+                            *input_1(sample,input_1_offset
+                                +channel*input_width+a);
                     }
-                    input_2_adjoint(sample,instruction.input_2_offset+b)+=result;
-                });
-        }
+                input_2_adjoint(sample,component)=result;
+            });
         return;
     }
     for(const auto instruction:instructions) { auto wigner=instruction.wigner;

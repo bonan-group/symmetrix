@@ -13,6 +13,7 @@ import time
 
 
 THREAD_COUNT = os.environ.get("SYMMETRIX_BENCHMARK_THREADS", "1")
+BLAS_THREAD_COUNT = os.environ.get("SYMMETRIX_BENCHMARK_BLAS_THREADS", "1")
 KOKKOS_THREAD_VARIABLES = (
     "KOKKOS_NUM_THREADS",
     "OMP_NUM_THREADS",
@@ -27,7 +28,7 @@ BLAS_THREAD_VARIABLES = (
 for variable in KOKKOS_THREAD_VARIABLES:
     os.environ[variable] = THREAD_COUNT
 for variable in BLAS_THREAD_VARIABLES:
-    os.environ[variable] = "1"
+    os.environ[variable] = BLAS_THREAD_COUNT
 os.environ.setdefault("OMP_PROC_BIND", "close")
 os.environ.setdefault("OMP_PLACES", "cores")
 THREAD_VARIABLES = KOKKOS_THREAD_VARIABLES + BLAS_THREAD_VARIABLES + (
@@ -90,6 +91,10 @@ def _native_build_metadata(extension_path):
         "Kokkos_ENABLE_OPENMP",
         "Kokkos_ENABLE_SERIAL",
         "Kokkos_ENABLE_CUDA",
+        "Kokkos_ENABLE_HIP",
+        "Kokkos_ENABLE_SYCL",
+        "Kokkos_ENABLE_OPENMPTARGET",
+        "KokkosKernels_ENABLE_TPL_BLAS",
     }
     values = {}
     if cache.is_file():

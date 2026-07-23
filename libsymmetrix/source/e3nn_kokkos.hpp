@@ -63,6 +63,12 @@ private:
     };
     int input_1_dimension_=0,input_2_dimension_=0,output_dimension_=0,weight_size_=0;
     bool mh1_fast_path=false;
+    int mh1_instruction_count_=0;
     std::vector<Instruction> instructions;
     Kokkos::View<double*> internal_weights, output_mask;
+    Kokkos::View<int**,Kokkos::LayoutRight> mh1_instruction_data,
+        mh1_sparse_indices,mh1_harmonic_terms;
+    Kokkos::View<int*> mh1_component_offsets,mh1_harmonic_offsets;
+    Kokkos::View<double*> mh1_path_weights,mh1_sparse_values,
+        mh1_harmonic_values;
 };
