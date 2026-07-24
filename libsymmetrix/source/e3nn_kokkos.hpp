@@ -6,6 +6,11 @@
 
 class E3LinearKokkos {
 public:
+    struct Instruction {
+        int input_offset, output_offset, input_multiplicity, output_multiplicity, width, weight_offset;
+        double path_weight;
+        mutable Kokkos::View<double**,Kokkos::LayoutRight> packed_input,packed_output;
+    };
     E3LinearKokkos() = default;
     explicit E3LinearKokkos(const nlohmann::json& data);
     int input_dimension() const { return input_dimension_; }
@@ -14,13 +19,7 @@ public:
                   Kokkos::View<double**,Kokkos::LayoutRight> output) const;
     void reverse(Kokkos::View<const double**,Kokkos::LayoutRight> output_adjoint,
                  Kokkos::View<double**,Kokkos::LayoutRight> input_adjoint) const;
-
 private:
-    struct Instruction {
-        int input_offset, output_offset, input_multiplicity, output_multiplicity, width, weight_offset;
-        double path_weight;
-        mutable Kokkos::View<double**,Kokkos::LayoutRight> packed_input,packed_output;
-    };
     int input_dimension_=0, output_dimension_=0;
     std::vector<Instruction> instructions;
     Kokkos::View<double*> weights, bias, output_mask;
@@ -28,6 +27,18 @@ private:
 
 class E3TensorProductKokkos {
 public:
+    struct Instruction {
+        int input_1_offset, input_2_offset, output_offset;
+        int multiplicity_1, multiplicity_2, output_multiplicity;
+        int width_1, width_2, output_width, weight_offset;
+        bool has_weight, uuu;
+        double path_weight;
+        Kokkos::View<double*> wigner;
+        Kokkos::View<int**,Kokkos::LayoutRight> sparse_indices;
+        Kokkos::View<double*> sparse_values;
+        Kokkos::View<int*> component_offsets;
+        int sparse_count=0;
+    };
     E3TensorProductKokkos() = default;
     explicit E3TensorProductKokkos(const nlohmann::json& data);
     int input_1_dimension() const { return input_1_dimension_; }
@@ -47,20 +58,7 @@ public:
                  Kokkos::View<double**,Kokkos::LayoutRight> input_1_adjoint,
                  Kokkos::View<double**,Kokkos::LayoutRight> input_2_adjoint,
                  Kokkos::View<double**,Kokkos::LayoutRight> weights_adjoint) const;
-
 private:
-    struct Instruction {
-        int input_1_offset, input_2_offset, output_offset;
-        int multiplicity_1, multiplicity_2, output_multiplicity;
-        int width_1, width_2, output_width, weight_offset;
-        bool has_weight, uuu;
-        double path_weight;
-        Kokkos::View<double*> wigner;
-        Kokkos::View<int**,Kokkos::LayoutRight> sparse_indices;
-        Kokkos::View<double*> sparse_values;
-        Kokkos::View<int*> component_offsets;
-        int sparse_count=0;
-    };
     int input_1_dimension_=0,input_2_dimension_=0,output_dimension_=0,weight_size_=0;
     bool mh1_fast_path=false;
     int mh1_instruction_count_=0;

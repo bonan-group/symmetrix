@@ -23,6 +23,8 @@ public:
                  Kokkos::View<const double**,Kokkos::LayoutRight> output_adjoint,
                  Kokkos::View<double**,Kokkos::LayoutRight> input_adjoint,
                  Kokkos::View<double**,Kokkos::LayoutRight> skip_adjoint);
+    void to_feature_major(
+        Kokkos::View<const double**,Kokkos::LayoutRight> source);
 
 private:
     struct Contraction { int correlation; std::vector<Tensor> u; std::vector<Tensor> weights; };
@@ -46,5 +48,4 @@ private:
     Kokkos::View<double**,Kokkos::LayoutRight> contracted_storage,
         contracted_adjoint_storage;
     void prepare(int batch);
-    void to_feature_major(Kokkos::View<const double**,Kokkos::LayoutRight> source);
 };

@@ -23,16 +23,18 @@ public:
         Kokkos::View<const int*> num_neigh,Kokkos::View<const int*> neigh_indices,
         Kokkos::View<const int*> neigh_types,Kokkos::View<const double*> xyz,
         Kokkos::View<const double*> distances);
+    void compute_Y(Kokkos::View<const double*> xyz);
 
 private:
     struct SphericalHarmonicsState;
     explicit MaceNonlinearKokkos(const nlohmann::json& data);
 
+public:
     struct Gate {
         int scalar_size=0,gate_size=0,gated_size=0,output_size=0;
         std::vector<IrrepBlock> scalar_blocks,gated_blocks;
-        Kokkos::View<double*,Kokkos::SharedSpace> scalar_constants;
-        Kokkos::View<double*,Kokkos::SharedSpace> gate_constants;
+        Kokkos::View<double*> scalar_constants;
+        Kokkos::View<double*> gate_constants;
         explicit Gate(const nlohmann::json& data);
         void evaluate(Kokkos::View<const double**,Kokkos::LayoutRight> input,
                       Kokkos::View<double**,Kokkos::LayoutRight> output) const;
@@ -40,6 +42,7 @@ private:
                      Kokkos::View<const double**,Kokkos::LayoutRight> output_adjoint,
                      Kokkos::View<double**,Kokkos::LayoutRight> input_adjoint) const;
     };
+private:
     struct Interaction {
         E3LinearKokkos source_embedding,target_embedding,linear_up,skip,linear_res,linear_1,linear_2;
         E3TensorProductKokkos convolution;
@@ -55,6 +58,7 @@ private:
             const nlohmann::json& data,int radial_size,int model_element_count,
             const std::vector<int>& selected_model_indices);
     };
+public:
     struct Readout {
         bool nonlinear=false; E3LinearKokkos linear,linear_1,linear_2; double activation_constant=1.0;
         Kokkos::View<double**,Kokkos::LayoutRight> hidden,activated,result,seed,
@@ -66,6 +70,7 @@ private:
         void reverse(Kokkos::View<const double**,Kokkos::LayoutRight> input,double scale,
                      Kokkos::View<double**,Kokkos::LayoutRight> input_adjoint);
     };
+private:
     struct LayerState {
         Kokkos::View<double**,Kokkos::LayoutRight> input,up,residual,skip,messages,linear_1_output,pre_gate,gated,interaction_output,output;
         Kokkos::View<double**,Kokkos::LayoutRight> source_embeddings,target_embeddings,edge_features,raw_weights,weights,edge_up,edge_messages;
@@ -119,5 +124,4 @@ private:
     std::vector<LayerState> states;
     ZBLKokkos zbl;
     std::unique_ptr<SphericalHarmonicsState> spherical_harmonics_state;
-    void compute_Y(Kokkos::View<const double*> xyz);
 };

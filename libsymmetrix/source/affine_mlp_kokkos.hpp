@@ -26,6 +26,10 @@ public:
     void reverse_from_tape(
         Kokkos::View<const double**,Kokkos::LayoutRight> output_adjoint,
         Kokkos::View<double**,Kokkos::LayoutRight> input_adjoint);
+    void prepare_conditioned_weight(int active_input_size);
+    void forward_impl(
+        Kokkos::View<const double**,Kokkos::LayoutRight> input,
+        Kokkos::View<const double**,Kokkos::LayoutRight> row_contributions);
 
 private:
     enum LayerType : int { Linear = 0, LayerNorm = 1, SiLU = 2 };
@@ -43,9 +47,5 @@ private:
     int conditioned_input_size=-1;
     int tape_batch_size=-1,tape_input_size=-1;
     void prepare(int batch_size,int active_input_size);
-    void prepare_conditioned_weight(int active_input_size);
     void forward(Kokkos::View<const double**,Kokkos::LayoutRight> input);
-    void forward_impl(
-        Kokkos::View<const double**,Kokkos::LayoutRight> input,
-        Kokkos::View<const double**,Kokkos::LayoutRight> row_contributions);
 };

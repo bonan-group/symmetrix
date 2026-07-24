@@ -42,14 +42,14 @@ Kokkos::View<T*> toKokkosView(const char* name,const std::vector<T>& stdVector) 
 }
 
 template<typename T>
-Kokkos::View<T**> toKokkosView(
+Kokkos::View<T**,Kokkos::LayoutRight> toKokkosView(
     std::string name,
     const std::vector<T>& vector,
     const int N0,
     const int N1)
 {
     // TODO: sanitize input
-    auto view = Kokkos::View<T**>(name, N0, N1);
+    auto view = Kokkos::View<T**,Kokkos::LayoutRight>(name, N0, N1);
     auto host_view = Kokkos::create_mirror_view(view);
     for (int i=0; i<N0; ++i)
         for (int j=0; j<N1; ++j)

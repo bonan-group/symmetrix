@@ -60,8 +60,11 @@ add_library(symmetrix ${SYMMETRIX_SOURCE_FILES})
 
 # TODO: generalize
 target_compile_options(symmetrix
-    PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-march=native>
-            $<$<COMPILE_LANGUAGE:CXX>:-ffast-math>)
+    PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-ffast-math>)
+if(NOT Kokkos_ENABLE_CUDA)
+    target_compile_options(symmetrix PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:-march=native>)
+endif()
 
 target_include_directories(symmetrix
     PUBLIC  source
