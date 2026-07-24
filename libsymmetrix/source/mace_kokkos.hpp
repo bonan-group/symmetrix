@@ -231,6 +231,7 @@ void reverse_Phi1_streamed(
 
 // TODO for testing of Phi1 strategies
 Kokkos::View<int*> Phi1_lm1, Phi1_lm2, Phi1_lel1l2;
+Kokkos::View<int*> Phi1_path_row_offsets;
 
 // A1
 Kokkos::View<Precision***,Kokkos::LayoutRight> A1, A1_adj;

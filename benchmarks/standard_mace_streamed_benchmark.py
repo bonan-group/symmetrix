@@ -29,6 +29,7 @@ import numpy as np
 from ase.build import bulk
 
 from symmetrix import Symmetrix
+from symmetrix import symmetrix as native_symmetrix
 
 
 def _sha256(path):
@@ -129,6 +130,11 @@ def main():
             "sha256": _sha256(model),
         },
         "backend": args.backend,
+        "kokkos_execution_space": (
+            native_symmetrix._kokkos_default_execution_space()
+            if args.backend == "kokkos"
+            else None
+        ),
         "dtype": args.dtype,
         "thread_environment": {
             name: os.environ.get(name)

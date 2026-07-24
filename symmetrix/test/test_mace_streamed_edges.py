@@ -136,6 +136,19 @@ def test_streamed_modes_reject_legacy_pair_spline_models(legacy_standard_model_p
         evaluator.set_streamed_edges("all")
 
 
+def test_kokkos_streamed_path_offsets_match_model_layout(streamed_model_paths):
+    standard_path, _ = streamed_model_paths
+    calculator = Symmetrix(standard_path, use_kokkos=True, streamed_edges="all")
+    model = json.loads(standard_path.read_text())
+
+    expected = [0]
+    for l1, l2 in zip(model["Phi1_l1"], model["Phi1_l2"]):
+        expected.append(expected[-1] + (2 * l1 + 1) * (2 * l2 + 1))
+
+    assert calculator.evaluator.Phi1_path_row_offsets == expected
+    assert native_symmetrix._kokkos_default_execution_space()
+
+
 def test_calculator_rejects_unknown_streamed_mode(streamed_model_paths):
     standard_path, _ = streamed_model_paths
     with pytest.raises(ValueError, match="legacy.*r1.*all"):

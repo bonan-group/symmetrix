@@ -2,6 +2,7 @@
 
 #include <vector>
 #include <iostream>
+#include <string>
 #include <Kokkos_Core.hpp>
 
 void _init_kokkos();
@@ -9,6 +10,8 @@ void _init_kokkos();
 void _finalize_kokkos();
 
 bool _kokkos_is_initialized();
+
+std::string _kokkos_default_execution_space();
 
 using view_type = Kokkos::View<double*>;
 

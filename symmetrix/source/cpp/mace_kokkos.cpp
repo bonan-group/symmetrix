@@ -65,6 +65,10 @@ void bind_mace_kokkos(py::module_ &m, const char* class_name)
         .def_property_readonly("R1_storage_size", [] (const MACEKokkos<Precision>& self) {
             return self.R1.size()+self.R1_deriv.size();
         })
+        .def_property_readonly("Phi1_path_row_offsets",
+            [] (MACEKokkos<Precision>& self) {
+                return view2vector(self.Phi1_path_row_offsets);
+            })
         .def_property_readonly("atomic_numbers",
             [] (MACEKokkos<Precision>& self) {
                 return view2vector(self.atomic_numbers);

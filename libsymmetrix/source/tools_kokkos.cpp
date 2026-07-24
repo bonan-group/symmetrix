@@ -25,6 +25,11 @@ bool _kokkos_is_initialized()
     return Kokkos::is_initialized();
 }
 
+std::string _kokkos_default_execution_space()
+{
+    return Kokkos::DefaultExecutionSpace::name();
+}
+
 struct InitView {
   explicit InitView(view_type _v) : m_view(_v) {}
 

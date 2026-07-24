@@ -951,9 +951,15 @@ void MACEKokkos<Precision>::compute_A0_streamed(
     const auto Y = this->Y;
     auto A0 = this->A0;
 
+#ifdef KOKKOS_ENABLE_CUDA
+    const Kokkos::TeamPolicy<> policy(num_nodes*(l_max+1), 1, 32);
+#else
+    const Kokkos::TeamPolicy<> policy(
+        num_nodes*(l_max+1), Kokkos::AUTO, 32);
+#endif
     Kokkos::parallel_for(
         "MACEKokkos::compute_A0_streamed",
-        Kokkos::TeamPolicy<>(num_nodes*(l_max+1), Kokkos::AUTO, 32),
+        policy,
         KOKKOS_LAMBDA (Kokkos::TeamPolicy<>::member_type team_member) {
             const int i = team_member.league_rank()/(l_max+1);
             const int l = team_member.league_rank()%(l_max+1);
@@ -1017,9 +1023,15 @@ void MACEKokkos<Precision>::reverse_A0_streamed(
     const auto Y_grad = this->Y_grad;
     auto node_forces = this->node_forces;
 
+#ifdef KOKKOS_ENABLE_CUDA
+    const int team_size = std::max(1, std::min(l_max+1, 8));
+    const Kokkos::TeamPolicy<> policy(num_nodes, team_size, 32);
+#else
+    const Kokkos::TeamPolicy<> policy(num_nodes, Kokkos::AUTO, 32);
+#endif
     Kokkos::parallel_for(
         "MACEKokkos::reverse_A0_streamed",
-        Kokkos::TeamPolicy<>(num_nodes, Kokkos::AUTO, 32),
+        policy,
         KOKKOS_LAMBDA (Kokkos::TeamPolicy<>::member_type team_member) {
             const int i = team_member.league_rank();
             const int type_i = type_to_active(node_types(i));
@@ -1963,26 +1975,29 @@ void MACEKokkos<Precision>::compute_Phi1_streamed(
     const int num_types = num_active_types;
     const auto type_to_active = this->type_to_active;
     const auto first_neigh = streamed_first_neigh;
-    const auto Phi1_l1 = this->Phi1_l1;
-    const auto Phi1_l2 = this->Phi1_l2;
     const auto Phi1_lm1 = this->Phi1_lm1;
     const auto Phi1_lm2 = this->Phi1_lm2;
+    const auto path_row_offsets = this->Phi1_path_row_offsets;
     const auto radial_1 = this->radial_1;
     const auto Y = this->Y;
     const auto H1 = this->H1;
     auto Phi1r = this->Phi1r;
 
+#ifdef KOKKOS_ENABLE_CUDA
+    const Kokkos::TeamPolicy<> streamed_policy(
+        num_nodes*num_paths, 1, 32);
+#else
+    const Kokkos::TeamPolicy<> streamed_policy(
+        num_nodes*num_paths, Kokkos::AUTO, 32);
+#endif
     Kokkos::parallel_for(
         "MACEKokkos::compute_Phi1r_streamed",
-        Kokkos::TeamPolicy<>(num_nodes*num_paths, Kokkos::AUTO, 32),
+        streamed_policy,
         KOKKOS_LAMBDA (Kokkos::TeamPolicy<>::member_type team_member) {
             const int i = team_member.league_rank()/num_paths;
             const int path = team_member.league_rank()%num_paths;
-            int row_begin = 0;
-            for (int q=0; q<path; ++q)
-                row_begin += (2*Phi1_l1(q)+1)*(2*Phi1_l2(q)+1);
-            const int row_end = row_begin
-                +(2*Phi1_l1(path)+1)*(2*Phi1_l2(path)+1);
+            const int row_begin = path_row_offsets(path);
+            const int row_end = path_row_offsets(path+1);
             const int type_i = type_to_active(node_types(i));
             const int i0 = first_neigh(i);
             for (int j=0; j<num_neigh(i); ++j) {
@@ -2185,10 +2200,9 @@ void MACEKokkos<Precision>::reverse_Phi1_streamed(
 
     const auto type_to_active = this->type_to_active;
     const auto first_neigh = streamed_first_neigh;
-    const auto Phi1_l1 = this->Phi1_l1;
-    const auto Phi1_l2 = this->Phi1_l2;
     const auto Phi1_lm1 = this->Phi1_lm1;
     const auto Phi1_lm2 = this->Phi1_lm2;
+    const auto path_row_offsets = this->Phi1_path_row_offsets;
     const auto radial_1 = this->radial_1;
     const auto Y = this->Y;
     const auto Y_grad = this->Y_grad;
@@ -2196,9 +2210,17 @@ void MACEKokkos<Precision>::reverse_Phi1_streamed(
     auto H1_adj = this->H1_adj;
     auto node_forces = this->node_forces;
 
+#ifdef KOKKOS_ENABLE_CUDA
+    const int team_size = std::max(1, std::min(num_paths, 8));
+    const Kokkos::TeamPolicy<> streamed_policy(
+        num_nodes, team_size, 32);
+#else
+    const Kokkos::TeamPolicy<> streamed_policy(
+        num_nodes, Kokkos::AUTO, 32);
+#endif
     Kokkos::parallel_for(
         "MACEKokkos::reverse_Phi1r_streamed",
-        Kokkos::TeamPolicy<>(num_nodes, Kokkos::AUTO, 32),
+        streamed_policy,
         KOKKOS_LAMBDA (Kokkos::TeamPolicy<>::member_type team_member) {
             const int i = team_member.league_rank();
             const int type_i = type_to_active(node_types(i));
@@ -2216,11 +2238,8 @@ void MACEKokkos<Precision>::reverse_Phi1_streamed(
                 Kokkos::parallel_reduce(
                     Kokkos::TeamThreadRange(team_member, num_paths),
                     [=] (const int path, double& f_x, double& f_y, double& f_z) {
-                        int row_begin = 0;
-                        for (int q=0; q<path; ++q)
-                            row_begin += (2*Phi1_l1(q)+1)*(2*Phi1_l2(q)+1);
-                        const int row_end = row_begin
-                            +(2*Phi1_l1(path)+1)*(2*Phi1_l2(path)+1);
+                        const int row_begin = path_row_offsets(path);
+                        const int row_end = path_row_offsets(path+1);
                         double path_fx, path_fy, path_fz;
                         Kokkos::parallel_reduce(
                             Kokkos::ThreadVectorRange(team_member, num_channels),
@@ -3129,8 +3148,11 @@ void MACEKokkos<Precision>::load_from_json(std::string filename)
 
     // for new approach to Phi1
     std::vector<int> Phi1_lm1, Phi1_lm2, Phi1_lel1l2;
+    std::vector<int> Phi1_path_row_offsets;
+    Phi1_path_row_offsets.reserve(Phi1_l.size()+1);
     int lelm1lm2 = 0;
     for (int lel1l2=0; lel1l2<Phi1_l.size(); ++lel1l2) {
+        Phi1_path_row_offsets.push_back(lelm1lm2);
         const int l1 = h_Phi1_l1(lel1l2);
         const int l2 = h_Phi1_l2(lel1l2);
         for (int lm1=l1*l1; lm1<=l1*(l1+2); ++lm1) {
@@ -3142,9 +3164,14 @@ void MACEKokkos<Precision>::load_from_json(std::string filename)
             }
         }
     }
+    Phi1_path_row_offsets.push_back(lelm1lm2);
+    if (lelm1lm2 != num_lelm1lm2)
+        throw std::runtime_error("Inconsistent Phi1 coupled-row layout.");
     this->Phi1_lm1 = toKokkosView("Phi1_lm1", Phi1_lm1);
     this->Phi1_lm2 = toKokkosView("Phi1_lm2", Phi1_lm2);
     this->Phi1_lel1l2 = toKokkosView("Phi1_lel1l2", Phi1_lel1l2);
+    this->Phi1_path_row_offsets = toKokkosView(
+        "Phi1_path_row_offsets", Phi1_path_row_offsets);
 
     // A1 weights
     auto file_A1_weights = file["A1_weights"].get<std::vector<std::vector<Precision>>>();

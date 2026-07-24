@@ -24,6 +24,11 @@ set(_cuda_found FALSE)
 if(CMAKE_CUDA_COMPILER)
   set(_cuda_found TRUE)
 endif()
+if(Kokkos_ENABLE_CUDA AND NOT _cuda_found)
+  message(FATAL_ERROR
+    "Kokkos_ENABLE_CUDA=ON requires a discoverable CUDA compiler. "
+    "Set CMAKE_CUDA_COMPILER or put nvcc on PATH.")
+endif()
 if(_cuda_found)
   message(STATUS "Symmetrix: CUDA found.")
   if(NOT DEFINED Kokkos_ENABLE_CUDA)
