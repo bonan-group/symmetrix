@@ -54,6 +54,17 @@ void bind_mace_kokkos(py::module_ &m, const char* class_name)
 
     py::class_<MACEKokkos<Precision>>(m, class_name)
         .def(py::init<std::string>())
+        .def("set_streamed_edges", &MACEKokkos<Precision>::set_streamed_edges)
+        .def_property_readonly(
+            "streamed_edges_mode", &MACEKokkos<Precision>::streamed_edges_mode)
+        .def_property_readonly(
+            "supports_streamed_edges", &MACEKokkos<Precision>::supports_streamed_edges)
+        .def_property_readonly("R0_storage_size", [] (const MACEKokkos<Precision>& self) {
+            return self.R0.size()+self.R0_deriv.size();
+        })
+        .def_property_readonly("R1_storage_size", [] (const MACEKokkos<Precision>& self) {
+            return self.R1.size()+self.R1_deriv.size();
+        })
         .def_property_readonly("atomic_numbers",
             [] (MACEKokkos<Precision>& self) {
                 return view2vector(self.atomic_numbers);

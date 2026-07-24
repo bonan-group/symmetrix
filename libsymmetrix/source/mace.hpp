@@ -6,6 +6,7 @@
 #include "compact_radial.hpp"
 #include "cubic_spline.hpp"
 #include "cubic_spline_set.hpp"
+#include "mace_streamed_edges.hpp"
 #include "multilayer_perceptron.hpp"
 #include "multivariate_polynomial.hpp"
 #include "zbl.hpp"
@@ -15,6 +16,10 @@ class MACE {
 public:
 
 MACE(std::string filename);
+void set_streamed_edges(std::string mode);
+std::string streamed_edges_mode() const;
+bool supports_streamed_edges() const;
+MACEStreamedEdgesMode streamed_edges = MACEStreamedEdgesMode::legacy;
 
 // Basic model information
 int num_elements;
@@ -88,7 +93,20 @@ void compute_A0(
     std::span<const int> node_types,
     std::span<const int> num_neigh,
     std::span<const int> neigh_types);
+void compute_A0_streamed(
+    const int num_nodes,
+    std::span<const int> node_types,
+    std::span<const int> num_neigh,
+    std::span<const int> neigh_types,
+    std::span<const double> r);
 void reverse_A0(
+    const int num_nodes,
+    std::span<const int> node_types,
+    std::span<const int> num_neigh,
+    std::span<const int> neigh_types,
+    std::span<const double> xyz,
+    std::span<const double> r);
+void reverse_A0_streamed(
     const int num_nodes,
     std::span<const int> node_types,
     std::span<const int> num_neigh,
@@ -174,7 +192,24 @@ std::vector<int> Phi1_l, Phi1_l1, Phi1_l2;
 std::vector<int> Phi1_lme, Phi1_lelm1lm2;
 std::vector<double> Phi1_clebsch_gordan;
 void compute_Phi1(const int num_nodes, std::span<const int> num_neigh, std::span<const int> neigh_indices);
+void compute_Phi1_streamed(
+    const int num_nodes,
+    std::span<const int> node_types,
+    std::span<const int> num_neigh,
+    std::span<const int> neigh_indices,
+    std::span<const int> neigh_types,
+    std::span<const double> r);
 void reverse_Phi1(const int num_nodes, std::span<const int> num_neigh, std::span<const int> neigh_indices, std::span<const double> xyz, std::span<const double> r, bool zero_dxyz = true, bool zero_H1_adj = true);
+void reverse_Phi1_streamed(
+    const int num_nodes,
+    std::span<const int> node_types,
+    std::span<const int> num_neigh,
+    std::span<const int> neigh_indices,
+    std::span<const int> neigh_types,
+    std::span<const double> xyz,
+    std::span<const double> r,
+    bool zero_dxyz = true,
+    bool zero_H1_adj = true);
 
 // A1
 std::vector<double> A1, A1_adj;

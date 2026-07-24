@@ -49,6 +49,9 @@ class Symmetrix(Calculator):
     ----------
     model_file: str
         JSON-format model file used for potential energy
+    streamed_edges: {"legacy", "r1", "all"}
+        Experimental compact standard-MACE execution mode. ``r1`` streams the
+        second interaction radial functions; ``all`` also streams the first.
 
     Notes
     -----
@@ -59,10 +62,19 @@ class Symmetrix(Calculator):
     _macefield_eps0 = 8.8541878128e-12 / 1.602176634e-19 / 1e10
 
 
-    def __init__(self, model_file, dtype="float64", use_kokkos=True, **kwargs):
+    def __init__(
+        self,
+        model_file,
+        dtype="float64",
+        use_kokkos=True,
+        streamed_edges="legacy",
+        **kwargs,
+    ):
         Calculator.__init__(self, **kwargs)
         if dtype not in ["float32", "float64"]:
             raise ValueError(f"Unsupported dtype '{dtype}'. Supported dtypes are 'float64' and 'float32'.")
+        if streamed_edges not in ("legacy", "r1", "all"):
+            raise ValueError("streamed_edges must be one of 'legacy', 'r1', or 'all'.")
         self._macefield_electric_field = None
         self._electric_field = kwargs.get("electric_field", None)
         json_metadata = self._json_metadata(model_file)
@@ -112,6 +124,13 @@ class Symmetrix(Calculator):
                 fout.flush()
                 self.evaluator = MACE(fout.name)
 
+        if hasattr(self.evaluator, "set_streamed_edges"):
+            self.evaluator.set_streamed_edges(streamed_edges)
+        elif streamed_edges != "legacy":
+            raise ValueError(
+                "streamed_edges is only supported by ordinary standard-MACE evaluators."
+            )
+        self.streamed_edges = streamed_edges
         self.cutoff = self.evaluator.r_cut
         self.implemented_properties = list(type(self).implemented_properties)
         if self._has_native_field_coupling():
@@ -616,12 +635,14 @@ class FieldAwareCalculator(Calculator):
         Calculator.calculate(self, atoms, properties, system_changes)
         results = {}
         base_properties = set()
+        base_atoms = self.atoms.copy()
+        base_atoms.calc = None
         for prop in properties:
             field_value = self.field_contribution.get_property(prop, self.atoms)
             if prop in _FIELD_RESPONSE_PROPERTIES:
                 results[prop] = field_value
             else:
-                base_value = self.base_calculator.get_property(prop, self.atoms)
+                base_value = self.base_calculator.get_property(prop, base_atoms)
                 if prop == 'stress':
                     results[prop] = _to_voigt_stress(base_value) + _to_voigt_stress(
                         field_value

@@ -66,3 +66,20 @@ def test_evaluate_derivs():
     assert d2 == approx(spl2.derivative()(r))
     assert f3 == approx(spl3(r))
     assert d3 == approx(spl3.derivative()(r))
+
+
+def test_scalar_evaluation_matches_bulk_at_clamped_boundaries():
+    grid, h = np.linspace(0.25, 3.25, 9, retstep=True)
+    values = np.vstack((np.sin(grid), np.cos(grid)))
+    derivatives = np.vstack((np.cos(grid), -np.sin(grid)))
+    splines = symmetrix.CubicSplineSet(h, values, derivatives, grid[0])
+
+    bulk_values = np.zeros(2)
+    bulk_derivatives = np.zeros(2)
+    for radius in (grid[0]-1.0, grid[0], grid[3], grid[-1], grid[-1]+1.0):
+        splines.evaluate_derivs(radius, bulk_values, bulk_derivatives)
+        for function in range(2):
+            value, derivative = splines.evaluate_function_derivs(radius, function)
+            assert value == approx(bulk_values[function], abs=1e-14)
+            assert derivative == approx(bulk_derivatives[function], abs=1e-14)
+            assert splines.evaluate_function(radius, function) == approx(value, abs=1e-14)

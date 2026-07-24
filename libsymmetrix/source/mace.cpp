@@ -17,6 +17,34 @@ MACE::MACE(std::string filename)
     load_from_json(filename);
 }
 
+bool MACE::supports_streamed_edges() const
+{
+    return uses_compact_radial && !has_field_coupling;
+}
+
+std::string MACE::streamed_edges_mode() const
+{
+    return mace_streamed_edges_mode_name(streamed_edges);
+}
+
+void MACE::set_streamed_edges(std::string mode)
+{
+    const auto requested = parse_mace_streamed_edges_mode(mode);
+    if (requested != MACEStreamedEdgesMode::legacy && !supports_streamed_edges())
+        throw std::invalid_argument(
+            "Streamed edges require an ordinary format-v2 compact MACE model.");
+    streamed_edges = requested;
+    if (streamed_edges == MACEStreamedEdgesMode::r1
+        || streamed_edges == MACEStreamedEdgesMode::all) {
+        std::vector<double>().swap(R1);
+        std::vector<double>().swap(R1_deriv);
+    }
+    if (streamed_edges == MACEStreamedEdgesMode::all) {
+        std::vector<double>().swap(R0);
+        std::vector<double>().swap(R0_deriv);
+    }
+}
+
 void MACE::prepare_active_types(std::span<const int> node_types)
 {
     if (!uses_compact_radial)
@@ -134,14 +162,23 @@ void MACE::compute_node_energies_forces(
 
     compute_Y(xyz);
 
-    compute_R0(num_nodes, node_types, num_neigh, neigh_types, r);
-    compute_A0(num_nodes, node_types, num_neigh, neigh_types);
+    if (streamed_edges == MACEStreamedEdgesMode::all) {
+        compute_A0_streamed(num_nodes, node_types, num_neigh, neigh_types, r);
+    } else {
+        compute_R0(num_nodes, node_types, num_neigh, neigh_types, r);
+        compute_A0(num_nodes, node_types, num_neigh, neigh_types);
+    }
     compute_A0_scaled(num_nodes, node_types, num_neigh, neigh_types, r);
     compute_M0(num_nodes, node_types);
     compute_H1(num_nodes);
 
-    compute_R1(num_nodes, node_types, num_neigh, neigh_types, r);
-    compute_Phi1(num_nodes, num_neigh, neigh_indices);
+    if (streamed_edges == MACEStreamedEdgesMode::legacy) {
+        compute_R1(num_nodes, node_types, num_neigh, neigh_types, r);
+        compute_Phi1(num_nodes, num_neigh, neigh_indices);
+    } else {
+        compute_Phi1_streamed(
+            num_nodes, node_types, num_neigh, neigh_indices, neigh_types, r);
+    }
     compute_A1(num_nodes);
     compute_A1_scaled(num_nodes, node_types, num_neigh, neigh_types, r);
     compute_M1(num_nodes, node_types);
@@ -153,12 +190,23 @@ void MACE::compute_node_energies_forces(
     reverse_M1(num_nodes, node_types);
     reverse_A1_scaled(num_nodes, node_types, num_neigh, neigh_types, xyz, r, false);
     reverse_A1(num_nodes);
-    reverse_Phi1(num_nodes, num_neigh, neigh_indices, xyz, r, false, false);
+    if (streamed_edges == MACEStreamedEdgesMode::legacy) {
+        reverse_Phi1(num_nodes, num_neigh, neigh_indices, xyz, r, false, false);
+    } else {
+        reverse_Phi1_streamed(
+            num_nodes, node_types, num_neigh, neigh_indices, neigh_types,
+            xyz, r, false, false);
+    }
 
     reverse_H1(num_nodes);
     reverse_M0(num_nodes, node_types);
     reverse_A0_scaled(num_nodes, node_types, num_neigh, neigh_types, xyz, r);
-    reverse_A0(num_nodes, node_types, num_neigh, neigh_types, xyz, r);
+    if (streamed_edges == MACEStreamedEdgesMode::all) {
+        reverse_A0_streamed(
+            num_nodes, node_types, num_neigh, neigh_types, xyz, r);
+    } else {
+        reverse_A0(num_nodes, node_types, num_neigh, neigh_types, xyz, r);
+    }
 }
 
 void MACE::compute_node_energies_forces_field(
@@ -1241,6 +1289,55 @@ void MACE::compute_A0(
     }
 }
 
+void MACE::compute_A0_streamed(
+    const int num_nodes,
+    std::span<const int> node_types,
+    std::span<const int> num_neigh,
+    std::span<const int> neigh_types,
+    std::span<const double> r)
+{
+    A0.resize(num_nodes*num_lm*num_channels);
+    auto radial_values = std::vector<double>(num_channels);
+
+    int ij = 0;
+    for (int i=0; i<num_nodes; ++i) {
+        auto Phi0_i = std::vector<double>(num_lm*num_channels, 0.0);
+        const int type_i = node_types[i];
+        for (int j=0; j<num_neigh[i]; ++j) {
+            const int pair = radial_pair_index(type_i, neigh_types[ij]);
+            const auto& spline = *spl_set_0[pair];
+            const auto point = spline.evaluation_point(r[ij]);
+            const auto Y_ij = Y.data()+ij*num_lm;
+            const auto H0_ij = H0_weights.data()+neigh_types[ij]*num_channels;
+            for (int l=0; l<=l_max; ++l) {
+                for (int k=0; k<num_channels; ++k)
+                    radial_values[k] =
+                        spline.evaluate_function(point, l*num_channels+k);
+                for (int m=-l; m<=l; ++m) {
+                    const int lm = l*l+l+m;
+                    const double Y_ij_lm = Y_ij[lm];
+                    auto Phi0_i_lm = Phi0_i.data()+lm*num_channels;
+                    for (int k=0; k<num_channels; ++k)
+                        Phi0_i_lm[k] +=
+                            radial_values[k]*Y_ij_lm*H0_ij[k];
+                }
+            }
+            ij += 1;
+        }
+
+        for (int l=0; l<=l_max; ++l) {
+            auto Phi0_il = Phi0_i.data()+l*l*num_channels;
+            auto A0_il = A0.data()+(i*num_lm+l*l)*num_channels;
+            cblas_dgemm(
+                CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                2*l+1, num_channels, num_channels,
+                1.0, Phi0_il, num_channels,
+                A0_weights[node_types[i]][l].data(), num_channels,
+                0.0, A0_il, num_channels);
+        }
+    }
+}
+
 void MACE::reverse_A0(
     const int num_nodes,
     std::span<const int> node_types,
@@ -1303,6 +1400,72 @@ void MACE::reverse_A0(
                         node_forces_ij[2] += -Phi0_adj_i_lm[k] * (
                             xyz_ij[2]/r_ij * R0_deriv_ij_l[k] * Y_ij_lm * H0_ij[k]
                             + R0_ij_l[k] * Y_grad_ij_lm_z * H0_ij[k]);
+                    }
+                }
+            }
+            ij += 1;
+        }
+    }
+}
+
+void MACE::reverse_A0_streamed(
+    const int num_nodes,
+    std::span<const int> node_types,
+    std::span<const int> num_neigh,
+    std::span<const int> neigh_types,
+    std::span<const double> xyz,
+    std::span<const double> r)
+{
+    auto radial_values = std::vector<double>(num_channels);
+    auto radial_derivatives = std::vector<double>(num_channels);
+    int ij = 0;
+    for (int i=0; i<num_nodes; ++i) {
+        auto Phi0_adj_i = std::vector<double>(num_lm*num_channels);
+        for (int l=0; l<=l_max; ++l) {
+            auto Phi0_adj_il = Phi0_adj_i.data()+l*l*num_channels;
+            auto A0_adj_il = A0_adj.data()+(i*num_lm+l*l)*num_channels;
+            cblas_dgemm(
+                CblasRowMajor, CblasNoTrans, CblasTrans,
+                2*l+1, num_channels, num_channels,
+                1.0, A0_adj_il, num_channels,
+                A0_weights[node_types[i]][l].data(), num_channels,
+                0.0, Phi0_adj_il, num_channels);
+        }
+
+        const int type_i = node_types[i];
+        for (int j=0; j<num_neigh[i]; ++j) {
+            const int pair = radial_pair_index(type_i, neigh_types[ij]);
+            const auto& spline = *spl_set_0[pair];
+            const auto point = spline.evaluation_point(r[ij]);
+            const auto xyz_ij = xyz.data()+ij*3;
+            const auto Y_ij = Y.data()+ij*num_lm;
+            const auto Y_grad_ij = Y_grad.data()+ij*3*num_lm;
+            const auto H0_ij = H0_weights.data()+neigh_types[ij]*num_channels;
+            auto node_forces_ij = node_forces.data()+ij*3;
+            for (int l=0; l<=l_max; ++l) {
+                for (int k=0; k<num_channels; ++k) {
+                    spline.evaluate_function_derivs(
+                        point, l*num_channels+k,
+                        radial_values[k], radial_derivatives[k]);
+                }
+                for (int m=-l; m<=l; ++m) {
+                    const int lm = l*l+l+m;
+                    const double Y_ij_lm = Y_ij[lm];
+                    auto Phi0_adj_i_lm = Phi0_adj_i.data()+lm*num_channels;
+                    for (int k=0; k<num_channels; ++k) {
+                        const double radial_force =
+                            radial_derivatives[k]*Y_ij_lm*H0_ij[k];
+                        const double angular_force = radial_values[k]*H0_ij[k];
+                        const double adjoint = Phi0_adj_i_lm[k];
+                        node_forces_ij[0] -= adjoint*(
+                            xyz_ij[0]/r[ij]*radial_force
+                            +angular_force*Y_grad_ij[lm]);
+                        node_forces_ij[1] -= adjoint*(
+                            xyz_ij[1]/r[ij]*radial_force
+                            +angular_force*Y_grad_ij[num_lm+lm]);
+                        node_forces_ij[2] -= adjoint*(
+                            xyz_ij[2]/r[ij]*radial_force
+                            +angular_force*Y_grad_ij[2*num_lm+lm]);
                     }
                 }
             }
@@ -1648,6 +1811,66 @@ void MACE::compute_Phi1(
     }
 }
 
+void MACE::compute_Phi1_streamed(
+    const int num_nodes,
+    std::span<const int> node_types,
+    std::span<const int> num_neigh,
+    std::span<const int> neigh_indices,
+    std::span<const int> neigh_types,
+    std::span<const double> r)
+{
+    Phi1r.assign(num_nodes*num_lelm1lm2*num_channels, 0.0);
+    auto radial_values = std::vector<double>(num_channels);
+    int ij = 0;
+    for (int i=0; i<num_nodes; ++i) {
+        auto Phi1r_i = Phi1r.data()+i*num_lelm1lm2*num_channels;
+        const int type_i = node_types[i];
+        for (int j=0; j<num_neigh[i]; ++j) {
+            const int pair = radial_pair_index(type_i, neigh_types[ij]);
+            const auto& spline = *spl_set_1[pair];
+            const auto point = spline.evaluation_point(r[ij]);
+            const auto Y_ij = Y.data()+ij*num_lm;
+            const auto H1_ij =
+                H1.data()+neigh_indices[ij]*num_LM*num_channels;
+            int lelm1lm2 = 0;
+            for (int lel1l2=0; lel1l2<Phi1_l.size(); ++lel1l2) {
+                for (int k=0; k<num_channels; ++k)
+                    radial_values[k] = spline.evaluate_function(
+                        point, lel1l2*num_channels+k);
+                const int l1 = Phi1_l1[lel1l2];
+                const int l2 = Phi1_l2[lel1l2];
+                for (int lm1=l1*l1; lm1<=l1*(l1+2); ++lm1) {
+                    const double Y_ij_lm1 = Y_ij[lm1];
+                    for (int lm2=l2*l2; lm2<=l2*(l2+2); ++lm2) {
+                        const auto H1_ij_lm2 = H1_ij+lm2*num_channels;
+                        auto Phi1r_i_row =
+                            Phi1r_i+lelm1lm2*num_channels;
+                        for (int k=0; k<num_channels; ++k)
+                            Phi1r_i_row[k] +=
+                                radial_values[k]*Y_ij_lm1*H1_ij_lm2[k];
+                        lelm1lm2 += 1;
+                    }
+                }
+            }
+            ij += 1;
+        }
+    }
+
+    Phi1.assign(num_nodes*num_lme*num_channels, 0.0);
+    for (int i=0; i<num_nodes; ++i) {
+        auto Phi1_i = Phi1.data()+i*num_lme*num_channels;
+        auto Phi1r_i = Phi1r.data()+i*num_lelm1lm2*num_channels;
+        for (int p=0; p<Phi1_clebsch_gordan.size(); ++p) {
+            auto Phi1_i_lme = Phi1_i+Phi1_lme[p]*num_channels;
+            const double coefficient = Phi1_clebsch_gordan[p];
+            const auto Phi1r_i_row =
+                Phi1r_i+Phi1_lelm1lm2[p]*num_channels;
+            for (int k=0; k<num_channels; ++k)
+                Phi1_i_lme[k] += coefficient*Phi1r_i_row[k];
+        }
+    }
+}
+
 void MACE::reverse_Phi1(
     const int num_nodes,
     std::span<const int> num_neigh,
@@ -1741,6 +1964,102 @@ void MACE::reverse_Phi1(
                         auto dPhi1r_i_lelm1lm2 = dPhi1r_i+lelm1lm2*num_channels;
                         for (int k=0; k<num_channels; ++k) {
                             H1_adj_ij_lm2[k] += R1_ij_lel1l2[k]*Y_ij[lm1]*dPhi1r_i_lelm1lm2[k];
+                        }
+                        lelm1lm2 += 1;
+                    }
+                }
+            }
+            ij += 1;
+        }
+    }
+}
+
+void MACE::reverse_Phi1_streamed(
+    const int num_nodes,
+    std::span<const int> node_types,
+    std::span<const int> num_neigh,
+    std::span<const int> neigh_indices,
+    std::span<const int> neigh_types,
+    std::span<const double> xyz,
+    std::span<const double> r,
+    bool zero_dxyz,
+    bool zero_H1_adj)
+{
+    dPhi1r.assign(Phi1r.size(), 0.0);
+    for (int i=0; i<num_nodes; ++i) {
+        auto dPhi1r_i = dPhi1r.data()+i*num_lelm1lm2*num_channels;
+        const auto dPhi1_i = dPhi1.data()+i*num_lme*num_channels;
+        for (int p=0; p<Phi1_clebsch_gordan.size(); ++p) {
+            auto dPhi1r_i_row =
+                dPhi1r_i+Phi1_lelm1lm2[p]*num_channels;
+            const double coefficient = Phi1_clebsch_gordan[p];
+            const auto dPhi1_i_lme = dPhi1_i+Phi1_lme[p]*num_channels;
+            for (int k=0; k<num_channels; ++k)
+                dPhi1r_i_row[k] += coefficient*dPhi1_i_lme[k];
+        }
+    }
+
+    node_forces.resize(xyz.size());
+    if (zero_dxyz)
+        std::fill(node_forces.begin(), node_forces.end(), 0.0);
+    H1_adj.resize(H1.size());
+    if (zero_H1_adj)
+        std::fill(H1_adj.begin(), H1_adj.end(), 0.0);
+
+    auto radial_values = std::vector<double>(num_channels);
+    auto radial_derivatives = std::vector<double>(num_channels);
+    int ij = 0;
+    for (int i=0; i<num_nodes; ++i) {
+        const auto dPhi1r_i =
+            dPhi1r.data()+i*num_lelm1lm2*num_channels;
+        const int type_i = node_types[i];
+        for (int j=0; j<num_neigh[i]; ++j) {
+            const int pair = radial_pair_index(type_i, neigh_types[ij]);
+            const auto& spline = *spl_set_1[pair];
+            const auto point = spline.evaluation_point(r[ij]);
+            auto node_forces_ij = node_forces.data()+3*ij;
+            const auto xyz_ij = xyz.data()+3*ij;
+            const auto Y_ij = Y.data()+ij*num_lm;
+            const auto Y_grad_ij = Y_grad.data()+ij*3*num_lm;
+            const auto H1_ij =
+                H1.data()+neigh_indices[ij]*num_LM*num_channels;
+            auto H1_adj_ij =
+                H1_adj.data()+neigh_indices[ij]*num_LM*num_channels;
+            int lelm1lm2 = 0;
+            for (int lel1l2=0; lel1l2<Phi1_l.size(); ++lel1l2) {
+                for (int k=0; k<num_channels; ++k) {
+                    spline.evaluate_function_derivs(
+                        point, lel1l2*num_channels+k,
+                        radial_values[k], radial_derivatives[k]);
+                }
+                const int l1 = Phi1_l1[lel1l2];
+                const int l2 = Phi1_l2[lel1l2];
+                for (int lm1=l1*l1; lm1<=l1*(l1+2); ++lm1) {
+                    const double Y_ij_lm1 = Y_ij[lm1];
+                    for (int lm2=l2*l2; lm2<=l2*(l2+2); ++lm2) {
+                        const auto H1_ij_lm2 = H1_ij+lm2*num_channels;
+                        auto H1_adj_ij_lm2 =
+                            H1_adj_ij+lm2*num_channels;
+                        const auto dPhi1r_i_row =
+                            dPhi1r_i+lelm1lm2*num_channels;
+                        for (int k=0; k<num_channels; ++k) {
+                            const double adjoint = dPhi1r_i_row[k];
+                            const double source_feature = H1_ij_lm2[k];
+                            const double radial_force =
+                                radial_derivatives[k]*Y_ij_lm1*source_feature;
+                            const double angular_force =
+                                radial_values[k]*source_feature;
+                            node_forces_ij[0] -= adjoint*(
+                                xyz_ij[0]/r[ij]*radial_force
+                                +angular_force*Y_grad_ij[lm1]);
+                            node_forces_ij[1] -= adjoint*(
+                                xyz_ij[1]/r[ij]*radial_force
+                                +angular_force*Y_grad_ij[num_lm+lm1]);
+                            node_forces_ij[2] -= adjoint*(
+                                xyz_ij[2]/r[ij]*radial_force
+                                +angular_force*Y_grad_ij[2*num_lm+lm1]);
+                            H1_adj_ij_lm2[k] +=
+                                radial_values[k]*Y_ij_lm1*adjoint;
                         }
                         lelm1lm2 += 1;
                     }

@@ -1,5 +1,6 @@
 #include <vector>
 #include <cmath>
+#include <stdexcept>
 
 #include "cubic_spline_set.hpp"
 
@@ -25,6 +26,54 @@ CubicSplineSet::CubicSplineSet(
                                         - 2*nodal_values[j][i+1] + h*nodal_derivs[j][i+1]) / (h*h*h);
         }
     }
+}
+
+CubicSplineSet::EvaluationPoint CubicSplineSet::evaluation_point(double r) const
+{
+    int interval = static_cast<int>(std::floor((r-x0)/h));
+    double x = r-x0-h*interval;
+    if (interval < 0) {
+        interval = 0;
+        x = 0.0;
+    } else if (interval >= num_nodes-1) {
+        interval = num_nodes-2;
+        x = h;
+    }
+    const double xx = x*x;
+    return {interval, x, xx, xx*x};
+}
+
+double CubicSplineSet::evaluate_function(
+    const EvaluationPoint& point,
+    int function) const
+{
+    if (function < 0 || function >= num_splines)
+        throw std::out_of_range("Cubic spline function index is out of range.");
+    const double* coefficients =
+        c.data()+4*point.interval*num_splines+function;
+    return coefficients[0*num_splines]
+        + coefficients[1*num_splines]*point.x
+        + coefficients[2*num_splines]*point.xx
+        + coefficients[3*num_splines]*point.xxx;
+}
+
+void CubicSplineSet::evaluate_function_derivs(
+    const EvaluationPoint& point,
+    int function,
+    double& value,
+    double& derivative) const
+{
+    if (function < 0 || function >= num_splines)
+        throw std::out_of_range("Cubic spline function index is out of range.");
+    const double* coefficients =
+        c.data()+4*point.interval*num_splines+function;
+    value = coefficients[0*num_splines]
+        + coefficients[1*num_splines]*point.x
+        + coefficients[2*num_splines]*point.xx
+        + coefficients[3*num_splines]*point.xxx;
+    derivative = coefficients[1*num_splines]
+        + 2.0*coefficients[2*num_splines]*point.x
+        + 3.0*coefficients[3*num_splines]*point.xx;
 }
 
 void CubicSplineSet::evaluate(

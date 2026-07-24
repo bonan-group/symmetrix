@@ -9,6 +9,7 @@
 #include "compact_radial.hpp"
 #include "cubic_spline_kokkos.hpp"
 #include "cubic_spline_set_kokkos.hpp"
+#include "mace_streamed_edges.hpp"
 #include "multilayer_perceptron_kokkos.hpp"
 #include "multivariate_polynomial.hpp"//TODO
 #include "multivariate_polynomial_kokkos.hpp"
@@ -22,6 +23,10 @@ public:
 
 MACEKokkos(std::string filename);
 ~MACEKokkos();
+void set_streamed_edges(std::string mode);
+std::string streamed_edges_mode() const;
+bool supports_streamed_edges() const;
+MACEStreamedEdgesMode streamed_edges = MACEStreamedEdgesMode::legacy;
 
 // Basic model information
 int num_elements;
@@ -37,6 +42,10 @@ void prepare_active_types(std::vector<int> node_types);
 
 // Node energies and forces
 Kokkos::View<double*> node_energies, node_forces;
+Kokkos::View<int*> streamed_first_neigh;
+void prepare_streamed_edge_schedule(
+    const int num_nodes,
+    Kokkos::View<const int*> num_neigh);
 void compute_node_energies_forces(const int num_nodes,
                                   Kokkos::View<const int*> node_types,
                                   Kokkos::View<const int*> num_neigh,
@@ -96,12 +105,25 @@ void compute_A0(const int num_nodes,
                 Kokkos::View<const int*> node_types,
                 Kokkos::View<const int*> num_neigh,
                 Kokkos::View<const int*> neigh_types);
+void compute_A0_streamed(
+    const int num_nodes,
+    Kokkos::View<const int*> node_types,
+    Kokkos::View<const int*> num_neigh,
+    Kokkos::View<const int*> neigh_types,
+    Kokkos::View<const double*> r);
 void reverse_A0(const int num_nodes,
                 Kokkos::View<const int*> node_types,
                 Kokkos::View<const int*> num_neigh,
                 Kokkos::View<const int*> neigh_types,
                 Kokkos::View<const double*> xyz,
                 Kokkos::View<const double*> r);
+void reverse_A0_streamed(
+    const int num_nodes,
+    Kokkos::View<const int*> node_types,
+    Kokkos::View<const int*> num_neigh,
+    Kokkos::View<const int*> neigh_types,
+    Kokkos::View<const double*> xyz,
+    Kokkos::View<const double*> r);
 
 // A0 rescaling
 bool A0_scaled;
@@ -188,7 +210,24 @@ Kokkos::View<Precision*> Phi1_clebsch_gordan;
 Kokkos::View<Precision***,Kokkos::LayoutRight> Phi1r, dPhi1r;
 Kokkos::View<Precision***,Kokkos::LayoutRight> Phi1, dPhi1;
 void compute_Phi1(const int num_nodes, Kokkos::View<const int*> num_neigh, Kokkos::View<const int*> neigh_indices);
+void compute_Phi1_streamed(
+    const int num_nodes,
+    Kokkos::View<const int*> node_types,
+    Kokkos::View<const int*> num_neigh,
+    Kokkos::View<const int*> neigh_indices,
+    Kokkos::View<const int*> neigh_types,
+    Kokkos::View<const double*> r);
 void reverse_Phi1(const int num_nodes, Kokkos::View<const int*> num_neigh, Kokkos::View<const int*> neigh_indices, Kokkos::View<const double*> xyz, Kokkos::View<const double*> r, bool zero_dxyz = true, bool zero_H1_adj = true);
+void reverse_Phi1_streamed(
+    const int num_nodes,
+    Kokkos::View<const int*> node_types,
+    Kokkos::View<const int*> num_neigh,
+    Kokkos::View<const int*> neigh_indices,
+    Kokkos::View<const int*> neigh_types,
+    Kokkos::View<const double*> xyz,
+    Kokkos::View<const double*> r,
+    bool zero_dxyz = true,
+    bool zero_H1_adj = true);
 
 // TODO for testing of Phi1 strategies
 Kokkos::View<int*> Phi1_lm1, Phi1_lm2, Phi1_lel1l2;

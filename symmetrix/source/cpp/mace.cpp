@@ -43,6 +43,15 @@ void bind_mace(py::module_ &m)
 {
     py::class_<MACE>(m, "MACE")
         .def(py::init<std::string>())
+        .def("set_streamed_edges", &MACE::set_streamed_edges)
+        .def_property_readonly("streamed_edges_mode", &MACE::streamed_edges_mode)
+        .def_property_readonly("supports_streamed_edges", &MACE::supports_streamed_edges)
+        .def_property_readonly("R0_storage_size", [] (const MACE& self) {
+            return self.R0.size()+self.R0_deriv.size();
+        })
+        .def_property_readonly("R1_storage_size", [] (const MACE& self) {
+            return self.R1.size()+self.R1_deriv.size();
+        })
         .def_readonly("atomic_numbers", &MACE::atomic_numbers)
         .def_readonly("atomic_energies", &MACE::atomic_energies)
         .def_readonly("active_atomic_numbers", &MACE::active_atomic_numbers)

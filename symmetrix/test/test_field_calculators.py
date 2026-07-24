@@ -82,6 +82,7 @@ class DummyBaseCalculator(Calculator):
         implemented_properties=None,
         matrix_stress=False,
         sparse_results=False,
+        reject_attached_calculator=False,
     ):
         Calculator.__init__(self)
         if implemented_properties is not None:
@@ -90,8 +91,11 @@ class DummyBaseCalculator(Calculator):
         self.energy_offset = 10.0
         self.matrix_stress = matrix_stress
         self.sparse_results = sparse_results
+        self.reject_attached_calculator = reject_attached_calculator
 
     def calculate(self, atoms=None, properties=['energy'], system_changes=all_changes):
+        if self.reject_attached_calculator and atoms.calc is not None:
+            raise NotImplementedError("attached calculator is not supported")
         Calculator.calculate(self, atoms, properties, system_changes)
         self.calls += 1
         energy = self.energy_offset + np.sum(self.atoms.positions**2)
@@ -264,6 +268,15 @@ def test_field_aware_accepts_matrix_stress_from_base(atoms):
     expected = np.array([2.0, 2.0, 2.0, 0.0, 0.0, 0.0])
     expected += calculator.field_contribution.get_property('stress', atoms)
     assert np.allclose(actual, expected)
+
+
+def test_field_aware_detaches_outer_calculator_from_base_atoms(atoms):
+    base = DummyBaseCalculator(reject_attached_calculator=True)
+    calculator = FieldAwareCalculator(base, DummyFieldSymmetrix())
+    atoms.calc = calculator
+
+    assert np.isfinite(atoms.get_potential_energy())
+    assert base.atoms.calc is None
 
 
 def test_field_aware_invalidates_after_base_reset(atoms):
