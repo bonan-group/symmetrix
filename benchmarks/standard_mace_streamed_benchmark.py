@@ -6,6 +6,7 @@ import json
 import os
 import pathlib
 import statistics
+import subprocess
 import sys
 import time
 
@@ -59,7 +60,39 @@ def _summary(samples):
     }
 
 
+def _gpu_process_memory_mib():
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-compute-apps=pid,used_gpu_memory",
+                "--format=csv,noheader,nounits",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+
+    used_mib = 0
+    for line in result.stdout.splitlines():
+        fields = [field.strip() for field in line.split(",")]
+        if len(fields) == 2 and fields[0] == str(os.getpid()):
+            try:
+                used_mib += int(fields[1])
+            except ValueError:
+                return None
+    return used_mib
+
+
 def _evaluate(model, atoms, backend, dtype, mode, warmups, repeats):
+    gpu_memory_before_mib = (
+        _gpu_process_memory_mib() if backend == "kokkos" else None
+    )
     calculator = Symmetrix(
         model,
         use_kokkos=backend == "kokkos",
@@ -81,6 +114,9 @@ def _evaluate(model, atoms, backend, dtype, mode, warmups, repeats):
     scalar_bytes = 4 if dtype == "float32" else 8
     r0_elements = int(calculator.evaluator.R0_storage_size)
     r1_elements = int(calculator.evaluator.R1_storage_size)
+    gpu_memory_after_mib = (
+        _gpu_process_memory_mib() if backend == "kokkos" else None
+    )
     return {
         "mode": mode,
         "directed_edges": len(inputs[6]),
@@ -91,6 +127,10 @@ def _evaluate(model, atoms, backend, dtype, mode, warmups, repeats):
             "R0_elements": r0_elements,
             "R1_elements": r1_elements,
             "bytes": scalar_bytes*(r0_elements+r1_elements),
+        },
+        "gpu_process_memory_mib": {
+            "before": gpu_memory_before_mib,
+            "after": gpu_memory_after_mib,
         },
     }
 
