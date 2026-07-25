@@ -264,13 +264,25 @@ def test_kokkos_field_energy_forces_match_native(macefield_full_json_path):
     assert np.allclose(kokkos.node_forces, native.node_forces, atol=1e-8, rtol=1e-8)
 
 
-def test_kokkos_electric_field_hessian_matches_native(macefield_full_json_path):
+@pytest.mark.parametrize(
+    "kokkos_class,atol,rtol",
+    [
+        ("MACEKokkos", 2e-6, 2e-6),
+        ("MACEKokkosFloat", 2e-4, 2e-4),
+    ],
+)
+def test_kokkos_electric_field_hessian_matches_native(
+    macefield_full_json_path,
+    kokkos_class,
+    atol,
+    rtol,
+):
     _skip_without_kokkos()
 
     electric_field = np.array([0.01, -0.02, 0.03], dtype=np.float64)
 
     native = native_symmetrix.MACE(str(macefield_full_json_path))
-    kokkos = native_symmetrix.MACEKokkos(str(macefield_full_json_path))
+    kokkos = getattr(native_symmetrix, kokkos_class)(str(macefield_full_json_path))
     num_nodes, node_types, num_neigh, neigh_indices, neigh_types, xyz, r, _ = _field_backend_inputs(native)
 
     native.compute_electric_field_hessian(
@@ -294,16 +306,33 @@ def test_kokkos_electric_field_hessian_matches_native(macefield_full_json_path):
         electric_field,
     )
 
-    assert np.allclose(kokkos.electric_field_hessian, native.electric_field_hessian, atol=2e-6, rtol=2e-6)
+    assert np.allclose(
+        kokkos.electric_field_hessian,
+        native.electric_field_hessian,
+        atol=atol,
+        rtol=rtol,
+    )
 
 
-def test_kokkos_electric_field_force_derivative_matches_native(macefield_full_json_path):
+@pytest.mark.parametrize(
+    "kokkos_class,atol,rtol",
+    [
+        ("MACEKokkos", 2e-6, 2e-6),
+        ("MACEKokkosFloat", 5e-4, 5e-4),
+    ],
+)
+def test_kokkos_electric_field_force_derivative_matches_native(
+    macefield_full_json_path,
+    kokkos_class,
+    atol,
+    rtol,
+):
     _skip_without_kokkos()
 
     electric_field = np.array([0.01, -0.02, 0.03], dtype=np.float64)
 
     native = native_symmetrix.MACE(str(macefield_full_json_path))
-    kokkos = native_symmetrix.MACEKokkos(str(macefield_full_json_path))
+    kokkos = getattr(native_symmetrix, kokkos_class)(str(macefield_full_json_path))
     num_nodes, node_types, num_neigh, neigh_indices, neigh_types, xyz, r, i_list = _field_backend_inputs(native)
 
     native.compute_electric_field_force_derivative(
@@ -329,7 +358,12 @@ def test_kokkos_electric_field_force_derivative_matches_native(macefield_full_js
 
     native_deriv = np.asarray(native.electric_field_force_derivative, dtype=np.float64).reshape(3, -1, 3)
     kokkos_deriv = np.asarray(kokkos.electric_field_force_derivative, dtype=np.float64).reshape(3, -1, 3)
-    assert np.allclose(kokkos_deriv[:, : len(i_list)], native_deriv[:, : len(i_list)], atol=2e-6, rtol=2e-6)
+    assert np.allclose(
+        kokkos_deriv[:, : len(i_list)],
+        native_deriv[:, : len(i_list)],
+        atol=atol,
+        rtol=rtol,
+    )
 
 
 def test_native_exposes_atomic_energies_for_node_energy(macefield_full_json_path):

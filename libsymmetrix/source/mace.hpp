@@ -158,6 +158,8 @@ std::vector<double> field_feats_output_mask;
 std::vector<double> field_linear_weight;
 std::vector<double> field_linear_bias;
 std::vector<double> field_linear_output_mask;
+std::vector<double> field_scalar_to_vector_matrix;
+std::vector<double> field_vector_to_scalar_matrix;
 std::vector<double> electric_field_adj;
 std::vector<double> electric_field_hessian;
 std::vector<double> electric_field_force_derivative;

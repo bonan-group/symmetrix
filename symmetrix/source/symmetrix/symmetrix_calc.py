@@ -50,8 +50,8 @@ class Symmetrix(Calculator):
     model_file: str
         JSON-format model file used for potential energy
     streamed_edges: {"legacy", "r1", "all"}
-        Experimental compact standard-MACE execution mode. ``r1`` streams the
-        second interaction radial functions; ``all`` also streams the first.
+        Compact MACE/MACEField execution mode. ``r1`` streams the second
+        interaction radial functions; ``all`` also streams the first.
 
     Notes
     -----
@@ -81,10 +81,6 @@ class Symmetrix(Calculator):
         self._model_has_field_coupling = bool(
             json_metadata.get("has_field_coupling", False)
         ) if json_metadata is not None else False
-
-        if use_kokkos and self._model_has_field_coupling:
-            if dtype == "float32":
-                raise ValueError("MACEField JSON models require dtype 'float64' in the Kokkos field-aware path.")
 
         if use_kokkos and not hasattr(symmetrix, "MACEKokkos"):
             if json_metadata is None and not str(model_file).lower().endswith(".json"):
@@ -128,7 +124,7 @@ class Symmetrix(Calculator):
             self.evaluator.set_streamed_edges(streamed_edges)
         elif streamed_edges != "legacy":
             raise ValueError(
-                "streamed_edges is only supported by ordinary standard-MACE evaluators."
+                "streamed_edges is only supported by compact MACE or MACEField evaluators."
             )
         self.streamed_edges = streamed_edges
         self.cutoff = self.evaluator.r_cut

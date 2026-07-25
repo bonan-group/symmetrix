@@ -43,7 +43,7 @@ void prepare_active_types(std::vector<int> node_types);
 
 // Node energies and forces
 Kokkos::View<double*> node_energies, node_forces;
-static constexpr int streamed_fused_max_num_lm = 16;
+static constexpr int streamed_fused_max_num_LM = 16;
 static constexpr int streamed_fused_max_num_paths = 16;
 // Crossover for the unfused edge-owned CUDA fallback.
 static constexpr int streamed_edge_owned_limit = 100000;
@@ -179,11 +179,13 @@ Kokkos::View<Precision*> field_feats_output_mask;
 Kokkos::View<Precision*> field_linear_weight;
 Kokkos::View<Precision*> field_linear_bias;
 Kokkos::View<Precision*> field_linear_output_mask;
+Kokkos::View<Precision**,Kokkos::LayoutRight> field_scalar_to_vector_matrix;
+Kokkos::View<Precision**,Kokkos::LayoutRight> field_vector_to_scalar_matrix;
+Kokkos::View<Precision**,Kokkos::LayoutRight> field_scalar_to_vector_up_matrix;
+Kokkos::View<Precision**,Kokkos::LayoutRight> field_vector_to_scalar_up_matrix;
 Kokkos::View<double*> electric_field_adj;
 Kokkos::View<double*> electric_field_hessian;
 Kokkos::View<double*> electric_field_force_derivative;
-Kokkos::View<Precision**,Kokkos::LayoutRight> field_delta_scalar_adj;
-Kokkos::View<Precision***,Kokkos::LayoutRight> field_delta_vector_adj;
 Kokkos::View<Precision***,Kokkos::LayoutRight> field_H1_pre_adj;
 double field_feats_scalar_to_vector_path_weight;
 double field_feats_vector_to_scalar_path_weight;

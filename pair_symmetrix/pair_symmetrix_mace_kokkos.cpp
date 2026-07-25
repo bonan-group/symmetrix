@@ -51,6 +51,7 @@ PairSymmetrixMACEKokkos<DeviceType, Precision>::PairSymmetrixMACEKokkos(LAMMPS *
   comm_forward = 0;  // possibly changed below
   comm_reverse = 0;  // possibly changed below
   electric_field_set = false;
+  streamed_edges = "legacy";
 
   kokkosable = 1;
   reverse_comm_device = 1;
@@ -115,6 +116,7 @@ void PairSymmetrixMACEKokkos<DeviceType, Precision>::settings(int narg, char **a
 {
   mode = (comm->nprocs == 1) ? "no_domain_decomposition" : "mpi_message_passing";
   electric_field_set = false;
+  streamed_edges = "legacy";
 
   for (int i=0; i<narg; ++i) {
     const std::string token(arg[i]);
@@ -139,6 +141,12 @@ void PairSymmetrixMACEKokkos<DeviceType, Precision>::settings(int narg, char **a
       Kokkos::deep_copy(electric_field, h_electric_field);
       electric_field_set = true;
       i += 3;
+    } else if (token == "streamed_edges") {
+      if (i+1 >= narg)
+        error->all(FLERR, "pair_style symmetrix/mace/kk streamed_edges requires legacy, r1, or all");
+      streamed_edges = arg[++i];
+      if (streamed_edges != "legacy" && streamed_edges != "r1" && streamed_edges != "all")
+        error->all(FLERR, "pair_style symmetrix/mace/kk streamed_edges requires legacy, r1, or all");
     } else {
       error->all(FLERR, "The command \'pair_style symmetrix/mace/kk {}\' is invalid", token);
     }
@@ -165,6 +173,11 @@ void PairSymmetrixMACEKokkos<DeviceType, Precision>::coeff(int narg, char **arg)
   utils::logmesg(lmp, "Loading MACEKokkos model from \'{}\' ... ", arg[2]);
   mace = std::make_unique<MACEKokkos<Precision>>(arg[2]);
   utils::logmesg(lmp, "success\n");
+  try {
+    mace->set_streamed_edges(streamed_edges);
+  } catch (const std::exception& exception) {
+    error->all(FLERR, "pair_style symmetrix/mace/kk streamed_edges is incompatible with this model: {}", exception.what());
+  }
   if (mace->has_field_coupling && !electric_field_set)
     error->all(FLERR, "MACEField models require pair_style symmetrix/mace/kk electric_field Ex Ey Ez");
 

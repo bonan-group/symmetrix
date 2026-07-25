@@ -35,67 +35,33 @@ struct ReverseFieldH1GlobalReducer {
     static constexpr unsigned value_count = 3;
 
     int num_channels;
-    int channel_pairs;
-    double inv_sqrt_3;
-    double field_feats_scalar_to_vector_path_weight;
-    double field_feats_vector_to_scalar_path_weight;
-    double field_linear_scalar_path_weight;
-    double field_linear_vector_path_weight;
-    Kokkos::View<Precision**,Kokkos::LayoutRight> delta_scalar_adj;
-    Kokkos::View<Precision***,Kokkos::LayoutRight> delta_vector_adj;
     Kokkos::View<Precision***,Kokkos::LayoutRight> H1_pre_adj;
     Kokkos::View<Precision***,Kokkos::LayoutRight> H1_adj;
     Kokkos::View<Precision***,Kokkos::LayoutRight> H1_pre_field;
-    Kokkos::View<Precision*> field_feats_weight;
-    Kokkos::View<Precision*> field_linear_weight;
+    Kokkos::View<Precision**,Kokkos::LayoutRight> scalar_to_vector_matrix;
+    Kokkos::View<Precision**,Kokkos::LayoutRight> vector_to_scalar_matrix;
     Kokkos::View<const double*> electric_field;
     Kokkos::View<double*> electric_field_adj;
 
     KOKKOS_INLINE_FUNCTION
-    void operator()(const int i, double local_electric_field_adj[]) const {
-        for (int u=0; u<num_channels; ++u) {
-            for (int w=0; w<num_channels; ++w) {
-                const int weight_index = u*num_channels + w;
-                delta_scalar_adj(i,u) +=
-                    -field_linear_scalar_path_weight
-                    * field_linear_weight(weight_index)
-                    * H1_adj(i,0,w);
-                for (int component=0; component<3; ++component)
-                    delta_vector_adj(i,u,component) +=
-                        field_linear_vector_path_weight
-                        * field_linear_weight(channel_pairs + weight_index)
-                        * H1_adj(i,1+component,w);
-            }
-        }
-
-        for (int u=0; u<num_channels; ++u) {
-            const Precision scalar_in = H1_pre_field(i,0,u);
-            for (int w=0; w<num_channels; ++w) {
-                const int weight_index = u*num_channels + w;
-                const Precision scalar_to_vector_weight =
-                    field_feats_scalar_to_vector_path_weight
-                    * field_feats_weight(weight_index)
-                    * inv_sqrt_3;
-                const Precision vector_to_scalar_weight =
-                    field_feats_vector_to_scalar_path_weight
-                    * field_feats_weight(channel_pairs + weight_index)
-                    * inv_sqrt_3;
-                const Precision scalar_delta_adj = delta_scalar_adj(i,w);
-
-                for (int component=0; component<3; ++component) {
-                    const Precision vector_delta_adj = delta_vector_adj(i,w,component);
-                    H1_pre_adj(i,0,u) +=
-                        vector_delta_adj*scalar_to_vector_weight*electric_field(component);
-                    local_electric_field_adj[component] +=
-                        static_cast<double>(vector_delta_adj*scalar_to_vector_weight*scalar_in);
-
-                    H1_pre_adj(i,1+component,u) +=
-                        -scalar_delta_adj*vector_to_scalar_weight*electric_field(component);
-                    local_electric_field_adj[component] +=
-                        static_cast<double>(
-                            -scalar_delta_adj*vector_to_scalar_weight
-                            * H1_pre_field(i,1+component,u));
-                }
+    void operator()(const int index, double local_electric_field_adj[]) const {
+        const int i = index/num_channels;
+        const int u = index%num_channels;
+        const Precision scalar_in = H1_pre_field(i,0,u);
+        for (int k=0; k<num_channels; ++k) {
+            const Precision scalar_to_vector = scalar_to_vector_matrix(u,k);
+            const Precision vector_to_scalar = vector_to_scalar_matrix(u,k);
+            const Precision scalar_output_adj = H1_adj(i,0,k);
+            for (int component=0; component<3; ++component) {
+                const Precision vector_output_adj = H1_adj(i,1+component,k);
+                H1_pre_adj(i,0,u) += scalar_to_vector
+                    *electric_field(component)*vector_output_adj;
+                H1_pre_adj(i,1+component,u) += vector_to_scalar
+                    *electric_field(component)*scalar_output_adj;
+                local_electric_field_adj[component] += static_cast<double>(
+                    scalar_to_vector*scalar_in*vector_output_adj
+                    +vector_to_scalar*H1_pre_field(i,1+component,u)
+                        *scalar_output_adj);
             }
         }
     }
@@ -116,6 +82,82 @@ struct ReverseFieldH1GlobalReducer {
     void final(double update[]) const {
         for (int component=0; component<3; ++component)
             electric_field_adj(component) = update[component];
+    }
+};
+
+template <typename Precision>
+struct AnalyticFieldReverseReducer {
+    using value_type = double[];
+
+    static constexpr unsigned value_count = 3;
+
+    int num_channels;
+    int seed;
+    Kokkos::View<Precision***,Kokkos::LayoutRight> H1_adj;
+    Kokkos::View<Precision***,Kokkos::LayoutRight> H1_adj_dot;
+    Kokkos::View<Precision***,Kokkos::LayoutRight> H1_pre_field;
+    Kokkos::View<Precision***,Kokkos::LayoutRight> H1_product_adj_dot;
+    Kokkos::View<Precision***,Kokkos::LayoutRight> H1_linear_up_weights;
+    Kokkos::View<Precision**,Kokkos::LayoutRight> scalar_to_vector_up;
+    Kokkos::View<Precision**,Kokkos::LayoutRight> vector_to_scalar_up;
+    Kokkos::View<const double*> electric_field;
+    Kokkos::View<double*> electric_field_hessian;
+
+    KOKKOS_INLINE_FUNCTION
+    void operator()(const int index, double local_hessian[]) const {
+        const int i = index/num_channels;
+        const int input = index%num_channels;
+        Precision scalar_dot = 0.0;
+        Precision vector_dot[3] = {};
+        const Precision scalar_feature = H1_pre_field(i,0,input);
+        for (int output=0; output<num_channels; ++output) {
+            const Precision scalar_vector = scalar_to_vector_up(input,output);
+            const Precision vector_scalar = vector_to_scalar_up(input,output);
+            const Precision scalar_adjoint = H1_adj(i,0,output);
+            const Precision scalar_adjoint_dot = H1_adj_dot(i,0,output);
+            scalar_dot += H1_linear_up_weights(0,input,output)
+                *scalar_adjoint_dot;
+            for (int component=0; component<3; ++component) {
+                const Precision vector_adjoint =
+                    H1_adj(i,1+component,output);
+                const Precision vector_adjoint_dot =
+                    H1_adj_dot(i,1+component,output);
+                const Precision field_component = static_cast<Precision>(
+                    electric_field(component));
+                vector_dot[component] +=
+                    H1_linear_up_weights(1,input,output)
+                        *vector_adjoint_dot
+                    +vector_scalar*(field_component*scalar_adjoint_dot
+                        +(component == seed ? scalar_adjoint : Precision(0)));
+                scalar_dot += scalar_vector*(field_component*vector_adjoint_dot
+                    +(component == seed ? vector_adjoint : Precision(0)));
+                local_hessian[component] += static_cast<double>(
+                    scalar_vector*scalar_feature*vector_adjoint_dot
+                    +vector_scalar*H1_pre_field(i,1+component,input)
+                        *scalar_adjoint_dot);
+            }
+        }
+        H1_product_adj_dot(i,0,input) = scalar_dot;
+        for (int component=0; component<3; ++component)
+            H1_product_adj_dot(i,1+component,input) = vector_dot[component];
+    }
+
+    KOKKOS_INLINE_FUNCTION
+    void init(double update[]) const {
+        for (int component=0; component<3; ++component)
+            update[component] = 0.0;
+    }
+
+    KOKKOS_INLINE_FUNCTION
+    void join(double dst[], const double src[]) const {
+        for (int component=0; component<3; ++component)
+            dst[component] += src[component];
+    }
+
+    KOKKOS_INLINE_FUNCTION
+    void final(double update[]) const {
+        for (int component=0; component<3; ++component)
+            electric_field_hessian(component*3+seed) += update[component];
     }
 };
 
@@ -144,15 +186,15 @@ MACEKokkos<Precision>::~MACEKokkos()
 template <typename Precision>
 bool MACEKokkos<Precision>::supports_streamed_edges() const
 {
-    return uses_compact_radial && !has_field_coupling;
+    return uses_compact_radial;
 }
 
 template <typename Precision>
 bool MACEKokkos<Precision>::supports_fused_streamed_reverse() const
 {
     // The fused kernel trades path parallelism for fewer source adjoint atomics.
-    return num_lm > 0
-        && num_lm <= streamed_fused_max_num_lm
+    return num_LM > 0
+        && num_LM <= streamed_fused_max_num_LM
         && Phi1_l.extent(0) <= streamed_fused_max_num_paths
         && Phi1_lm1.extent(0) >= 2*static_cast<std::size_t>(num_lm);
 }
@@ -169,7 +211,7 @@ void MACEKokkos<Precision>::set_streamed_edges(std::string mode)
     const auto requested = parse_mace_streamed_edges_mode(mode);
     if (requested != MACEStreamedEdgesMode::legacy && !supports_streamed_edges())
         throw std::invalid_argument(
-            "Streamed edges require an ordinary format-v2 compact MACE model.");
+            "Streamed edges require a format-v2 compact MACE or MACEField model.");
     Kokkos::fence();
     streamed_edges = requested;
     if (streamed_edges == MACEStreamedEdgesMode::r1
@@ -480,18 +522,30 @@ void MACEKokkos<Precision>::compute_node_energies_forces_field(
             num_nodes, node_types, num_neigh, neigh_types,
             atomic_numbers, r, xyz, node_energies, node_forces);
 
-    compute_R0(num_nodes, node_types, num_neigh, neigh_types, r);
-    compute_R1(num_nodes, node_types, num_neigh, neigh_types, r);
+    if (streamed_edges != MACEStreamedEdgesMode::legacy)
+        prepare_streamed_edge_schedule(
+            num_nodes, static_cast<int>(neigh_indices.extent(0)), num_neigh);
+    if (streamed_edges != MACEStreamedEdgesMode::all)
+        compute_R0(num_nodes, node_types, num_neigh, neigh_types, r);
+    if (streamed_edges == MACEStreamedEdgesMode::legacy)
+        compute_R1(num_nodes, node_types, num_neigh, neigh_types, r);
     compute_Y(xyz);
 
-    compute_A0(num_nodes, node_types, num_neigh, neigh_types);
+    if (streamed_edges == MACEStreamedEdgesMode::all)
+        compute_A0_streamed(num_nodes, node_types, num_neigh, neigh_types, r);
+    else
+        compute_A0(num_nodes, node_types, num_neigh, neigh_types);
     compute_A0_scaled(num_nodes, node_types, num_neigh, neigh_types, r);
     compute_M0(num_nodes, node_types);
     compute_H1_product(num_nodes);
     compute_field_H1(num_nodes, electric_field);
     compute_H1_linear_up(num_nodes);
 
-    compute_Phi1(num_nodes, num_neigh, neigh_indices);
+    if (streamed_edges == MACEStreamedEdgesMode::legacy)
+        compute_Phi1(num_nodes, num_neigh, neigh_indices);
+    else
+        compute_Phi1_streamed(
+            num_nodes, node_types, num_neigh, neigh_indices, neigh_types, r);
     compute_A1(num_nodes);
     compute_A1_scaled(num_nodes, node_types, num_neigh, neigh_types, r);
     compute_M1(num_nodes, node_types);
@@ -503,129 +557,27 @@ void MACEKokkos<Precision>::compute_node_energies_forces_field(
     reverse_M1(num_nodes, node_types);
     reverse_A1_scaled(num_nodes, node_types, num_neigh, neigh_types, xyz, r);
     reverse_A1(num_nodes);
-    reverse_Phi1(num_nodes, num_neigh, neigh_indices, xyz, r, false, false);
+    if (streamed_edges == MACEStreamedEdgesMode::legacy)
+        reverse_Phi1(num_nodes, num_neigh, neigh_indices, xyz, r, false, false);
+    else
+        reverse_Phi1_streamed(
+            num_nodes, node_types, num_neigh, neigh_indices, neigh_types,
+            xyz, r, false, false);
 
     reverse_H1_linear_up(num_nodes);
     reverse_field_H1(num_nodes, electric_field);
     reverse_H1_product(num_nodes);
     reverse_M0(num_nodes, node_types);
     reverse_A0_scaled(num_nodes, node_types, num_neigh, neigh_types, xyz, r);
-    reverse_A0(num_nodes, node_types, num_neigh, neigh_types, xyz, r);
+    if (streamed_edges == MACEStreamedEdgesMode::all)
+        reverse_A0_streamed(
+            num_nodes, node_types, num_neigh, neigh_types, xyz, r);
+    else
+        reverse_A0(num_nodes, node_types, num_neigh, neigh_types, xyz, r);
 
 }
 
-template <typename Precision>
-void MACEKokkos<Precision>::compute_electric_field_hessian(
-    const int num_nodes,
-    Kokkos::View<const int*> node_types,
-    Kokkos::View<const int*> num_neigh,
-    Kokkos::View<const int*> neigh_indices,
-    Kokkos::View<const int*> neigh_types,
-    Kokkos::View<const double*> xyz,
-    Kokkos::View<const double*> r,
-    Kokkos::View<const double*> electric_field)
-{
-    if (!has_field_coupling)
-        throw std::invalid_argument("MACEKokkos::compute_electric_field_hessian requires field coupling.");
-    if (electric_field.size() != 3)
-        throw std::invalid_argument("MACEKokkos::compute_electric_field_hessian requires a graph-level electric field.");
-
-    if (electric_field_hessian.size() != 9)
-        Kokkos::realloc(electric_field_hessian, 9);
-    if (electric_field_force_derivative.size() != 3*xyz.size())
-        Kokkos::realloc(electric_field_force_derivative, 3*xyz.size());
-
-    auto h_electric_field =
-        Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), electric_field);
-    Kokkos::View<double*, Kokkos::HostSpace> h_electric_field_hessian(
-        "h_electric_field_hessian", 9);
-    Kokkos::View<double*, Kokkos::HostSpace> h_electric_field_force_derivative(
-        "h_electric_field_force_derivative", 3*xyz.size());
-    Kokkos::deep_copy(h_electric_field_hessian, 0.0);
-    Kokkos::deep_copy(h_electric_field_force_derivative, 0.0);
-
-    // Arbitrary Kokkos views do not carry a stable graph identity. Recompute the
-    // baseline so a previous structure cannot contaminate finite differences.
-    compute_node_energies_forces_field(
-        num_nodes,
-        node_types,
-        num_neigh,
-        neigh_indices,
-        neigh_types,
-        xyz,
-        r,
-        electric_field);
-    Kokkos::View<double*, Kokkos::HostSpace> h_base_adj(
-        "h_base_adj", electric_field_adj.size());
-    Kokkos::View<double*, Kokkos::HostSpace> h_base_forces(
-        "h_base_forces", node_forces.size());
-    Kokkos::View<double*, Kokkos::HostSpace> h_base_energies(
-        "h_base_energies", node_energies.size());
-    Kokkos::deep_copy(h_base_adj, electric_field_adj);
-    Kokkos::deep_copy(h_base_forces, node_forces);
-    Kokkos::deep_copy(h_base_energies, node_energies);
-
-    constexpr double step = 1e-6;
-    for (int seed=0; seed<3; ++seed) {
-        Kokkos::View<double*> field_plus("field_plus", 3);
-        auto h_field_plus = Kokkos::create_mirror_view(field_plus);
-        for (int component=0; component<3; ++component)
-            h_field_plus(component) = h_electric_field(component);
-        h_field_plus(seed) += step;
-        Kokkos::deep_copy(field_plus, h_field_plus);
-
-        compute_node_energies_forces_field(
-            num_nodes,
-            node_types,
-            num_neigh,
-            neigh_indices,
-            neigh_types,
-            xyz,
-            r,
-            field_plus);
-        Kokkos::View<double*, Kokkos::HostSpace> h_adj_plus(
-            "h_adj_plus", electric_field_adj.size());
-        Kokkos::View<double*, Kokkos::HostSpace> h_forces_plus(
-            "h_forces_plus", node_forces.size());
-        Kokkos::deep_copy(h_adj_plus, electric_field_adj);
-        Kokkos::deep_copy(h_forces_plus, node_forces);
-
-        for (int component=0; component<3; ++component)
-            h_electric_field_hessian(component*3 + seed) =
-                (h_adj_plus(component) - h_base_adj(component))/step;
-        for (int index=0; index<xyz.size(); ++index)
-            h_electric_field_force_derivative(seed*xyz.size() + index) =
-                (h_forces_plus(index) - h_base_forces(index))/step;
-    }
-
-    Kokkos::deep_copy(electric_field_hessian, h_electric_field_hessian);
-    Kokkos::deep_copy(electric_field_force_derivative, h_electric_field_force_derivative);
-    Kokkos::deep_copy(electric_field_adj, h_base_adj);
-    Kokkos::deep_copy(node_forces, h_base_forces);
-    Kokkos::deep_copy(node_energies, h_base_energies);
-}
-
-template <typename Precision>
-void MACEKokkos<Precision>::compute_electric_field_force_derivative(
-    const int num_nodes,
-    Kokkos::View<const int*> node_types,
-    Kokkos::View<const int*> num_neigh,
-    Kokkos::View<const int*> neigh_indices,
-    Kokkos::View<const int*> neigh_types,
-    Kokkos::View<const double*> xyz,
-    Kokkos::View<const double*> r,
-    Kokkos::View<const double*> electric_field)
-{
-    compute_electric_field_hessian(
-        num_nodes,
-        node_types,
-        num_neigh,
-        neigh_indices,
-        neigh_types,
-        xyz,
-        r,
-        electric_field);
-}
+#include "mace_kokkos_response.tpp"
 
 template <typename Precision>
 void MACEKokkos<Precision>::compute_R0(
@@ -1677,81 +1629,49 @@ void MACEKokkos<Precision>::compute_field_H1(
     const int channel_pairs = num_channels*num_channels;
     if (field_feats_weight.size() != 2*channel_pairs || field_linear_weight.size() != 2*channel_pairs)
         throw std::runtime_error("MACEField field coupling weights do not match num_channels.");
+    if (field_scalar_to_vector_matrix.extent(0) != num_channels
+        || field_scalar_to_vector_matrix.extent(1) != num_channels
+        || field_vector_to_scalar_matrix.extent(0) != num_channels
+        || field_vector_to_scalar_matrix.extent(1) != num_channels)
+        throw std::runtime_error(
+            "MACEField precomposed field coupling matrices do not match num_channels.");
 
     if (H1_pre_field.extent(0) < H1.extent(0))
         Kokkos::realloc(H1_pre_field, H1.extent(0), H1.extent(1), H1.extent(2));
     Kokkos::deep_copy(H1_pre_field, H1);
 
-    Kokkos::View<Precision**,Kokkos::LayoutRight> delta_scalar("delta_scalar", num_nodes, num_channels);
-    Kokkos::View<Precision***,Kokkos::LayoutRight> delta_vector("delta_vector", num_nodes, num_channels, 3);
-    Kokkos::View<Precision**,Kokkos::LayoutRight> linear_scalar("linear_scalar", num_nodes, num_channels);
-    Kokkos::View<Precision***,Kokkos::LayoutRight> linear_vector("linear_vector", num_nodes, num_channels, 3);
-    Kokkos::deep_copy(delta_scalar, 0.0);
-    Kokkos::deep_copy(delta_vector, 0.0);
-    Kokkos::deep_copy(linear_scalar, 0.0);
-    Kokkos::deep_copy(linear_vector, 0.0);
-
-    const double inv_sqrt_3 = 1.0/std::sqrt(3.0);
     const bool global_field = electric_field.size() == 3;
     const auto num_channels = this->num_channels;
     const auto H1_pre_field = this->H1_pre_field;
     const auto H1 = this->H1;
-    const auto field_feats_weight = this->field_feats_weight;
-    const auto field_linear_weight = this->field_linear_weight;
-    const auto field_feats_scalar_to_vector_path_weight = this->field_feats_scalar_to_vector_path_weight;
-    const auto field_feats_vector_to_scalar_path_weight = this->field_feats_vector_to_scalar_path_weight;
-    const auto field_linear_scalar_path_weight = this->field_linear_scalar_path_weight;
-    const auto field_linear_vector_path_weight = this->field_linear_vector_path_weight;
+    const auto scalar_to_vector_matrix = this->field_scalar_to_vector_matrix;
+    const auto vector_to_scalar_matrix = this->field_vector_to_scalar_matrix;
 
-    Kokkos::parallel_for("MACEKokkos::compute_field_H1", num_nodes, KOKKOS_LAMBDA (const int i) {
+    Kokkos::parallel_for(
+        "MACEKokkos::compute_field_H1",
+        Kokkos::MDRangePolicy<Kokkos::Rank<2,Kokkos::Iterate::Right>>(
+            {0,0}, {num_nodes,num_channels}),
+        KOKKOS_LAMBDA (const int i, const int k) {
         const int field_offset = global_field ? 0 : 3*i;
+        Precision scalar_update = 0.0;
+        Precision vector_update[3] = {};
         for (int u=0; u<num_channels; ++u) {
             const Precision scalar_in = H1_pre_field(i,0,u);
-            double vector_dot_field = 0.0;
-            for (int component=0; component<3; ++component)
-                vector_dot_field += -H1_pre_field(i,1+component,u)*electric_field(field_offset+component);
-
-            for (int w=0; w<num_channels; ++w) {
-                const int weight_index = u*num_channels + w;
-                const Precision scalar_to_vector_weight =
-                    field_feats_scalar_to_vector_path_weight
-                    * field_feats_weight(weight_index)
-                    * inv_sqrt_3;
-                const Precision vector_to_scalar_weight =
-                    field_feats_vector_to_scalar_path_weight
-                    * field_feats_weight(channel_pairs + weight_index)
-                    * inv_sqrt_3;
-
-                for (int component=0; component<3; ++component)
-                    delta_vector(i,w,component) +=
-                        scalar_to_vector_weight*scalar_in*electric_field(field_offset+component);
-
-                delta_scalar(i,w) += vector_to_scalar_weight*vector_dot_field;
+            const Precision scalar_to_vector = scalar_to_vector_matrix(u,k);
+            const Precision vector_to_scalar = vector_to_scalar_matrix(u,k);
+            for (int component=0; component<3; ++component) {
+                const Precision field_component = static_cast<Precision>(
+                    electric_field(field_offset+component));
+                scalar_update += vector_to_scalar
+                    *H1_pre_field(i,1+component,u)*field_component;
+                vector_update[component] += scalar_to_vector
+                    *scalar_in*field_component;
             }
         }
-
-        for (int u=0; u<num_channels; ++u) {
-            const Precision scalar_in = delta_scalar(i,u);
-            for (int w=0; w<num_channels; ++w) {
-                const int weight_index = u*num_channels + w;
-                linear_scalar(i,w) +=
-                    field_linear_scalar_path_weight
-                    * field_linear_weight(weight_index)
-                    * scalar_in;
-                for (int component=0; component<3; ++component)
-                    linear_vector(i,w,component) +=
-                        field_linear_vector_path_weight
-                        * field_linear_weight(channel_pairs + weight_index)
-                        * delta_vector(i,u,component);
-            }
-        }
-
-        for (int k=0; k<num_channels; ++k) {
-            H1(i,0,k) = H1_pre_field(i,0,k) - linear_scalar(i,k);
-            for (int component=0; component<3; ++component)
-                H1(i,1+component,k) =
-                    H1_pre_field(i,1+component,k) + linear_vector(i,k,component);
-        }
+        H1(i,0,k) = H1_pre_field(i,0,k) + scalar_update;
+        for (int component=0; component<3; ++component)
+            H1(i,1+component,k) =
+                H1_pre_field(i,1+component,k) + vector_update[component];
     });
     Kokkos::fence();
 }
@@ -1772,14 +1692,9 @@ void MACEKokkos<Precision>::reverse_field_H1(
     const auto num_channels = this->num_channels;
     const auto H1_adj = this->H1_adj;
     const auto H1_pre_field = this->H1_pre_field;
-    const auto field_feats_weight = this->field_feats_weight;
-    const auto field_linear_weight = this->field_linear_weight;
-    const auto field_feats_scalar_to_vector_path_weight = this->field_feats_scalar_to_vector_path_weight;
-    const auto field_feats_vector_to_scalar_path_weight = this->field_feats_vector_to_scalar_path_weight;
-    const auto field_linear_scalar_path_weight = this->field_linear_scalar_path_weight;
-    const auto field_linear_vector_path_weight = this->field_linear_vector_path_weight;
+    const auto scalar_to_vector_matrix = this->field_scalar_to_vector_matrix;
+    const auto vector_to_scalar_matrix = this->field_vector_to_scalar_matrix;
 
-    const int channel_pairs = num_channels*num_channels;
     const bool global_field = electric_field.size() == 3;
     const int h1_lm = H1_adj.extent(1);
     const int h1_channels = H1_adj.extent(2);
@@ -1788,22 +1703,12 @@ void MACEKokkos<Precision>::reverse_field_H1(
         Kokkos::realloc(this->electric_field_adj, electric_field.size());
     auto electric_field_adj = this->electric_field_adj;
 
-    if (field_delta_scalar_adj.extent(0) < num_nodes
-        || field_delta_scalar_adj.extent(1) < num_channels)
-        Kokkos::realloc(field_delta_scalar_adj, num_nodes, num_channels);
-    if (field_delta_vector_adj.extent(0) < num_nodes
-        || field_delta_vector_adj.extent(1) < num_channels)
-        Kokkos::realloc(field_delta_vector_adj, num_nodes, num_channels, 3);
     if (field_H1_pre_adj.extent(0) < num_nodes
         || field_H1_pre_adj.extent(1) < h1_lm
         || field_H1_pre_adj.extent(2) < h1_channels)
         Kokkos::realloc(field_H1_pre_adj, num_nodes, h1_lm, h1_channels);
 
-    auto delta_scalar_adj = this->field_delta_scalar_adj;
-    auto delta_vector_adj = this->field_delta_vector_adj;
     auto H1_pre_adj = this->field_H1_pre_adj;
-    Kokkos::deep_copy(delta_scalar_adj, 0.0);
-    Kokkos::deep_copy(delta_vector_adj, 0.0);
     Kokkos::parallel_for(
         "MACEKokkos::reverse_field_H1_copy_in",
         Kokkos::MDRangePolicy<Kokkos::Rank<3,Kokkos::Iterate::Right>>(
@@ -1812,27 +1717,17 @@ void MACEKokkos<Precision>::reverse_field_H1(
             H1_pre_adj(i,lm,channel) = H1_adj(i,lm,channel);
         });
 
-    const double inv_sqrt_3 = 1.0/std::sqrt(3.0);
-
     if (global_field) {
         Kokkos::parallel_reduce(
             "MACEKokkos::reverse_field_H1_global",
-            num_nodes,
+            num_nodes*num_channels,
             ReverseFieldH1GlobalReducer<Precision>{
                 num_channels,
-                channel_pairs,
-                inv_sqrt_3,
-                field_feats_scalar_to_vector_path_weight,
-                field_feats_vector_to_scalar_path_weight,
-                field_linear_scalar_path_weight,
-                field_linear_vector_path_weight,
-                delta_scalar_adj,
-                delta_vector_adj,
                 H1_pre_adj,
                 H1_adj,
                 H1_pre_field,
-                field_feats_weight,
-                field_linear_weight,
+                scalar_to_vector_matrix,
+                vector_to_scalar_matrix,
                 electric_field,
                 electric_field_adj});
     } else {
@@ -1840,47 +1735,28 @@ void MACEKokkos<Precision>::reverse_field_H1(
         Kokkos::parallel_for("MACEKokkos::reverse_field_H1", num_nodes, KOKKOS_LAMBDA (const int i) {
             const int field_offset = 3*i;
             for (int u=0; u<num_channels; ++u) {
-                for (int w=0; w<num_channels; ++w) {
-                    const int weight_index = u*num_channels + w;
-                    delta_scalar_adj(i,u) +=
-                        -field_linear_scalar_path_weight
-                        * field_linear_weight(weight_index)
-                        * H1_adj(i,0,w);
-                    for (int component=0; component<3; ++component)
-                        delta_vector_adj(i,u,component) +=
-                            field_linear_vector_path_weight
-                            * field_linear_weight(channel_pairs + weight_index)
-                            * H1_adj(i,1+component,w);
-                }
-            }
-
-            for (int u=0; u<num_channels; ++u) {
                 const Precision scalar_in = H1_pre_field(i,0,u);
-                for (int w=0; w<num_channels; ++w) {
-                    const int weight_index = u*num_channels + w;
-                    const Precision scalar_to_vector_weight =
-                        field_feats_scalar_to_vector_path_weight
-                        * field_feats_weight(weight_index)
-                        * inv_sqrt_3;
-                    const Precision vector_to_scalar_weight =
-                        field_feats_vector_to_scalar_path_weight
-                        * field_feats_weight(channel_pairs + weight_index)
-                        * inv_sqrt_3;
-                    const Precision scalar_delta_adj = delta_scalar_adj(i,w);
-
+                for (int k=0; k<num_channels; ++k) {
+                    const Precision scalar_to_vector =
+                        scalar_to_vector_matrix(u,k);
+                    const Precision vector_to_scalar =
+                        vector_to_scalar_matrix(u,k);
+                    const Precision scalar_output_adj = H1_adj(i,0,k);
                     for (int component=0; component<3; ++component) {
-                        const Precision vector_delta_adj = delta_vector_adj(i,w,component);
+                        const Precision field_component = static_cast<Precision>(
+                            electric_field(field_offset+component));
+                        const Precision vector_output_adj =
+                            H1_adj(i,1+component,k);
                         H1_pre_adj(i,0,u) +=
-                            vector_delta_adj*scalar_to_vector_weight*electric_field(field_offset+component);
-                        electric_field_adj(field_offset+component) +=
-                            static_cast<double>(vector_delta_adj*scalar_to_vector_weight*scalar_in);
-
+                            scalar_to_vector*field_component*vector_output_adj;
                         H1_pre_adj(i,1+component,u) +=
-                            -scalar_delta_adj*vector_to_scalar_weight*electric_field(field_offset+component);
+                            vector_to_scalar*field_component*scalar_output_adj;
                         electric_field_adj(field_offset+component) +=
                             static_cast<double>(
-                                -scalar_delta_adj*vector_to_scalar_weight
-                                * H1_pre_field(i,1+component,u));
+                                scalar_to_vector*scalar_in*vector_output_adj
+                                +vector_to_scalar
+                                    *H1_pre_field(i,1+component,u)
+                                    *scalar_output_adj);
                     }
                 }
             }
@@ -2233,6 +2109,7 @@ void MACEKokkos<Precision>::reverse_Phi1_streamed(
 
     const int num_channels = this->num_channels;
     const int num_lm = this->num_lm;
+    const int num_LM = this->num_LM;
     const int num_paths = Phi1_l.extent(0);
     const int num_types = num_active_types;
     const auto Phi1_lme = this->Phi1_lme;
@@ -2310,7 +2187,7 @@ void MACEKokkos<Precision>::reverse_Phi1_streamed(
                                  Precision& f_y,
                                  Precision& f_z) {
                                 Precision h1_contributions[
-                                    streamed_fused_max_num_lm] = {};
+                                    streamed_fused_max_num_LM] = {};
                                 for (int path=0; path<num_paths; ++path) {
                                     Precision radial, radial_derivative;
                                     radial_1.evaluate_function(
@@ -2343,7 +2220,7 @@ void MACEKokkos<Precision>::reverse_Phi1_streamed(
                                             *Y(ij*num_lm+lm1)*adjoint;
                                     }
                                 }
-                                for (int lm2=0; lm2<num_lm; ++lm2)
+                                for (int lm2=0; lm2<num_LM; ++lm2)
                                     Kokkos::atomic_add(
                                         &H1_adj(neighbor,lm2,k),
                                         h1_contributions[lm2]);
@@ -3361,6 +3238,77 @@ void MACEKokkos<Precision>::load_from_json(std::string filename)
             else
                 throw std::runtime_error("Unsupported MACEField field_linear instruction.");
         }
+
+        field_scalar_to_vector_matrix =
+            Kokkos::View<Precision**,Kokkos::LayoutRight>(
+                "field_scalar_to_vector_matrix", num_channels, num_channels);
+        field_vector_to_scalar_matrix =
+            Kokkos::View<Precision**,Kokkos::LayoutRight>(
+                "field_vector_to_scalar_matrix", num_channels, num_channels);
+        field_scalar_to_vector_up_matrix =
+            Kokkos::View<Precision**,Kokkos::LayoutRight>(
+                "field_scalar_to_vector_up_matrix", num_channels, num_channels);
+        field_vector_to_scalar_up_matrix =
+            Kokkos::View<Precision**,Kokkos::LayoutRight>(
+                "field_vector_to_scalar_up_matrix", num_channels, num_channels);
+        auto h_scalar_to_vector =
+            Kokkos::create_mirror_view(field_scalar_to_vector_matrix);
+        auto h_vector_to_scalar =
+            Kokkos::create_mirror_view(field_vector_to_scalar_matrix);
+        auto h_scalar_to_vector_up =
+            Kokkos::create_mirror_view(field_scalar_to_vector_up_matrix);
+        auto h_vector_to_scalar_up =
+            Kokkos::create_mirror_view(field_vector_to_scalar_up_matrix);
+        const Precision inv_sqrt_3 = static_cast<Precision>(
+            1.0/std::sqrt(3.0));
+        for (int u=0; u<num_channels; ++u) {
+            for (int k=0; k<num_channels; ++k) {
+                Precision scalar_to_vector = 0.0;
+                Precision vector_to_scalar = 0.0;
+                for (int w=0; w<num_channels; ++w) {
+                    scalar_to_vector += static_cast<Precision>(
+                        field_feats_scalar_to_vector_path_weight
+                        *field_linear_vector_path_weight)
+                        *field_feats_weight_vec[u*num_channels+w]
+                        *field_linear_weight_vec[
+                            channel_pairs+w*num_channels+k]
+                        *inv_sqrt_3;
+                    vector_to_scalar += static_cast<Precision>(
+                        field_feats_vector_to_scalar_path_weight
+                        *field_linear_scalar_path_weight)
+                        *field_feats_weight_vec[
+                            channel_pairs+u*num_channels+w]
+                        *field_linear_weight_vec[w*num_channels+k]
+                        *inv_sqrt_3;
+                }
+                h_scalar_to_vector(u,k) = scalar_to_vector;
+                h_vector_to_scalar(u,k) = vector_to_scalar;
+            }
+        }
+        for (int input=0; input<num_channels; ++input) {
+            for (int output=0; output<num_channels; ++output) {
+                Precision scalar_to_vector_up = 0.0;
+                Precision vector_to_scalar_up = 0.0;
+                for (int intermediate=0; intermediate<num_channels; ++intermediate) {
+                    scalar_to_vector_up += h_scalar_to_vector(input,intermediate)
+                        *H1_linear_up_weights_vec[
+                            (num_channels+intermediate)*num_channels+output];
+                    vector_to_scalar_up += h_vector_to_scalar(input,intermediate)
+                        *H1_linear_up_weights_vec[
+                            intermediate*num_channels+output];
+                }
+                h_scalar_to_vector_up(input,output) = scalar_to_vector_up;
+                h_vector_to_scalar_up(input,output) = vector_to_scalar_up;
+            }
+        }
+        Kokkos::deep_copy(
+            field_scalar_to_vector_matrix, h_scalar_to_vector);
+        Kokkos::deep_copy(
+            field_vector_to_scalar_matrix, h_vector_to_scalar);
+        Kokkos::deep_copy(
+            field_scalar_to_vector_up_matrix, h_scalar_to_vector_up);
+        Kokkos::deep_copy(
+            field_vector_to_scalar_up_matrix, h_vector_to_scalar_up);
     }
 
     // Phi1
@@ -3377,8 +3325,19 @@ void MACEKokkos<Precision>::load_from_json(std::string filename)
     num_lelm1lm2 = 0;
     auto h_Phi1_l1 = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Phi1_l1);
     auto h_Phi1_l2 = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Phi1_l2);
-    for (int le=0; le<h_Phi1_l.size(); ++le)
+    if (h_Phi1_l1.size() != h_Phi1_l.size()
+        || h_Phi1_l2.size() != h_Phi1_l.size())
+        throw std::runtime_error(
+            "Phi1_l, Phi1_l1, and Phi1_l2 must contain the same number of paths.");
+    for (int le=0; le<h_Phi1_l.size(); ++le) {
+        if (h_Phi1_l1(le) < 0 || h_Phi1_l1(le) > l_max)
+            throw std::runtime_error(
+                "Phi1_l1 contains an out-of-range edge degree.");
+        if (h_Phi1_l2(le) < 0 || h_Phi1_l2(le) > L_max)
+            throw std::runtime_error(
+                "Phi1_l2 contains an out-of-range hidden degree.");
         num_lelm1lm2 += (2*h_Phi1_l1(le)+1)*(2*h_Phi1_l2(le)+1);
+    }
 
     // for new approach to Phi1
     std::vector<int> Phi1_lm1, Phi1_lm2, Phi1_lel1l2;

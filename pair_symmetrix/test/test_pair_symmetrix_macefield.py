@@ -88,6 +88,7 @@ def macefield_json_path(tmp_path_factory):
     [
         "symmetrix/mace electric_field 0.01 0.0 0.0 no_domain_decomposition",
         "symmetrix/mace electric_field 0.01 0.0 0.0 no_mpi_message_passing",
+        "symmetrix/mace electric_field 0.01 0.0 0.0 streamed_edges all no_domain_decomposition",
     ],
 )
 @pytest.mark.parametrize(

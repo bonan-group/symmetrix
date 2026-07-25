@@ -69,6 +69,7 @@ class PairSymmetrixMACEKokkos : public Pair, public KokkosBase {
 
  protected:
   std::string mode;
+  std::string streamed_edges;
   bool electric_field_set;
   std::unique_ptr<MACEKokkos<Precision>> mace;
   Kokkos::View<int*> mace_types;
