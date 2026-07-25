@@ -1,6 +1,6 @@
 # OMAT-0 medium float32 CUDA baseline
 
-Date: 2026-07-24
+Date: 2026-07-24; fused-path update: 2026-07-25
 
 ## Configuration
 
@@ -16,7 +16,12 @@ Date: 2026-07-24
 
 The system is periodic wurtzite AlN (`a=3.112 A`, `c=4.982 A`) repeated 4, 6, and 10 times in each direction. These cells contain 256, 864, and 4,000 atoms and 23,296, 78,624, and 364,000 directed edges.
 
-Each fresh process builds the graph once, performs 20 warmup energy-and-force forwards, and then records 20 CUDA-synchronized forwards. Stress and atomic stresses are disabled. Time therefore excludes checkpoint loading and neighbor-list construction. VRAM is the process-resident value reported by `nvidia-smi` after evaluation, not just live tensor allocation.
+For the original table below, each fresh process builds the graph once,
+performs 20 warmup energy-and-force forwards, and then records 20
+CUDA-synchronized forwards. Stress and atomic stresses are disabled. Time
+therefore excludes checkpoint loading and neighbor-list construction. VRAM is
+the process-resident value reported by `nvidia-smi` after evaluation, not just
+live tensor allocation. Later optimization sections state their own protocols.
 
 The upstream measurements use `benchmarks/mace_torch_cuda_benchmark.py` with `--backend e3nn` or `--backend cueq` and `--repeat 4`, `6`, or `10`. Run each combination in a fresh process. The native measurements use `benchmarks/standard_mace_streamed_benchmark.py`; the table below was collected in fresh processes per mode so process-resident VRAM is directly comparable.
 
@@ -50,11 +55,15 @@ The 4,000-atom PyTorch/e3nn process completed, but its caching allocator emitted
 
 PyTorch/e3nn and cuEquivariance agree closely: their total-energy differences are at most 1.95 meV and force-L2 differences at most 2.62e-6 eV/A across these cases. Native streamed modes agree closely with native legacy at float32 reduction precision. Cross-runtime total energy is more reduction-order-sensitive: the largest native-versus-PyTorch difference is 0.477 eV total at 4,000 atoms (119 micro-eV/atom), while force-L2 differs by 3.00e-4 eV/A.
 
-## Kokkos-CUDA reverse-Phi1 optimization
+## Initial Kokkos-CUDA reverse-Phi1 scheduling
 
 Nsight Systems profiling at 864 atoms identified the second streamed reverse-Phi1 contraction as the dominant kernel: 22.273 ms per call and 68.1% of total device-kernel time. Its original launch assigned one team to each receiver atom, leaving only 864 teams to process 78,624 directed edges.
 
-The retained CUDA policy assigns one team to eight consecutive directed edges when the graph contains at most 100,000 edges. It builds a compact edge-to-receiver map for those graphs. Above the measured crossover it does not allocate that map and dispatches the original node-owned kernel body unchanged. OpenMP always retains the original node-owned kernel.
+This initial CUDA policy assigned one team to eight consecutive directed edges
+when the graph contained at most 100,000 edges. It built a compact
+edge-to-receiver map for those graphs. Above the measured crossover it did not
+allocate that map and dispatched the original node-owned kernel body unchanged.
+OpenMP retained the original node-owned kernel.
 
 | Atoms | Original all (ms) | Optimized all (ms) | Time/atom (us) | Change | Process VRAM (MiB) |
 |---:|---:|---:|---:|---:|---:|
@@ -64,7 +73,81 @@ The retained CUDA policy assigns one team to eight consecutive directed edges wh
 
 The accepted 864-atom result uses 40 warmups and 40 measured calls. A separate stable 20/20 run measured 32.116 ms, consistent with the improvement. The final 256-atom 40/40 process oscillated between 12.410 and 43.839 ms as GPU boost state changed, so its 18.985 ms median is not used. The final 4,000-atom fallback process likewise ran in a shifted clock regime (145.412 ms); because the retained large-graph hot loop and launch policy are source-identical to the baseline, this is recorded as environmental variability rather than an optimization result.
 
-Rejected experiments were one team per edge (31.930 ms at 864 atoms but 142.466 ms at 4,000 atoms), eight edges per team globally (32.116 and 140.822 ms), 64 edges per team at large size (144.255 ms), and a schedule branch inside the hot edge loop (144.933 ms). The final implementation keeps the small-graph gain without applying any of those changed schedules at 4,000 atoms.
+Rejected experiments at this stage were one team per edge (31.930 ms at 864
+atoms but 142.466 ms at 4,000 atoms), eight edges per team globally (32.116 and
+140.822 ms), 64 edges per team at large size (144.255 ms), and a schedule
+branch inside the hot edge loop (144.933 ms). The subsequent fused kernel below
+changes the large-graph crossover by reducing radial work and atomic traffic.
+
+## Fused float32 CUDA reverse path
+
+The Phase 46 optimization uses the eight-edge launch without an edge-count
+limit for qualified shapes with at most 16 harmonics, at most 16 paths, and at
+least twice as many raw coupling rows as harmonics. It fuses force and
+source-feature adjoint work in reverse Phi1. Each channel now accumulates all
+contributions for each of the model's 16 harmonics locally before emitting
+atomics. Reverse Phi1 and reverse A0 use model-precision force reductions in
+CUDA float32 builds; non-CUDA builds retain double accumulation.
+
+Matched 864-atom acceptance measurements use the production OMAT-0 medium
+float32 model, 20 warmups, and 10 measured energy-and-force evaluations in each
+fresh process.
+
+| Runtime | Median (ms) | Time/atom (us) | Process VRAM after (MiB) | Peak allocated (MiB) |
+|---|---:|---:|---:|---:|
+| Native control, `all` | 33.706 | 39.012 | 1,598 | not measured |
+| Reviewed fused native, run 1 | 11.860 | 13.726 | 1,598 | not measured |
+| Reviewed fused native, run 2 | 12.015 | 13.906 | 1,598 | not measured |
+| Exact-final-build sanity | 11.947 | 13.828 | 1,598 | not measured |
+| PyTorch/cuEquivariance | 12.452 | 14.412 | 2,088 | 1,393.4 |
+
+The three reviewed medians are 64.4-64.8% below the fresh native control and
+3.5-4.8% below the matched cuEquivariance median. All pass the predeclared
+15.565 ms comparability gate. Native resident VRAM is unchanged at 1,598 MiB
+before and after the optimization and is 490 MiB below cuEquivariance. For the
+first reviewed process, host RSS was 254.2 MiB before model evaluation,
+1,027.9 MiB after evaluation, and 1,031.8 MiB at peak; GPU process memory was
+0 MiB before CUDA initialization and 1,598 MiB after evaluation.
+
+The reviewed 864-atom result is `-6406.387709 eV` with force L2
+`3.237951 eV/A`; the control is `-6406.387977 eV` and `3.237934 eV/A`.
+The complete focused streamed-edge suite passes all eight cases across
+serial/CUDA and float32/float64. The exact penultimate-R1 Sobek experiment was
+not retained; its measured rejection is documented separately in
+`benchmarks/omat0_medium_sobek_r1_rejection.md`.
+
+At 256 atoms, the reviewed fused path measures `5.823 ms` (`22.745 us/atom`)
+with `998 MiB` resident VRAM, versus the original streamed-native `14.716 ms`
+and recorded cuEquivariance `15.151 ms`. Its ten samples span
+`5.764-6.224 ms`.
+
+### 4,000-atom follow-up
+
+The first current-build measurement retained the historical `100,000`-edge
+dispatch threshold, so this 364,000-edge graph used the node-owned fallback.
+The second measurement removed that threshold for the fused kernel while
+retaining it for the older unfused edge-owned implementation. Both used 20
+warmups and 10 measured calls in fresh processes.
+
+| 4,000-atom path | Median (ms) | Time/atom (us) | Range (ms) | Process VRAM (MiB) |
+|---|---:|---:|---:|---:|
+| Thresholded node-owned fallback | 127.372 | 31.843 | 127.017-128.201 | 4,710 |
+| Reviewed unrestricted fused reverse Phi1 | 45.214 | 11.304 | 44.916-46.733 | 4,712 |
+| Recorded PyTorch/cuEquivariance | 28.862 | 7.215 | not recorded | 7,070 |
+
+Removing the inherited limit reduces current-build latency by 64.5% at a cost
+of 2 MiB resident VRAM, consistent with retaining the 364,000-entry receiver
+map. The reviewed fused result is 67.5% below the original `138.980 ms`
+streamed-native baseline, although it remains 1.57 times slower than the
+recorded cuEquivariance result.
+
+For the reviewed unrestricted fused run, GPU process memory was `0 MiB` before
+CUDA initialization and `4,712 MiB` after evaluation. Host RSS was `254.1 MiB`
+before evaluation, `1,027.8 MiB` after, and `1,057.3 MiB` at peak. Energy was
+`-29659.200556 eV`, force L2 was `6.966963 eV/A`, and maximum absolute force
+was `0.110167 eV/A`. Against the same evaluator in legacy mode, the total-energy
+difference is `0.176 meV`, maximum force-component difference is
+`1.20e-5 eV/A`, and force L2 difference is `2.75e-4 eV/A`.
 
 ## CPU results at 256 atoms
 

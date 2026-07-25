@@ -26,6 +26,7 @@ MACEKokkos(std::string filename);
 void set_streamed_edges(std::string mode);
 std::string streamed_edges_mode() const;
 bool supports_streamed_edges() const;
+bool supports_fused_streamed_reverse() const;
 MACEStreamedEdgesMode streamed_edges = MACEStreamedEdgesMode::legacy;
 
 // Basic model information
@@ -42,7 +43,9 @@ void prepare_active_types(std::vector<int> node_types);
 
 // Node energies and forces
 Kokkos::View<double*> node_energies, node_forces;
-// Above this measured crossover, the original node-owned CUDA launch is faster.
+static constexpr int streamed_fused_max_num_lm = 16;
+static constexpr int streamed_fused_max_num_paths = 16;
+// Crossover for the unfused edge-owned CUDA fallback.
 static constexpr int streamed_edge_owned_limit = 100000;
 Kokkos::View<int*> streamed_first_neigh, streamed_edge_receivers;
 void prepare_streamed_edge_schedule(

@@ -148,6 +148,16 @@ bool MACEKokkos<Precision>::supports_streamed_edges() const
 }
 
 template <typename Precision>
+bool MACEKokkos<Precision>::supports_fused_streamed_reverse() const
+{
+    // The fused kernel trades path parallelism for fewer source adjoint atomics.
+    return num_lm > 0
+        && num_lm <= streamed_fused_max_num_lm
+        && Phi1_l.extent(0) <= streamed_fused_max_num_paths
+        && Phi1_lm1.extent(0) >= 2*static_cast<std::size_t>(num_lm);
+}
+
+template <typename Precision>
 std::string MACEKokkos<Precision>::streamed_edges_mode() const
 {
     return mace_streamed_edges_mode_name(streamed_edges);
@@ -193,7 +203,8 @@ void MACEKokkos<Precision>::prepare_streamed_edge_schedule(
     Kokkos::fence();
 
 #ifdef KOKKOS_ENABLE_CUDA
-    if (num_edges > streamed_edge_owned_limit) {
+    if (!supports_fused_streamed_reverse()
+        && num_edges > streamed_edge_owned_limit) {
         streamed_edge_receivers = Kokkos::View<int*>();
         return;
     }
@@ -979,8 +990,10 @@ void MACEKokkos<Precision>::compute_A0_streamed(
     auto A0 = this->A0;
 
 #ifdef KOKKOS_ENABLE_CUDA
+    using spline_coordinate_type = Precision;
     const Kokkos::TeamPolicy<> policy(num_nodes*(l_max+1), 1, 32);
 #else
+    using spline_coordinate_type = double;
     const Kokkos::TeamPolicy<> policy(
         num_nodes*(l_max+1), Kokkos::AUTO, 32);
 #endif
@@ -999,7 +1012,8 @@ void MACEKokkos<Precision>::compute_A0_streamed(
                 const int type_j = type_to_active(neigh_types(ij));
                 const int edge_type = type_i*num_types+type_j;
                 int interval = static_cast<int>(Kokkos::floor((r(ij)-x0)/h));
-                double x = r(ij)-x0-h*interval;
+                spline_coordinate_type x = static_cast<spline_coordinate_type>(
+                    r(ij)-x0-h*interval);
                 if (interval < 0) {
                     interval = 0;
                     x = 0.0;
@@ -1007,8 +1021,8 @@ void MACEKokkos<Precision>::compute_A0_streamed(
                     interval = num_intervals-1;
                     x = h;
                 }
-                const double xx = x*x;
-                const double xxx = xx*x;
+                const spline_coordinate_type xx = x*x;
+                const spline_coordinate_type xxx = xx*x;
                 Kokkos::parallel_for(
                     Kokkos::TeamVectorRange(team_member, num_channels),
                     [=] (const int k) {
@@ -1051,9 +1065,11 @@ void MACEKokkos<Precision>::reverse_A0_streamed(
     auto node_forces = this->node_forces;
 
 #ifdef KOKKOS_ENABLE_CUDA
+    using force_accumulation_type = Precision;
     const int team_size = std::max(1, std::min(l_max+1, 8));
     const Kokkos::TeamPolicy<> policy(num_nodes, team_size, 32);
 #else
+    using force_accumulation_type = double;
     const Kokkos::TeamPolicy<> policy(num_nodes, Kokkos::AUTO, 32);
 #endif
     Kokkos::parallel_for(
@@ -1068,7 +1084,9 @@ void MACEKokkos<Precision>::reverse_A0_streamed(
                 const int type_j = type_to_active(neigh_types(ij));
                 const int edge_type = type_i*num_types+type_j;
                 int interval = static_cast<int>(Kokkos::floor((r(ij)-x0)/h));
-                double x = r(ij)-x0-h*interval;
+                force_accumulation_type x =
+                    static_cast<force_accumulation_type>(
+                        r(ij)-x0-h*interval);
                 if (interval < 0) {
                     interval = 0;
                     x = 0.0;
@@ -1076,19 +1094,33 @@ void MACEKokkos<Precision>::reverse_A0_streamed(
                     interval = num_intervals-1;
                     x = h;
                 }
-                const double xx = x*x;
-                const double xxx = xx*x;
-                const double r_inv = 1.0/r(ij);
-                double f_x, f_y, f_z;
+                const force_accumulation_type xx = x*x;
+                const force_accumulation_type xxx = xx*x;
+                const force_accumulation_type x_over_r =
+                    static_cast<force_accumulation_type>(
+                        xyz(3*ij)/r(ij));
+                const force_accumulation_type y_over_r =
+                    static_cast<force_accumulation_type>(
+                        xyz(3*ij+1)/r(ij));
+                const force_accumulation_type z_over_r =
+                    static_cast<force_accumulation_type>(
+                        xyz(3*ij+2)/r(ij));
+                force_accumulation_type f_x, f_y, f_z;
                 Kokkos::parallel_reduce(
                     Kokkos::TeamThreadRange(team_member, l_max+1),
-                    [=] (const int l, double& f_x, double& f_y, double& f_z) {
+                    [=] (const int l,
+                         force_accumulation_type& f_x,
+                         force_accumulation_type& f_y,
+                         force_accumulation_type& f_z) {
                         const int lm_begin = l*l;
                         const int lm_end = (l+1)*(l+1);
-                        double l_fx, l_fy, l_fz;
+                        force_accumulation_type l_fx, l_fy, l_fz;
                         Kokkos::parallel_reduce(
                             Kokkos::ThreadVectorRange(team_member, num_channels),
-                            [=] (const int k, double& l_fx, double& l_fy, double& l_fz) {
+                            [=] (const int k,
+                                 force_accumulation_type& l_fx,
+                                 force_accumulation_type& l_fy,
+                                 force_accumulation_type& l_fz) {
                                 const int function = l*num_channels+k;
                                 const Precision c1 = coefficients(edge_type,interval,1,function);
                                 const Precision c2 = coefficients(edge_type,interval,2,function);
@@ -1096,16 +1128,16 @@ void MACEKokkos<Precision>::reverse_A0_streamed(
                                 const Precision value =
                                     coefficients(edge_type,interval,0,function)
                                     + c1*x+c2*xx+c3*xxx;
-                                const Precision derivative = c1+2.0*c2*x+3.0*c3*xx;
+                                const Precision derivative = c1+2*c2*x+3*c3*xx;
                                 for (int lm=lm_begin; lm<lm_end; ++lm) {
                                     const Precision adjoint = A0_adj(i,lm,k);
                                     const Precision radial = derivative*Y(ij*num_lm+lm)*adjoint;
                                     const Precision angular = value*adjoint;
-                                    l_fx += radial*xyz(3*ij)*r_inv
+                                    l_fx += radial*x_over_r
                                         + angular*Y_grad(3*ij*num_lm+lm);
-                                    l_fy += radial*xyz(3*ij+1)*r_inv
+                                    l_fy += radial*y_over_r
                                         + angular*Y_grad((3*ij+1)*num_lm+lm);
-                                    l_fz += radial*xyz(3*ij+2)*r_inv
+                                    l_fz += radial*z_over_r
                                         + angular*Y_grad((3*ij+2)*num_lm+lm);
                                 }
                             }, l_fx, l_fy, l_fz);
@@ -2240,9 +2272,95 @@ void MACEKokkos<Precision>::reverse_Phi1_streamed(
 
 #ifdef KOKKOS_ENABLE_CUDA
     const int num_edges = neigh_indices.extent(0);
-    if (num_edges <= streamed_edge_owned_limit) {
     using team_member_type = Kokkos::TeamPolicy<>::member_type;
-    const auto process_edge = KOKKOS_LAMBDA(
+    if (supports_fused_streamed_reverse()) {
+        constexpr int edges_per_team = 8;
+        Kokkos::parallel_for(
+            "MACEKokkos::reverse_Phi1r_streamed_fused_atomics",
+            Kokkos::TeamPolicy<>(
+                (num_edges+edges_per_team-1)/edges_per_team,
+                edges_per_team, 32),
+            KOKKOS_LAMBDA (team_member_type team_member) {
+                const int edge_begin = team_member.league_rank()*edges_per_team;
+                const int edge_count = Kokkos::min(
+                    edges_per_team, num_edges-edge_begin);
+                Kokkos::parallel_for(
+                    Kokkos::TeamThreadRange(team_member, edge_count),
+                    [=] (const int edge_offset) {
+                        const int ij = edge_begin+edge_offset;
+                        const int i = edge_receivers(ij);
+                        const int neighbor = neigh_indices(ij);
+                        const int type_i = type_to_active(node_types(i));
+                        const int type_j = type_to_active(neigh_types(ij));
+                        const int edge_type = (type_i <= type_j)
+                            ? type_i*(2*num_types-type_i-1)/2+type_j
+                            : type_j*(2*num_types-type_j-1)/2+type_i;
+                        const auto point = radial_1.evaluation_point(r(ij));
+                        const Precision x_over_r = static_cast<Precision>(
+                            xyz(3*ij)/r(ij));
+                        const Precision y_over_r = static_cast<Precision>(
+                            xyz(3*ij+1)/r(ij));
+                        const Precision z_over_r = static_cast<Precision>(
+                            xyz(3*ij+2)/r(ij));
+                        Precision f_x, f_y, f_z;
+                        Kokkos::parallel_reduce(
+                            Kokkos::ThreadVectorRange(team_member, num_channels),
+                            [=] (const int k,
+                                 Precision& f_x,
+                                 Precision& f_y,
+                                 Precision& f_z) {
+                                Precision h1_contributions[
+                                    streamed_fused_max_num_lm] = {};
+                                for (int path=0; path<num_paths; ++path) {
+                                    Precision radial, radial_derivative;
+                                    radial_1.evaluate_function(
+                                        edge_type, point, path*num_channels+k,
+                                        radial, radial_derivative);
+                                    const int row_begin = path_row_offsets(path);
+                                    const int row_end = path_row_offsets(path+1);
+                                    for (int row=row_begin; row<row_end; ++row) {
+                                        const int lm1 = Phi1_lm1(row);
+                                        const int lm2 = Phi1_lm2(row);
+                                        const Precision adjoint = dPhi1r(i,row,k);
+                                        const Precision neighbor_feature =
+                                            H1(neighbor,lm2,k);
+                                        const Precision radial_force =
+                                            radial_derivative*neighbor_feature*adjoint;
+                                        const Precision angular_force =
+                                            radial*neighbor_feature*adjoint;
+                                        f_x += radial_force*x_over_r
+                                            *Y(ij*num_lm+lm1)
+                                            +angular_force*Y_grad(3*ij*num_lm+lm1);
+                                        f_y += radial_force*y_over_r
+                                            *Y(ij*num_lm+lm1)
+                                            +angular_force*Y_grad(
+                                                (3*ij+1)*num_lm+lm1);
+                                        f_z += radial_force*z_over_r
+                                            *Y(ij*num_lm+lm1)
+                                            +angular_force*Y_grad(
+                                                (3*ij+2)*num_lm+lm1);
+                                        h1_contributions[lm2] += radial
+                                            *Y(ij*num_lm+lm1)*adjoint;
+                                    }
+                                }
+                                for (int lm2=0; lm2<num_lm; ++lm2)
+                                    Kokkos::atomic_add(
+                                        &H1_adj(neighbor,lm2,k),
+                                        h1_contributions[lm2]);
+                            }, f_x, f_y, f_z);
+                        Kokkos::single(
+                            Kokkos::PerThread(team_member), [=]() {
+                                node_forces(3*ij) -= f_x;
+                                node_forces(3*ij+1) -= f_y;
+                                node_forces(3*ij+2) -= f_z;
+                            });
+                    });
+            });
+        Kokkos::fence();
+        return;
+    }
+    if (num_edges <= streamed_edge_owned_limit) {
+        const auto process_edge = KOKKOS_LAMBDA(
         const team_member_type& team_member,
         const int ij, const int i, const int type_i) {
         const int neighbor = neigh_indices(ij);

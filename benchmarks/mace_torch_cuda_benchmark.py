@@ -79,8 +79,8 @@ def main():
     parser.add_argument("model", type=pathlib.Path)
     parser.add_argument("--backend", choices=("e3nn", "cueq"), required=True)
     parser.add_argument("--repeat", type=int, required=True)
-    parser.add_argument("--warmups", type=int, default=20)
-    parser.add_argument("--repeats", type=int, default=20)
+    parser.add_argument("--warmups", type=int, default=10)
+    parser.add_argument("--repeats", type=int, default=10)
     args = parser.parse_args()
     if args.repeat < 1:
         parser.error("--repeat must be positive")
