@@ -60,6 +60,16 @@ def _summary(samples):
     }
 
 
+def _per_atom_summary(samples, atom_count):
+    per_atom = [sample / atom_count for sample in samples]
+    return {
+        "median_ms_per_atom": statistics.median(per_atom),
+        "min_ms_per_atom": min(per_atom),
+        "max_ms_per_atom": max(per_atom),
+        "samples_ms_per_atom": per_atom,
+    }
+
+
 def _gpu_process_memory_mib():
     try:
         result = subprocess.run(
@@ -89,7 +99,23 @@ def _gpu_process_memory_mib():
     return used_mib
 
 
+def _process_memory_mib():
+    values = {"current": None, "peak": None}
+    try:
+        with pathlib.Path("/proc/self/status").open() as handle:
+            for line in handle:
+                key, _, value = line.partition(":")
+                if key == "VmRSS":
+                    values["current"] = int(value.split()[0]) / 1024
+                elif key == "VmHWM":
+                    values["peak"] = int(value.split()[0]) / 1024
+    except (OSError, ValueError):
+        pass
+    return values
+
+
 def _evaluate(model, atoms, backend, dtype, mode, warmups, repeats):
+    process_memory_before_mib = _process_memory_mib()
     gpu_memory_before_mib = (
         _gpu_process_memory_mib() if backend == "kokkos" else None
     )
@@ -117,10 +143,12 @@ def _evaluate(model, atoms, backend, dtype, mode, warmups, repeats):
     gpu_memory_after_mib = (
         _gpu_process_memory_mib() if backend == "kokkos" else None
     )
+    process_memory_after_mib = _process_memory_mib()
     return {
         "mode": mode,
         "directed_edges": len(inputs[6]),
         "timing": _summary(samples),
+        "timing_per_atom": _per_atom_summary(samples, len(atoms)),
         "energy_eV": float(results["energy"]),
         "forces_eV_per_A": np.asarray(results["forces"]).tolist(),
         "edge_radial_storage": {
@@ -131,6 +159,10 @@ def _evaluate(model, atoms, backend, dtype, mode, warmups, repeats):
         "gpu_process_memory_mib": {
             "before": gpu_memory_before_mib,
             "after": gpu_memory_after_mib,
+        },
+        "process_memory_mib": {
+            "before": process_memory_before_mib,
+            "after": process_memory_after_mib,
         },
     }
 
@@ -156,8 +188,6 @@ def main():
     modes = _parse_csv(args.modes, str, "--modes", parser)
     if any(mode not in ("legacy", "r1", "all") for mode in modes):
         parser.error("--modes must contain only legacy,r1,all")
-    if "legacy" not in modes:
-        parser.error("--modes must include legacy as the reference")
     sizes = _parse_csv(args.sizes, int, "--sizes", parser)
     if any(size < 1 for size in sizes):
         parser.error("--sizes values must be positive")
@@ -204,7 +234,8 @@ def main():
             )
             for mode in modes
         }
-        reference = records["legacy"]
+        reference_mode = "legacy" if "legacy" in records else modes[0]
+        reference = records[reference_mode]
         reference_forces = np.asarray(reference["forces_eV_per_A"])
         directed_edges = reference["directed_edges"]
         for mode, record in records.items():
@@ -214,17 +245,21 @@ def main():
             record["force_max_error_eV_per_A"] = float(
                 np.max(np.abs(forces-reference_forces))
             )
-            record["speedup_vs_legacy"] = (
+            speedup = (
                 reference["timing"]["median_ms"]/record["timing"]["median_ms"]
             )
+            record["speedup_vs_reference"] = speedup
+            if reference_mode == "legacy":
+                record["speedup_vs_legacy"] = speedup
             failed |= record["force_max_error_eV_per_A"] > args.max_force_error
-            if args.min_speedup is not None and mode != "legacy":
-                failed |= record["speedup_vs_legacy"] < args.min_speedup
+            if args.min_speedup is not None and mode != reference_mode:
+                failed |= speedup < args.min_speedup
         report["systems"].append(
             {
                 "supercell_repeat": size,
                 "atoms": len(atoms),
                 "directed_edges": directed_edges,
+                "reference_mode": reference_mode,
                 "modes": records,
             }
         )

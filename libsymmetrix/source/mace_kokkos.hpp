@@ -42,9 +42,12 @@ void prepare_active_types(std::vector<int> node_types);
 
 // Node energies and forces
 Kokkos::View<double*> node_energies, node_forces;
-Kokkos::View<int*> streamed_first_neigh;
+// Above this measured crossover, the original node-owned CUDA launch is faster.
+static constexpr int streamed_edge_owned_limit = 100000;
+Kokkos::View<int*> streamed_first_neigh, streamed_edge_receivers;
 void prepare_streamed_edge_schedule(
     const int num_nodes,
+    const int num_edges,
     Kokkos::View<const int*> num_neigh);
 void compute_node_energies_forces(const int num_nodes,
                                   Kokkos::View<const int*> node_types,

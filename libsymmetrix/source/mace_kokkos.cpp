@@ -176,6 +176,7 @@ void MACEKokkos<Precision>::set_streamed_edges(std::string mode)
 template <typename Precision>
 void MACEKokkos<Precision>::prepare_streamed_edge_schedule(
     const int num_nodes,
+    const int num_edges,
     Kokkos::View<const int*> num_neigh)
 {
     if (streamed_first_neigh.extent(0) != num_nodes)
@@ -190,6 +191,31 @@ void MACEKokkos<Precision>::prepare_streamed_edge_schedule(
             update += num_neigh(i);
         });
     Kokkos::fence();
+
+#ifdef KOKKOS_ENABLE_CUDA
+    if (num_edges > streamed_edge_owned_limit) {
+        streamed_edge_receivers = Kokkos::View<int*>();
+        return;
+    }
+    if (streamed_edge_receivers.extent(0) != num_edges)
+        Kokkos::realloc(streamed_edge_receivers, num_edges);
+    auto edge_receivers = streamed_edge_receivers;
+    Kokkos::parallel_for(
+        "MACEKokkos::prepare_streamed_edge_receivers",
+        Kokkos::TeamPolicy<>(num_nodes, Kokkos::AUTO),
+        KOKKOS_LAMBDA (Kokkos::TeamPolicy<>::member_type team_member) {
+            const int i = team_member.league_rank();
+            const int i0 = first_neigh(i);
+            Kokkos::parallel_for(
+                Kokkos::TeamThreadRange(team_member, num_neigh(i)),
+                [=] (const int j) {
+                    edge_receivers(i0+j) = i;
+                });
+        });
+    Kokkos::fence();
+#else
+    static_cast<void>(num_edges);
+#endif
 }
 
 template <typename Precision>
@@ -368,7 +394,8 @@ void MACEKokkos<Precision>::compute_node_energies_forces(
             atomic_numbers, r, xyz, node_energies, node_forces);
 
     if (streamed_edges != MACEStreamedEdgesMode::legacy)
-        prepare_streamed_edge_schedule(num_nodes, num_neigh);
+        prepare_streamed_edge_schedule(
+            num_nodes, static_cast<int>(neigh_indices.extent(0)), num_neigh);
     if (streamed_edges != MACEStreamedEdgesMode::all)
         compute_R0(num_nodes, node_types, num_neigh, neigh_types, r);
     if (streamed_edges == MACEStreamedEdgesMode::legacy)
@@ -2204,11 +2231,100 @@ void MACEKokkos<Precision>::reverse_Phi1_streamed(
     const auto Phi1_lm2 = this->Phi1_lm2;
     const auto path_row_offsets = this->Phi1_path_row_offsets;
     const auto radial_1 = this->radial_1;
+    const auto edge_receivers = streamed_edge_receivers;
     const auto Y = this->Y;
     const auto Y_grad = this->Y_grad;
     const auto H1 = this->H1;
     auto H1_adj = this->H1_adj;
     auto node_forces = this->node_forces;
+
+#ifdef KOKKOS_ENABLE_CUDA
+    const int num_edges = neigh_indices.extent(0);
+    if (num_edges <= streamed_edge_owned_limit) {
+    using team_member_type = Kokkos::TeamPolicy<>::member_type;
+    const auto process_edge = KOKKOS_LAMBDA(
+        const team_member_type& team_member,
+        const int ij, const int i, const int type_i) {
+        const int neighbor = neigh_indices(ij);
+        const int type_j = type_to_active(neigh_types(ij));
+        const int edge_type = (type_i <= type_j)
+            ? type_i*(2*num_types-type_i-1)/2+type_j
+            : type_j*(2*num_types-type_j-1)/2+type_i;
+        const auto point = radial_1.evaluation_point(r(ij));
+        const double r_inv = 1.0/r(ij);
+        double f_x, f_y, f_z;
+        Kokkos::parallel_reduce(
+            Kokkos::TeamThreadRange(team_member, num_paths),
+            [=] (const int path, double& f_x, double& f_y, double& f_z) {
+                const int row_begin = path_row_offsets(path);
+                const int row_end = path_row_offsets(path+1);
+                double path_fx, path_fy, path_fz;
+                Kokkos::parallel_reduce(
+                    Kokkos::ThreadVectorRange(team_member, num_channels),
+                    [=] (const int k,
+                         double& path_fx,
+                         double& path_fy,
+                         double& path_fz) {
+                        Precision radial, radial_derivative;
+                        radial_1.evaluate_function(
+                            edge_type, point, path*num_channels+k,
+                            radial, radial_derivative);
+                        for (int row=row_begin; row<row_end; ++row) {
+                            const int lm1 = Phi1_lm1(row);
+                            const int lm2 = Phi1_lm2(row);
+                            const Precision adjoint = dPhi1r(i,row,k);
+                            const Precision neighbor_feature = H1(neighbor,lm2,k);
+                            const Precision radial_force =
+                                radial_derivative*neighbor_feature*adjoint;
+                            const Precision angular_force =
+                                radial*neighbor_feature*adjoint;
+                            path_fx += radial_force*xyz(3*ij)*r_inv
+                                *Y(ij*num_lm+lm1)
+                                +angular_force*Y_grad(3*ij*num_lm+lm1);
+                            path_fy += radial_force*xyz(3*ij+1)*r_inv
+                                *Y(ij*num_lm+lm1)
+                                +angular_force*Y_grad((3*ij+1)*num_lm+lm1);
+                            path_fz += radial_force*xyz(3*ij+2)*r_inv
+                                *Y(ij*num_lm+lm1)
+                                +angular_force*Y_grad((3*ij+2)*num_lm+lm1);
+                            Kokkos::atomic_add(
+                                &H1_adj(neighbor,lm2,k),
+                                radial*Y(ij*num_lm+lm1)*adjoint);
+                        }
+                    }, path_fx, path_fy, path_fz);
+                f_x += path_fx;
+                f_y += path_fy;
+                f_z += path_fz;
+            }, f_x, f_y, f_z);
+        Kokkos::single(Kokkos::PerTeam(team_member), [=]() {
+            node_forces(3*ij) -= f_x;
+            node_forces(3*ij+1) -= f_y;
+            node_forces(3*ij+2) -= f_z;
+        });
+    };
+
+        constexpr int edges_per_team = 8;
+        const int team_size = std::max(1, std::min(num_paths, 8));
+        Kokkos::parallel_for(
+            "MACEKokkos::reverse_Phi1r_streamed_edge_owned",
+            Kokkos::TeamPolicy<>(
+                (num_edges+edges_per_team-1)/edges_per_team,
+                team_size, 32),
+            KOKKOS_LAMBDA (team_member_type team_member) {
+                const int edge_begin = team_member.league_rank()*edges_per_team;
+                const int proposed_end = edge_begin+edges_per_team;
+                const int edge_end = proposed_end < num_edges
+                    ? proposed_end : num_edges;
+                for (int ij=edge_begin; ij<edge_end; ++ij) {
+                    const int i = edge_receivers(ij);
+                    const int type_i = type_to_active(node_types(i));
+                    process_edge(team_member, ij, i, type_i);
+                }
+            });
+        Kokkos::fence();
+        return;
+    }
+#endif
 
 #ifdef KOKKOS_ENABLE_CUDA
     const int team_size = std::max(1, std::min(num_paths, 8));
