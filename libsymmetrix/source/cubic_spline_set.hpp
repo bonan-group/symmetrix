@@ -3,40 +3,46 @@
 #include <span>
 #include <vector>
 
-class CubicSplineSet {
+template <typename Precision>
+class CubicSplineSetT {
 
 public:
 
 struct EvaluationPoint {
     int interval;
-    double x;
-    double xx;
-    double xxx;
+    Precision x;
+    Precision xx;
+    Precision xxx;
 };
 
-CubicSplineSet(double h,
-               std::vector<std::vector<double>> nodal_values,
-               std::vector<std::vector<double>> nodal_derivs,
-               double x0 = 0.0);
+CubicSplineSetT(Precision h,
+                std::vector<std::vector<Precision>> nodal_values,
+                std::vector<std::vector<Precision>> nodal_derivs,
+                Precision x0 = 0.0);
 
-void evaluate(double r, std::span<double> values);
-void evaluate_derivs(double r, std::span<double> values, std::span<double> derivs);
-EvaluationPoint evaluation_point(double r) const;
-double evaluate_function(const EvaluationPoint& point, int function) const;
+void evaluate(Precision r, std::span<Precision> values);
+void evaluate_derivs(Precision r, std::span<Precision> values, std::span<Precision> derivs);
+EvaluationPoint evaluation_point(Precision r) const;
+Precision evaluate_function(const EvaluationPoint& point, int function) const;
 void evaluate_function_derivs(
     const EvaluationPoint& point,
     int function,
-    double& value,
-    double& derivative) const;
+    Precision& value,
+    Precision& derivative) const;
 
 // TODO: protect this with accessor
 int num_splines;
 
 private:
 
-double h;
-double x0;
+Precision h;
+Precision x0;
 int num_nodes;
-std::vector<double> c;
+std::vector<Precision> c;
 
 };
+
+using CubicSplineSet = CubicSplineSetT<double>;
+
+extern template class CubicSplineSetT<float>;
+extern template class CubicSplineSetT<double>;

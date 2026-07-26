@@ -4,18 +4,19 @@
 
 #include "cubic_spline_set.hpp"
 
-CubicSplineSet::CubicSplineSet(
-    double h,
-    std::vector<std::vector<double>> nodal_values,
-    std::vector<std::vector<double>> nodal_derivs,
-    double x0)
+template <typename Precision>
+CubicSplineSetT<Precision>::CubicSplineSetT(
+    Precision h,
+    std::vector<std::vector<Precision>> nodal_values,
+    std::vector<std::vector<Precision>> nodal_derivs,
+    Precision x0)
 {
     // TODO: sanitize input
     this->h = h;
     this->x0 = x0;
     num_nodes = nodal_values[0].size();
     num_splines = nodal_values.size();
-    c = std::vector<double>(4*num_splines*(num_nodes-1), 0.0);
+    c = std::vector<Precision>(4*num_splines*(num_nodes-1), 0.0);
     for (int i=0; i<num_nodes-1; ++i) {
         for (int j=0; j<num_splines; ++j) {
             c[(4*i)*num_splines+j] = nodal_values[j][i];
@@ -28,10 +29,11 @@ CubicSplineSet::CubicSplineSet(
     }
 }
 
-CubicSplineSet::EvaluationPoint CubicSplineSet::evaluation_point(double r) const
+template <typename Precision>
+typename CubicSplineSetT<Precision>::EvaluationPoint CubicSplineSetT<Precision>::evaluation_point(Precision r) const
 {
     int interval = static_cast<int>(std::floor((r-x0)/h));
-    double x = r-x0-h*interval;
+    Precision x = r-x0-h*interval;
     if (interval < 0) {
         interval = 0;
         x = 0.0;
@@ -39,17 +41,18 @@ CubicSplineSet::EvaluationPoint CubicSplineSet::evaluation_point(double r) const
         interval = num_nodes-2;
         x = h;
     }
-    const double xx = x*x;
+    const Precision xx = x*x;
     return {interval, x, xx, xx*x};
 }
 
-double CubicSplineSet::evaluate_function(
+template <typename Precision>
+Precision CubicSplineSetT<Precision>::evaluate_function(
     const EvaluationPoint& point,
     int function) const
 {
     if (function < 0 || function >= num_splines)
         throw std::out_of_range("Cubic spline function index is out of range.");
-    const double* coefficients =
+    const Precision* coefficients =
         c.data()+4*point.interval*num_splines+function;
     return coefficients[0*num_splines]
         + coefficients[1*num_splines]*point.x
@@ -57,15 +60,16 @@ double CubicSplineSet::evaluate_function(
         + coefficients[3*num_splines]*point.xxx;
 }
 
-void CubicSplineSet::evaluate_function_derivs(
+template <typename Precision>
+void CubicSplineSetT<Precision>::evaluate_function_derivs(
     const EvaluationPoint& point,
     int function,
-    double& value,
-    double& derivative) const
+    Precision& value,
+    Precision& derivative) const
 {
     if (function < 0 || function >= num_splines)
         throw std::out_of_range("Cubic spline function index is out of range.");
-    const double* coefficients =
+    const Precision* coefficients =
         c.data()+4*point.interval*num_splines+function;
     value = coefficients[0*num_splines]
         + coefficients[1*num_splines]*point.x
@@ -76,12 +80,13 @@ void CubicSplineSet::evaluate_function_derivs(
         + 3.0*coefficients[3*num_splines]*point.xx;
 }
 
-void CubicSplineSet::evaluate(
-    double r,
-    std::span<double> values)
+template <typename Precision>
+void CubicSplineSetT<Precision>::evaluate(
+    Precision r,
+    std::span<Precision> values)
 {
     int i = static_cast<int>(std::floor((r-x0)/h));
-    double x = r-x0-h*i;
+    Precision x = r-x0-h*i;
     if (i < 0) {
         i = 0;
         x = 0.0;
@@ -89,9 +94,9 @@ void CubicSplineSet::evaluate(
         i = num_nodes-2;
         x = h;
     }
-    const double xx = x*x;
-    const double xxx = xx*x;
-    double* c_i = c.data() + 4*i*num_splines;
+    const Precision xx = x*x;
+    const Precision xxx = xx*x;
+    Precision* c_i = c.data() + 4*i*num_splines;
     for (int j=0; j<num_splines; ++j)
         values[j] = c_i[j];
     c_i += num_splines;
@@ -105,12 +110,13 @@ void CubicSplineSet::evaluate(
         values[j] += c_i[j]*xxx;
 }
 
-void CubicSplineSet::evaluate_derivs(double r,
-                                     std::span<double> values,
-                                     std::span<double> derivs)
+template <typename Precision>
+void CubicSplineSetT<Precision>::evaluate_derivs(Precision r,
+                                     std::span<Precision> values,
+                                     std::span<Precision> derivs)
 {
     int i = static_cast<int>(std::floor((r-x0)/h));
-    double x = r-x0-h*i;
+    Precision x = r-x0-h*i;
     if (i < 0) {
         i = 0;
         x = 0.0;
@@ -118,12 +124,12 @@ void CubicSplineSet::evaluate_derivs(double r,
         i = num_nodes-2;
         x = h;
     }
-    const double xx = x*x;
-    const double xxx = xx*x;
-    const double two_x = 2*x;
-    const double three_xx = 3*xx;
+    const Precision xx = x*x;
+    const Precision xxx = xx*x;
+    const Precision two_x = 2*x;
+    const Precision three_xx = 3*xx;
     // compute values
-    double* c_i = c.data() + 4*i*num_splines;
+    Precision* c_i = c.data() + 4*i*num_splines;
     for (int j=0; j<num_splines; ++j)
         values[j] = c_i[j];
     c_i += num_splines;
@@ -146,3 +152,6 @@ void CubicSplineSet::evaluate_derivs(double r,
     for (int j=0; j<num_splines; ++j)
         derivs[j] += three_xx*c_i[j];
 }
+
+template class CubicSplineSetT<float>;
+template class CubicSplineSetT<double>;

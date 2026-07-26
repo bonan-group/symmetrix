@@ -183,6 +183,13 @@ def _evaluate(
         dtype=dtype,
         streamed_edges=mode,
     )
+    scalar_bytes = 4 if dtype == "float32" else 8
+    evaluator_scalar_bytes = calculator.evaluator.scalar_size_bytes
+    if evaluator_scalar_bytes != scalar_bytes:
+        raise RuntimeError(
+            f"evaluator uses {evaluator_scalar_bytes}-byte scalars, "
+            f"expected {scalar_bytes}"
+        )
     if not calculator.evaluator.has_field_coupling:
         raise RuntimeError("The benchmark requires a field-aware MACEField model")
     inputs, native_args = _field_arguments(calculator, atoms, electric_field)
@@ -203,7 +210,6 @@ def _evaluate(
 
     results = calculator._collect_mace_results(atoms, inputs)
     field_adjoint = np.asarray(calculator.evaluator.electric_field_adj, dtype=np.float64)
-    scalar_bytes = 4 if dtype == "float32" else 8
     r0_elements = int(calculator.evaluator.R0_storage_size)
     r1_elements = int(calculator.evaluator.R1_storage_size)
 
@@ -331,6 +337,7 @@ def _evaluate(
     gpu_memory_after_evaluation = _gpu_process_memory_mib()
     return {
         "mode": mode,
+        "evaluator_scalar_size_bytes": evaluator_scalar_bytes,
         "atoms": len(atoms),
         "directed_edges": len(inputs[6]),
         "electric_field_V_per_A": electric_field.tolist(),
@@ -389,9 +396,6 @@ def main():
         parser.error("--memory-sample-interval must be positive")
     if args.finite_difference_step <= 0:
         parser.error("--finite-difference-step must be positive")
-    if args.backend == "native" and args.dtype != "float64":
-        parser.error("the native CPU evaluator supports only float64")
-
     modes = _parse_csv(args.modes, str, "--modes", parser)
     if any(mode not in ("legacy", "r1", "all") for mode in modes):
         parser.error("--modes must contain only legacy,r1,all")

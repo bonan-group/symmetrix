@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 #include <span>
+#include <type_traits>
 
 #include "compact_radial.hpp"
 #include "cubic_spline.hpp"
@@ -11,11 +12,14 @@
 #include "multivariate_polynomial.hpp"
 #include "zbl.hpp"
 
-class MACE {
+template <typename Precision>
+class MACECPU {
+
+static_assert(std::is_same_v<Precision, float> || std::is_same_v<Precision, double>);
 
 public:
 
-MACE(std::string filename);
+MACECPU(std::string filename);
 void set_streamed_edges(std::string mode);
 std::string streamed_edges_mode() const;
 bool supports_streamed_edges() const;
@@ -33,7 +37,7 @@ std::vector<int> active_atomic_numbers;
 void prepare_active_types(std::span<const int> node_types);
 
 // Node energies and forces
-std::vector<double> node_energies, node_forces;
+std::vector<Precision> node_energies, node_forces;
 void compute_node_energies_forces(const int num_nodes,
                                   std::span<const int> node_types,
                                   std::span<const int> num_neigh,
@@ -52,15 +56,15 @@ void compute_node_energies_forces_field(const int num_nodes,
 
 // ZBL
 bool has_zbl;
-ZBL zbl;
+ZBLT<Precision> zbl;
 
 // Radial functions
 bool uses_compact_radial = false;
 std::unique_ptr<CompactRadialModel> compact_radial_model;
 std::vector<int> active_types;
 std::vector<int> type_to_active;
-std::vector<std::unique_ptr<CubicSplineSet>> spl_set_0;
-std::vector<double> R0, R0_deriv;
+std::vector<std::unique_ptr<CubicSplineSetT<Precision>>> spl_set_0;
+std::vector<Precision> R0, R0_deriv;
 void compute_R0(const int num_nodes,
                 std::span<const int> node_types,
                 std::span<const int> num_neigh,
@@ -68,8 +72,8 @@ void compute_R0(const int num_nodes,
                 std::span<const double> r);
 
 // R1
-std::vector<std::unique_ptr<CubicSplineSet>> spl_set_1;
-std::vector<double> R1, R1_deriv;
+std::vector<std::unique_ptr<CubicSplineSetT<Precision>>> spl_set_1;
+std::vector<Precision> R1, R1_deriv;
 void compute_R1(const int num_nodes,
                 std::span<const int> node_types,
                 std::span<const int> num_neigh,
@@ -78,16 +82,16 @@ void compute_R1(const int num_nodes,
 int radial_pair_index(int type_i, int type_j) const;
 
 // Spherical harmonics
-std::vector<double> Y, Y_grad;
-std::vector<double> xyz_shuffled;
+std::vector<Precision> Y, Y_grad;
+std::vector<Precision> xyz_shuffled;
 void compute_Y(std::span<const double> xyz);
 
 // H0
-std::vector<double> H0_weights;
+std::vector<Precision> H0_weights;
 
 // A0
-std::vector<double> A0, A0_adj;
-std::vector<std::vector<std::vector<double>>> A0_weights;
+std::vector<Precision> A0, A0_adj;
+std::vector<std::vector<std::vector<Precision>>> A0_weights;
 void compute_A0(
     const int num_nodes,
     std::span<const int> node_types,
@@ -116,7 +120,7 @@ void reverse_A0_streamed(
 
 // A0 rescaling
 bool A0_scaled;
-std::vector<CubicSpline> A0_splines;
+std::vector<CubicSplineT<Precision>> A0_splines;
 void compute_A0_scaled(
     const int num_nodes,
     std::span<const int> node_types,
@@ -132,19 +136,19 @@ void reverse_A0_scaled(
     std::span<const double> r);
 
 // M0
-std::vector<double> M0, M0_grad, M0_adj;
-std::vector<MultivariatePolynomial> P0;
+std::vector<Precision> M0, M0_grad, M0_adj;
+std::vector<MultivariatePolynomialT<Precision>> P0;
 void compute_M0(const int num_nodes, std::span<const int> node_types);
 // TODO: node_types here only for consistency with Kokkos
 void reverse_M0(const int num_nodes, std::span<const int> node_types);
 
 // H1
-std::vector<double> H1, H1_adj;
-std::vector<double> H1_weights;
+std::vector<Precision> H1, H1_adj;
+std::vector<Precision> H1_weights;
 void compute_H1(const int num_nodes);
 void reverse_H1(const int num_nodes);
-std::vector<double> H1_product_weights;
-std::vector<double> H1_linear_up_weights;
+std::vector<Precision> H1_product_weights;
+std::vector<Precision> H1_linear_up_weights;
 void compute_H1_product(const int num_nodes);
 void compute_H1_linear_up(const int num_nodes);
 void reverse_H1_linear_up(const int num_nodes);
@@ -152,21 +156,21 @@ void reverse_H1_product(const int num_nodes);
 
 // MACEField coupling after H1
 bool has_field_coupling;
-std::vector<double> H1_pre_field;
-std::vector<double> field_feats_weight;
-std::vector<double> field_feats_output_mask;
-std::vector<double> field_linear_weight;
-std::vector<double> field_linear_bias;
-std::vector<double> field_linear_output_mask;
-std::vector<double> field_scalar_to_vector_matrix;
-std::vector<double> field_vector_to_scalar_matrix;
-std::vector<double> electric_field_adj;
-std::vector<double> electric_field_hessian;
-std::vector<double> electric_field_force_derivative;
-double field_feats_scalar_to_vector_path_weight;
-double field_feats_vector_to_scalar_path_weight;
-double field_linear_scalar_path_weight;
-double field_linear_vector_path_weight;
+std::vector<Precision> H1_pre_field;
+std::vector<Precision> field_feats_weight;
+std::vector<Precision> field_feats_output_mask;
+std::vector<Precision> field_linear_weight;
+std::vector<Precision> field_linear_bias;
+std::vector<Precision> field_linear_output_mask;
+std::vector<Precision> field_scalar_to_vector_matrix;
+std::vector<Precision> field_vector_to_scalar_matrix;
+std::vector<Precision> electric_field_adj;
+std::vector<Precision> electric_field_hessian;
+std::vector<Precision> electric_field_force_derivative;
+Precision field_feats_scalar_to_vector_path_weight;
+Precision field_feats_vector_to_scalar_path_weight;
+Precision field_linear_scalar_path_weight;
+Precision field_linear_vector_path_weight;
 void compute_field_H1(const int num_nodes, std::span<const double> electric_field);
 void reverse_field_H1(const int num_nodes, std::span<const double> electric_field);
 void compute_electric_field_hessian(const int num_nodes,
@@ -188,11 +192,11 @@ void compute_electric_field_force_derivative(const int num_nodes,
 
 // Phi1
 int num_lelm1lm2, num_lme;
-std::vector<double> Phi1r, dPhi1r;
-std::vector<double> Phi1, dPhi1;
+std::vector<Precision> Phi1r, dPhi1r;
+std::vector<Precision> Phi1, dPhi1;
 std::vector<int> Phi1_l, Phi1_l1, Phi1_l2;
 std::vector<int> Phi1_lme, Phi1_lelm1lm2;
-std::vector<double> Phi1_clebsch_gordan;
+std::vector<Precision> Phi1_clebsch_gordan;
 void compute_Phi1(const int num_nodes, std::span<const int> num_neigh, std::span<const int> neigh_indices);
 void compute_Phi1_streamed(
     const int num_nodes,
@@ -214,14 +218,14 @@ void reverse_Phi1_streamed(
     bool zero_H1_adj = true);
 
 // A1
-std::vector<double> A1, A1_adj;
-std::vector<std::vector<double>> A1_weights;
+std::vector<Precision> A1, A1_adj;
+std::vector<std::vector<Precision>> A1_weights;
 void compute_A1(const int num_nodes);
 void reverse_A1(const int num_nodes);
 
 // A1 rescaling
 bool A1_scaled;
-std::vector<CubicSpline> A1_splines;
+std::vector<CubicSplineT<Precision>> A1_splines;
 void compute_A1_scaled(
     const int num_nodes,
     std::span<const int> node_types,
@@ -238,25 +242,31 @@ void reverse_A1_scaled(
     bool zero_dxyz = true);
 
 // M1
-std::vector<double> M1, M1_grad, M1_adj;
-std::vector<MultivariatePolynomial> P1;
+std::vector<Precision> M1, M1_grad, M1_adj;
+std::vector<MultivariatePolynomialT<Precision>> P1;
 void compute_M1(const int num_nodes, std::span<const int> node_types);
 // TODO: node_types here only for consistency with Kokkos
 void reverse_M1(const int num_nodes, std::span<const int> node_types);
 
 // H2
-std::vector<double> H2, H2_adj;
-std::vector<std::vector<double>> H2_weights_for_H1;
-std::vector<double> H2_weights_for_M1;
+std::vector<Precision> H2, H2_adj;
+std::vector<std::vector<Precision>> H2_weights_for_H1;
+std::vector<Precision> H2_weights_for_M1;
 void compute_H2(const int num_nodes, std::span<const int> node_types);
 void reverse_H2(const int num_nodes, std::span<const int> node_types, bool zero_H1_adj = true);
 
 // Readouts
-std::vector<double> readout_1_weights;
-std::unique_ptr<MultilayerPerceptron> readout_2;
+std::vector<Precision> readout_1_weights;
+std::unique_ptr<MultilayerPerceptronT<Precision>> readout_2;
 void compute_readouts(const int num_nodes, std::span<const int> node_types);
 
 // Initializer
 void load_from_json(std::string filename);
 
 };
+
+using MACE = MACECPU<double>;
+using MACEFloat = MACECPU<float>;
+
+extern template class MACECPU<float>;
+extern template class MACECPU<double>;

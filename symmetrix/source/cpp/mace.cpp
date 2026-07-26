@@ -15,9 +15,10 @@ using ContiguousDoubleArray =
 
 namespace {
 
-std::unique_ptr<MACE> load_mace(const std::string& filename)
+template <typename Precision>
+std::unique_ptr<MACECPU<Precision>> load_mace_cpu(const std::string& filename)
 {
-    auto evaluator = std::make_unique<MACE>(filename);
+    auto evaluator = std::make_unique<MACECPU<Precision>>(filename);
     if (!evaluator->supports_streamed_edges()) {
         if (PyErr_WarnEx(
                 PyExc_UserWarning,
@@ -30,8 +31,9 @@ std::unique_ptr<MACE> load_mace(const std::string& filename)
     return evaluator;
 }
 
+template <typename Precision>
 void prepare_active_types(
-    MACE& self,
+    MACECPU<Precision>& self,
     const ContiguousIntArray& node_types,
     const ContiguousIntArray& neigh_types)
 {
@@ -56,58 +58,63 @@ void prepare_active_types(
 
 }  // namespace
 
-void bind_mace(py::module_ &m)
+template <typename Precision>
+void bind_mace_cpu(py::module_ &m, const char* class_name)
 {
-    py::class_<MACE>(m, "MACE")
-        .def(py::init(&load_mace))
-        .def("set_streamed_edges", &MACE::set_streamed_edges)
-        .def_property_readonly("streamed_edges_mode", &MACE::streamed_edges_mode)
-        .def_property_readonly("supports_streamed_edges", &MACE::supports_streamed_edges)
-        .def_property_readonly("R0_storage_size", [] (const MACE& self) {
+    using Evaluator = MACECPU<Precision>;
+    py::class_<Evaluator>(m, class_name)
+        .def(py::init(&load_mace_cpu<Precision>))
+        .def("set_streamed_edges", &Evaluator::set_streamed_edges)
+        .def_property_readonly("streamed_edges_mode", &Evaluator::streamed_edges_mode)
+        .def_property_readonly("supports_streamed_edges", &Evaluator::supports_streamed_edges)
+        .def_property_readonly("scalar_size_bytes", [] (const Evaluator&) {
+            return sizeof(Precision);
+        })
+        .def_property_readonly("R0_storage_size", [] (const Evaluator& self) {
             return self.R0.size()+self.R0_deriv.size();
         })
-        .def_property_readonly("R1_storage_size", [] (const MACE& self) {
+        .def_property_readonly("R1_storage_size", [] (const Evaluator& self) {
             return self.R1.size()+self.R1_deriv.size();
         })
-        .def_readonly("atomic_numbers", &MACE::atomic_numbers)
-        .def_readonly("atomic_energies", &MACE::atomic_energies)
-        .def_readonly("active_atomic_numbers", &MACE::active_atomic_numbers)
+        .def_readonly("atomic_numbers", &Evaluator::atomic_numbers)
+        .def_readonly("atomic_energies", &Evaluator::atomic_energies)
+        .def_readonly("active_atomic_numbers", &Evaluator::active_atomic_numbers)
         .def("prepare_active_types",
-            [] (MACE& self, ContiguousIntArray node_types) {
+            [] (Evaluator& self, ContiguousIntArray node_types) {
                 self.prepare_active_types(
                     std::span<const int>(node_types.data(), node_types.size()));
             })
-        .def_readonly("r_cut", &MACE::r_cut)
-        .def_readwrite("node_forces", &MACE::node_forces)
-        .def_readwrite("node_energies", &MACE::node_energies)
-        .def_readwrite("H0_weights", &MACE::H0_weights)
-        .def_readwrite("R0", &MACE::R0)
-        .def_readonly("R0_deriv", &MACE::R0_deriv)
-        .def_readwrite("R1", &MACE::R1)
-        .def_readonly("R1_deriv", &MACE::R1_deriv)
-        .def_readwrite("A0", &MACE::A0)
-        .def_readwrite("A0_adj", &MACE::A0_adj)
-        .def_readwrite("M0", &MACE::M0)
-        .def_readwrite("M0_adj", &MACE::M0_adj)
-        .def_readwrite("H1", &MACE::H1)
-        .def_readwrite("H1_adj", &MACE::H1_adj)
-        .def_readwrite("has_field_coupling", &MACE::has_field_coupling)
-        .def_readwrite("H1_pre_field", &MACE::H1_pre_field)
-        .def_readwrite("field_feats_weight", &MACE::field_feats_weight)
-        .def_readwrite("field_linear_weight", &MACE::field_linear_weight)
-        .def_readwrite("electric_field_adj", &MACE::electric_field_adj)
-        .def_readwrite("electric_field_hessian", &MACE::electric_field_hessian)
-        .def_readwrite("electric_field_force_derivative", &MACE::electric_field_force_derivative)
-        .def_readwrite("Phi1", &MACE::Phi1)
-        .def_readwrite("Phi1_adj", &MACE::dPhi1)
-        .def_readwrite("A1", &MACE::A1)
-        .def_readwrite("A1_adj", &MACE::A1_adj)
-        .def_readwrite("M1", &MACE::M1)
-        .def_readwrite("M1_adj", &MACE::M1_adj)
-        .def_readwrite("H2", &MACE::H2)
-        .def_readwrite("H2_adj", &MACE::H2_adj)
+        .def_readonly("r_cut", &Evaluator::r_cut)
+        .def_readwrite("node_forces", &Evaluator::node_forces)
+        .def_readwrite("node_energies", &Evaluator::node_energies)
+        .def_readwrite("H0_weights", &Evaluator::H0_weights)
+        .def_readwrite("R0", &Evaluator::R0)
+        .def_readonly("R0_deriv", &Evaluator::R0_deriv)
+        .def_readwrite("R1", &Evaluator::R1)
+        .def_readonly("R1_deriv", &Evaluator::R1_deriv)
+        .def_readwrite("A0", &Evaluator::A0)
+        .def_readwrite("A0_adj", &Evaluator::A0_adj)
+        .def_readwrite("M0", &Evaluator::M0)
+        .def_readwrite("M0_adj", &Evaluator::M0_adj)
+        .def_readwrite("H1", &Evaluator::H1)
+        .def_readwrite("H1_adj", &Evaluator::H1_adj)
+        .def_readwrite("has_field_coupling", &Evaluator::has_field_coupling)
+        .def_readwrite("H1_pre_field", &Evaluator::H1_pre_field)
+        .def_readwrite("field_feats_weight", &Evaluator::field_feats_weight)
+        .def_readwrite("field_linear_weight", &Evaluator::field_linear_weight)
+        .def_readwrite("electric_field_adj", &Evaluator::electric_field_adj)
+        .def_readwrite("electric_field_hessian", &Evaluator::electric_field_hessian)
+        .def_readwrite("electric_field_force_derivative", &Evaluator::electric_field_force_derivative)
+        .def_readwrite("Phi1", &Evaluator::Phi1)
+        .def_readwrite("Phi1_adj", &Evaluator::dPhi1)
+        .def_readwrite("A1", &Evaluator::A1)
+        .def_readwrite("A1_adj", &Evaluator::A1_adj)
+        .def_readwrite("M1", &Evaluator::M1)
+        .def_readwrite("M1_adj", &Evaluator::M1_adj)
+        .def_readwrite("H2", &Evaluator::H2)
+        .def_readwrite("H2_adj", &Evaluator::H2_adj)
         .def("compute_node_energies_forces",
-            [](MACE& self, const int num_nodes,
+            [](Evaluator& self, const int num_nodes,
                            ContiguousIntArray node_types,
                            ContiguousIntArray num_neigh,
                            ContiguousIntArray neigh_indices,
@@ -125,7 +132,7 @@ void bind_mace(py::module_ &m)
                            std::span<const double>(r.data(), r.size()));
             })
         .def("compute_node_energies_forces_field",
-            [](MACE& self, const int num_nodes,
+            [](Evaluator& self, const int num_nodes,
                            ContiguousIntArray node_types,
                            ContiguousIntArray num_neigh,
                            ContiguousIntArray neigh_indices,
@@ -145,7 +152,7 @@ void bind_mace(py::module_ &m)
                            std::span<const double>(electric_field.data(), electric_field.size()));
             })
         .def("compute_electric_field_hessian",
-            [](MACE& self, const int num_nodes,
+            [](Evaluator& self, const int num_nodes,
                            ContiguousIntArray node_types,
                            ContiguousIntArray num_neigh,
                            ContiguousIntArray neigh_indices,
@@ -165,7 +172,7 @@ void bind_mace(py::module_ &m)
                            std::span<const double>(electric_field.data(), electric_field.size()));
             })
         .def("compute_electric_field_force_derivative",
-            [](MACE& self, const int num_nodes,
+            [](Evaluator& self, const int num_nodes,
                            ContiguousIntArray node_types,
                            ContiguousIntArray num_neigh,
                            ContiguousIntArray neigh_indices,
@@ -185,7 +192,7 @@ void bind_mace(py::module_ &m)
                            std::span<const double>(electric_field.data(), electric_field.size()));
             })
         .def("compute_R0",
-            [] (MACE& self,
+            [] (Evaluator& self,
                     const int num_nodes,
                     ContiguousIntArray node_types,
                     ContiguousIntArray num_neigh,
@@ -200,7 +207,7 @@ void bind_mace(py::module_ &m)
                     std::span<const double>(r.data(), r.size()));
             })
         .def("compute_R1",
-            [] (MACE& self,
+            [] (Evaluator& self,
                     const int num_nodes,
                     ContiguousIntArray node_types,
                     ContiguousIntArray num_neigh,
@@ -215,11 +222,11 @@ void bind_mace(py::module_ &m)
                     std::span<const double>(r.data(), r.size()));
             })
         .def("compute_Y",
-            [](MACE& self, ContiguousDoubleArray xyz) {
+            [](Evaluator& self, ContiguousDoubleArray xyz) {
                 self.compute_Y(std::span<const double>(xyz.data(), xyz.size()));
             })
         .def("compute_A0",
-            [](MACE& self,
+            [](Evaluator& self,
                     const int num_nodes,
                     ContiguousIntArray node_types,
                     ContiguousIntArray num_neigh,
@@ -231,7 +238,7 @@ void bind_mace(py::module_ &m)
                     std::span<const int>(neigh_types.data(), neigh_types.size()));
             })
         .def("reverse_A0",
-            [](MACE& self, const int num_nodes,
+            [](Evaluator& self, const int num_nodes,
                            ContiguousIntArray node_types,
                            ContiguousIntArray num_neigh,
                            ContiguousIntArray neigh_types,
@@ -245,7 +252,7 @@ void bind_mace(py::module_ &m)
                                 std::span<const double>(r.data(), r.size()));
             })
         .def("compute_A0_scaled",
-            [](MACE& self,
+            [](Evaluator& self,
                     const int num_nodes,
                     ContiguousIntArray node_types,
                     ContiguousIntArray num_neigh,
@@ -260,7 +267,7 @@ void bind_mace(py::module_ &m)
                     std::span<const double>(r.data(), r.size()));
             })
         .def("reverse_A0_scaled",
-            [](MACE& self,
+            [](Evaluator& self,
                     const int num_nodes,
                     ContiguousIntArray node_types,
                     ContiguousIntArray num_neigh,
@@ -277,33 +284,33 @@ void bind_mace(py::module_ &m)
                     std::span<const double>(r.data(), r.size()));
             })
         .def("compute_M0",
-            [](MACE& self, const int num_nodes,
+            [](Evaluator& self, const int num_nodes,
                            ContiguousIntArray node_types) {
                 self.compute_M0(num_nodes, 
                                 std::span<const int>(node_types.data(), node_types.size()));
             })
         .def("reverse_M0",
-            [](MACE& self, const int num_nodes,
+            [](Evaluator& self, const int num_nodes,
                            ContiguousIntArray node_types) {
                 self.reverse_M0(num_nodes,
                                 std::span<const int>(node_types.data(), node_types.size()));
             })
-        .def("compute_H1", &MACE::compute_H1)
-        .def("reverse_H1", &MACE::reverse_H1)
+        .def("compute_H1", &Evaluator::compute_H1)
+        .def("reverse_H1", &Evaluator::reverse_H1)
         .def("compute_field_H1",
-            [](MACE& self, const int num_nodes, ContiguousDoubleArray electric_field) {
+            [](Evaluator& self, const int num_nodes, ContiguousDoubleArray electric_field) {
                 self.compute_field_H1(
                     num_nodes,
                     std::span<const double>(electric_field.data(), electric_field.size()));
             })
         .def("reverse_field_H1",
-            [](MACE& self, const int num_nodes, ContiguousDoubleArray electric_field) {
+            [](Evaluator& self, const int num_nodes, ContiguousDoubleArray electric_field) {
                 self.reverse_field_H1(
                     num_nodes,
                     std::span<const double>(electric_field.data(), electric_field.size()));
             })
         .def("compute_Phi1",
-            [](MACE& self, const int num_nodes,
+            [](Evaluator& self, const int num_nodes,
                            ContiguousIntArray num_neigh,
                            ContiguousIntArray neigh_indices) {
                 self.compute_Phi1(num_nodes, 
@@ -311,7 +318,7 @@ void bind_mace(py::module_ &m)
                                   std::span<const int>(neigh_indices.data(), neigh_indices.size()));
             })
         .def("reverse_Phi1",
-            [](MACE& self, const int num_nodes,
+            [](Evaluator& self, const int num_nodes,
                            ContiguousIntArray num_neigh,
                            ContiguousIntArray neigh_indices,
                            ContiguousDoubleArray xyz,
@@ -326,10 +333,10 @@ void bind_mace(py::module_ &m)
                                   zero_dxyz,
                                   zero_H1_adj);
             })
-        .def("compute_A1", &MACE::compute_A1)
-        .def("reverse_A1", &MACE::reverse_A1)
+        .def("compute_A1", &Evaluator::compute_A1)
+        .def("reverse_A1", &Evaluator::reverse_A1)
         .def("compute_A1_scaled",
-            [](MACE& self,
+            [](Evaluator& self,
                     const int num_nodes,
                     ContiguousIntArray node_types,
                     ContiguousIntArray num_neigh,
@@ -344,7 +351,7 @@ void bind_mace(py::module_ &m)
                     std::span<const double>(r.data(), r.size()));
             })
         .def("reverse_A1_scaled",
-            [](MACE& self,
+            [](Evaluator& self,
                     const int num_nodes,
                     ContiguousIntArray node_types,
                     ContiguousIntArray num_neigh,
@@ -361,26 +368,26 @@ void bind_mace(py::module_ &m)
                     std::span<const double>(r.data(), r.size()));
             })
         .def("compute_M1",
-            [](MACE& self, const int num_nodes,
+            [](Evaluator& self, const int num_nodes,
                            ContiguousIntArray node_types) {
                 self.compute_M1(num_nodes, 
                                 std::span<const int>(node_types.data(), node_types.size()));
             })
 
         .def("reverse_M1",
-            [](MACE& self, const int num_nodes,
+            [](Evaluator& self, const int num_nodes,
                            ContiguousIntArray node_types) {
                 self.reverse_M1(num_nodes,
                                 std::span<const int>(node_types.data(), node_types.size()));
             })
         .def("compute_H2",
-            [](MACE& self, const int num_nodes,
+            [](Evaluator& self, const int num_nodes,
                            ContiguousIntArray node_types) {
                 self.compute_H2(num_nodes, 
                                 std::span<const int>(node_types.data(), node_types.size()));
             })
         .def("reverse_H2",
-            [](MACE& self, const int num_nodes,
+            [](Evaluator& self, const int num_nodes,
                            ContiguousIntArray node_types,
                            bool zero_H1_adj) {
                 self.reverse_H2(num_nodes, 
@@ -388,9 +395,15 @@ void bind_mace(py::module_ &m)
                                 zero_H1_adj);
             })
         .def("compute_readouts",
-            [](MACE& self, const int num_nodes,
+            [](Evaluator& self, const int num_nodes,
                            ContiguousIntArray node_types) {
                 self.compute_readouts(num_nodes, 
                                       std::span<const int>(node_types.data(), node_types.size()));
             });
+}
+
+void bind_mace(py::module_ &m)
+{
+    bind_mace_cpu<double>(m, "MACE");
+    bind_mace_cpu<float>(m, "MACEFloat");
 }

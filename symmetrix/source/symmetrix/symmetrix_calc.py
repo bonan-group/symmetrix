@@ -159,9 +159,7 @@ class Symmetrix(Calculator):
             if not symmetrix._kokkos_is_initialized():
                 symmetrix._init_kokkos()
             return symmetrix.MACEKokkos if dtype == "float64" else symmetrix.MACEKokkosFloat
-        if dtype == "float32":
-            raise ValueError(f"dtype '{dtype}' requires `use_kokkos = True`")
-        return symmetrix.MACE
+        return symmetrix.MACE if dtype == "float64" else symmetrix.MACEFloat
 
     @staticmethod
     def _json_metadata(model_file):

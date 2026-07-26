@@ -79,6 +79,17 @@ pair-spline models retain legacy execution and emit a migration warning. Pass
 `streamed_edges="legacy"`, `"r1"`, or `"all"` explicitly to override the
 automatic selection where the model format supports it.
 
+Standard MACE format-version-1 evaluators and compact format-version-2 MACE and
+MACEField evaluators support both `dtype="float64"` and `dtype="float32"` with
+`use_kokkos=False` or `use_kokkos=True`. The native CPU classes are exposed as
+`MACE` (float64) and `MACEFloat` (float32). Coordinates, distances, and electric
+fields enter through the existing float64 interface; learned tensors and
+evaluator workspaces use the selected precision, and ASE results are promoted
+to NumPy float64 during assembly. Format-version-1 pair splines are available
+only for standard MACE. Nonlinear format-version-3 models remain float64-only.
+The native LAMMPS pair style also remains float64-only; its Kokkos styles retain
+their existing precision selection.
+
 To generate version 1 data for an older reader or for code that consumes the
 legacy `radial_spline_*` keys, request pair splines explicitly. The equivalent
 Python API is:
@@ -210,10 +221,10 @@ One can import the ASE calculator with
 ```
 from symmetrix import Symmetrix
 ```
-MACEField `.json` models can be evaluated with `use_kokkos=True` when
-Symmetrix is built with Kokkos support. In the ASE calculator this path
+MACEField `.json` models can be evaluated through the native CPU backend or
+with `use_kokkos=True` when Symmetrix is built with Kokkos support. In the ASE calculator this path
 supports field-aware energies, forces, polarization, Born effective charges,
-and polarizability for graph-level electric fields with `dtype="float64"`.
+and polarizability for graph-level electric fields with either supported dtype.
 See [the source code](source/symmetrix/symmetrix_calc.py) and [this test](test/test_symmetrix_calc.py)
 for additional details.
 
@@ -233,16 +244,15 @@ symmetrix_extract_mace --model MACEField-MH-0-omat-dielectric.model \
     --output macefield-dielectric-universal.json
 ```
 
-The output JSON is the file used by the ASE calculator. MACEField JSON requires
-`dtype="float64"`. It can run through either the native serial evaluator or the
-field-aware Kokkos evaluator when Symmetrix is built with Kokkos support and
-`use_kokkos=True`.
+The output JSON is the file used by the ASE calculator. It can run in float32 or
+float64 through either the native serial evaluator or the field-aware Kokkos
+evaluator when Symmetrix is built with Kokkos support and `use_kokkos=True`.
 
 The original PyTorch checkpoint does not need to be trained or saved in double
 precision. `symmetrix_extract_mace` loads the checkpoint and extracts the
 Symmetrix JSON data in double precision, so a float32-trained MACEField model
-can still be used by converting it first and running the resulting JSON with
-`dtype="float64"`.
+can be converted once and then loaded into either runtime precision. Float32
+weights are range-checked while the model is loaded.
 
 ```python
 import numpy as np

@@ -4,8 +4,8 @@
 
 | Backend | Model | `all` | Qualified precision | Energy/forces/stress | Polarization | Polarizability/BEC | Edge-memory behavior |
 |---|---|---:|---|---:|---:|---:|---|
-| native CPU | compact MACE | yes | float64 | yes | n/a | n/a | fully streamed R0/R1 |
-| native CPU | compact MACEField | yes | float64 | yes | yes | yes, analytic | first order fully streamed; response calls transiently materialize R0/R1 |
+| native CPU | compact MACE | yes | float32, float64 | yes | n/a | n/a | fully streamed R0/R1 |
+| native CPU | compact MACEField | yes | float32, float64 | yes | yes | yes, analytic | first order fully streamed; response calls transiently materialize R0/R1 |
 | Kokkos OpenMP | compact MACE | yes | float32, float64 | yes | n/a | n/a | fully streamed R0/R1 |
 | Kokkos OpenMP | compact MACEField | yes | float32, float64 | yes | yes | yes, analytic | first order fully streamed; response calls transiently materialize R0/R1 |
 | Kokkos CUDA | compact MACE | yes | float32, float64 | yes | n/a | n/a | fully streamed R0/R1 |
@@ -13,9 +13,9 @@
 
 Support requires the format-v2 compact, fixed-weight radial representation.
 Format-v1 pair-spline MACE models and nonlinear MH-1 models reject `r1` and
-`all`. The field-aware Kokkos path supports float32 and float64 through the
-same analytic response implementation; the native CPU evaluator remains the
-float64 reference.
+`all`. The field-aware native and Kokkos paths support float32 and float64
+through the same analytic response implementation instantiated at both
+precisions.
 
 ## Configuration
 
@@ -176,3 +176,25 @@ polarizability, Born effective charges, field Hessian, field-force derivative,
 legacy/r1/all equivalence, radial-storage release, and malformed Phi1
 hidden-degree rejection. The streamed property comparison is parameterized
 over native CPU and Kokkos and passed with both OpenMP and CUDA builds.
+
+## Native float32 template qualification
+
+The native CPU evaluator now instantiates the same standard-MACE and MACEField
+algorithm at float32 and float64. These matched 864-atom `all` runs used one
+native CPU thread, one BLAS thread, 10 warmups, and 10 measured first-order calls
+from base commit `fd5dd4a468e8e53eadca3f157fee1ac2e017b973` plus the Phase 56
+working tree. The binding confirmed four-byte learned tensors and workspaces in
+the float32 evaluator and eight-byte storage in float64.
+
+| Dtype | First order (ms) | Time/atom (ms) | RSS after (MiB) | Peak RSS incl. response (MiB) | Field Hessian (ms) | Field-force derivative (ms) |
+|---|---:|---:|---:|---:|---:|---:|
+| float64 | 1,293.913 | 1.497585 | 2,327.6 | 6,611.8 | 11,788.7 | 11,894.4 |
+| float32 | 1,112.741 | 1.287895 | 1,244.8 | 3,369.0 | 10,772.8 | 11,501.2 |
+
+Float32 is 1.16x faster for the first-order field-aware call, lowers final RSS
+by 1,082.8 MiB (46.5%), and lowers the analytic-response high-water RSS by
+3,242.7 MiB (49.0%). The analytic Hessian and field-force derivative are 1.09x
+and 1.03x faster, respectively. The response calculations use the same analytic
+forward-over-reverse implementation at both precisions. Permanent cross-
+precision tests cover energy, forces, polarization, polarizability, Born
+effective charges, the field Hessian, and the raw field-force derivative.

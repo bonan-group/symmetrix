@@ -78,6 +78,9 @@ void bind_mace_kokkos(py::module_ &m, const char* class_name)
             "streamed_edges_mode", &MACEKokkos<Precision>::streamed_edges_mode)
         .def_property_readonly(
             "supports_streamed_edges", &MACEKokkos<Precision>::supports_streamed_edges)
+        .def_property_readonly("scalar_size_bytes", [] (const MACEKokkos<Precision>&) {
+            return sizeof(Precision);
+        })
         .def_property_readonly("R0_storage_size", [] (const MACEKokkos<Precision>& self) {
             return self.R0.size()+self.R0_deriv.size();
         })

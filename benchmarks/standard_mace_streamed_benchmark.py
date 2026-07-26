@@ -114,11 +114,7 @@ def _process_memory_mib():
     return values
 
 
-def _evaluate(model, atoms, backend, dtype, mode, warmups, repeats):
-    process_memory_before_mib = _process_memory_mib()
-    gpu_memory_before_mib = (
-        _gpu_process_memory_mib() if backend == "kokkos" else None
-    )
+def _make_calculator(model, backend, dtype, mode):
     calculator = Symmetrix(
         model,
         use_kokkos=backend == "kokkos",
@@ -127,6 +123,30 @@ def _evaluate(model, atoms, backend, dtype, mode, warmups, repeats):
     )
     if not calculator.evaluator.supports_streamed_edges:
         raise RuntimeError("The model is not an ordinary format-v2 compact MACE model")
+    return calculator
+
+
+def _evaluate(
+    model,
+    atoms,
+    backend,
+    dtype,
+    mode,
+    warmups,
+    repeats,
+    calculator=None,
+):
+    process_memory_before_mib = _process_memory_mib()
+    gpu_memory_before_mib = (
+        _gpu_process_memory_mib() if backend == "kokkos" else None
+    )
+    if calculator is None:
+        calculator = _make_calculator(model, backend, dtype, mode)
+    scalar_bytes = 4 if dtype == "float32" else 8
+    evaluator_scalar_bytes = calculator.evaluator.scalar_size_bytes
+    if evaluator_scalar_bytes != scalar_bytes:
+        raise RuntimeError(
+            f"evaluator uses {evaluator_scalar_bytes}-byte scalars, expected {scalar_bytes}")
     inputs = calculator._mace_inputs(atoms)
     native_args = (*inputs[:5], inputs[5].flatten(), inputs[6])
     for _ in range(warmups):
@@ -137,7 +157,6 @@ def _evaluate(model, atoms, backend, dtype, mode, warmups, repeats):
         calculator.evaluator.compute_node_energies_forces(*native_args)
         samples.append(1000.0*(time.perf_counter()-start))
     results = calculator._collect_mace_results(atoms, inputs)
-    scalar_bytes = 4 if dtype == "float32" else 8
     r0_elements = int(calculator.evaluator.R0_storage_size)
     r1_elements = int(calculator.evaluator.R1_storage_size)
     gpu_memory_after_mib = (
@@ -146,6 +165,7 @@ def _evaluate(model, atoms, backend, dtype, mode, warmups, repeats):
     process_memory_after_mib = _process_memory_mib()
     return {
         "mode": mode,
+        "evaluator_scalar_size_bytes": evaluator_scalar_bytes,
         "directed_edges": len(inputs[6]),
         "timing": _summary(samples),
         "timing_per_atom": _per_atom_summary(samples, len(atoms)),
@@ -178,16 +198,18 @@ def main():
     parser.add_argument("--repeats", type=int, default=10)
     parser.add_argument("--max-force-error", type=float, default=2e-5)
     parser.add_argument("--min-speedup", type=float)
+    parser.add_argument("--reuse-evaluator", action="store_true")
+    parser.add_argument("--source-commit")
     parser.add_argument("--output", type=pathlib.Path)
     args = parser.parse_args()
-    if args.backend == "serial" and args.dtype != "float64":
-        parser.error("the serial backend supports only float64")
     if args.warmups < 0 or args.repeats < 1:
         parser.error("--warmups must be nonnegative and --repeats must be positive")
 
     modes = _parse_csv(args.modes, str, "--modes", parser)
     if any(mode not in ("legacy", "r1", "all") for mode in modes):
         parser.error("--modes must contain only legacy,r1,all")
+    if args.reuse_evaluator and len(modes) != 1:
+        parser.error("--reuse-evaluator requires exactly one streamed-edge mode")
     sizes = _parse_csv(args.sizes, int, "--sizes", parser)
     if any(size < 1 for size in sizes):
         parser.error("--sizes values must be positive")
@@ -200,6 +222,8 @@ def main():
             "sha256": _sha256(model),
         },
         "backend": args.backend,
+        "source_commit": args.source_commit,
+        "reuse_evaluator_across_sizes": args.reuse_evaluator,
         "kokkos_execution_space": (
             native_symmetrix._kokkos_default_execution_space()
             if args.backend == "kokkos"
@@ -220,6 +244,11 @@ def main():
         "systems": [],
     }
     failed = False
+    reused_calculator = None
+    if args.reuse_evaluator:
+        reused_calculator = _make_calculator(
+            model, args.backend, args.dtype, modes[0]
+        )
     for size in sizes:
         atoms = bulk("AlN", "wurtzite", a=3.112, c=4.982).repeat((size, size, size))
         records = {
@@ -231,6 +260,7 @@ def main():
                 mode,
                 args.warmups,
                 args.repeats,
+                reused_calculator,
             )
             for mode in modes
         }

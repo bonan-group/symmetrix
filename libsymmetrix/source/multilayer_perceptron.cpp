@@ -4,15 +4,17 @@
 
 #include "multilayer_perceptron.hpp"
 
-MultilayerPerceptron::MultilayerPerceptron()
+template <typename Precision>
+MultilayerPerceptronT<Precision>::MultilayerPerceptronT()
 {
     // TODO: add sanity checks to default constructor
 }
 
-MultilayerPerceptron::MultilayerPerceptron(
+template <typename Precision>
+MultilayerPerceptronT<Precision>::MultilayerPerceptronT(
     std::vector<int> shape,
-    std::vector<std::vector<double>> weights,
-    double activation_scale_factor)
+    std::vector<std::vector<Precision>> weights,
+    Precision activation_scale_factor)
     : shape(shape),
       weights(weights),
       activation_scale_factor(activation_scale_factor)
@@ -20,15 +22,16 @@ MultilayerPerceptron::MultilayerPerceptron(
     // TODO: check and sanitize input
     // TODO: double check that something sensible happens here for i==shape.size()-1
     for (int i=0; i<shape.size(); ++i) {
-        node_values.push_back(std::vector<double>(shape[i]));
-        node_derivs.push_back(std::vector<double>(shape.back()*shape[i]));
-        node_activation_derivs.push_back(std::vector<double>(shape[i]));
+        node_values.push_back(std::vector<Precision>(shape[i]));
+        node_derivs.push_back(std::vector<Precision>(shape.back()*shape[i]));
+        node_activation_derivs.push_back(std::vector<Precision>(shape[i]));
     }
 }
 
-auto MultilayerPerceptron::evaluate(
-    std::vector<double> input
-    )-> std::vector<double>
+template <typename Precision>
+auto MultilayerPerceptronT<Precision>::evaluate(
+    std::vector<Precision> input
+    )-> std::vector<Precision>
 {
     // TODO: Check/sanitize input
     // Reshape node arrays and send input to nodes
@@ -38,44 +41,45 @@ auto MultilayerPerceptron::evaluate(
     std::copy(input.begin(), input.end(), node_values[0].begin());
     // Evaluate layers
     for (int l=0; l<shape.size()-2; ++l) {
-        cblas_dgemv(
+        symmetrix_blas_gemv<Precision>(
             CblasRowMajor,            // const CBLAS_LAYOUT Layout
             CblasNoTrans,             // const CBLAS_TRANSPOSE trans
             shape[l+1],               // const MKL_INT m
             shape[l],                 // const MKL_INT n
-            1.0,                      // const double alpha
-            weights[l].data(),        // const double *a
+            1.0,                      // const Precision alpha
+            weights[l].data(),        // const Precision *a
             shape[l],                 // const MKL_INT lda
-            node_values[l].data(),    // const double *x
+            node_values[l].data(),    // const Precision *x
             1,                        // const MKL_INT incx
-            0.0,                      // const double beta
-            node_values[l+1].data(),  // double *y
+            0.0,                      // const Precision beta
+            node_values[l+1].data(),  // Precision *y
             1);                       // const MKL_INT incy
         for (int i=0; i<shape[l+1]; ++i) {
-            const double x = node_values[l+1][i];
+            const Precision x = node_values[l+1][i];
             node_values[l+1][i] = activation_scale_factor*x/(1.0+std::exp(-x));
         }
     }
     // Evaluate final layer (no nonlinearity)
-    cblas_dgemv(
+    symmetrix_blas_gemv<Precision>(
         CblasRowMajor,                 // const CBLAS_LAYOUT Layout
         CblasNoTrans,                  // const CBLAS_TRANSPOSE trans
         shape.end()[-1],               // const MKL_INT m
         shape.end()[-2],               // const MKL_INT n
-        1.0,                           // const double alpha
-        weights.back().data(),         // const double *a
+        1.0,                           // const Precision alpha
+        weights.back().data(),         // const Precision *a
         shape.end()[-2],               // const MKL_INT lda
-        node_values.end()[-2].data(),  // const double *x
+        node_values.end()[-2].data(),  // const Precision *x
         1,                             // const MKL_INT incx
-        0.0,                           // const double beta
-        node_values.end()[-1].data(),  // double *y
+        0.0,                           // const Precision beta
+        node_values.end()[-1].data(),  // Precision *y
         1);                            // const MKL_INT incy
     return node_values.back();
 }
 
-auto  MultilayerPerceptron::evaluate_gradient(
-    std::vector<double> input
-    )-> std::tuple<std::vector<double>,std::vector<double>>
+template <typename Precision>
+auto  MultilayerPerceptronT<Precision>::evaluate_gradient(
+    std::vector<Precision> input
+    )-> std::tuple<std::vector<Precision>,std::vector<Precision>>
 {
     // TODO: check/sanitize input
     // Reshape node arrays and send input to nodes
@@ -87,40 +91,40 @@ auto  MultilayerPerceptron::evaluate_gradient(
     std::copy(input.begin(), input.end(), node_values[0].begin());
     // Evaluate layers
     for (int l=0; l<shape.size()-2; ++l) {
-        cblas_dgemv(
+        symmetrix_blas_gemv<Precision>(
             CblasRowMajor,            // const CBLAS_LAYOUT Layout
             CblasNoTrans,             // const CBLAS_TRANSPOSE trans
             shape[l+1],               // const MKL_INT m
             shape[l],                 // const MKL_INT n
-            1.0,                      // const double alpha
-            weights[l].data(),        // const double *a
+            1.0,                      // const Precision alpha
+            weights[l].data(),        // const Precision *a
             shape[l],                 // const MKL_INT lda
-            node_values[l].data(),    // const double *x
+            node_values[l].data(),    // const Precision *x
             1,                        // const MKL_INT incx
-            0.0,                      // const double beta
-            node_values[l+1].data(),  // double *y
+            0.0,                      // const Precision beta
+            node_values[l+1].data(),  // Precision *y
             1);                       // const MKL_INT incy
         for (int i=0; i<shape[l+1]; ++i) {
-            const double x = node_values[l+1][i];
-            const double sigmoid = 1.0/(1.0+std::exp(-x));
+            const Precision x = node_values[l+1][i];
+            const Precision sigmoid = 1.0/(1.0+std::exp(-x));
             node_values[l+1][i] = activation_scale_factor*x*sigmoid;
             node_activation_derivs[l+1][i] = activation_scale_factor*sigmoid
                 + activation_scale_factor*x*sigmoid*(1-sigmoid);
         }
     }
     // Evaluate final layer (no nonlinearity)
-    cblas_dgemv(
+    symmetrix_blas_gemv<Precision>(
         CblasRowMajor,                 // const CBLAS_LAYOUT Layout
         CblasNoTrans,                  // const CBLAS_TRANSPOSE trans
         shape.end()[-1],               // const MKL_INT m
         shape.end()[-2],               // const MKL_INT n
-        1.0,                           // const double alpha
-        weights.back().data(),         // const double *a
+        1.0,                           // const Precision alpha
+        weights.back().data(),         // const Precision *a
         shape.end()[-2],               // const MKL_INT lda
-        node_values.end()[-2].data(),  // const double *x
+        node_values.end()[-2].data(),  // const Precision *x
         1,                             // const MKL_INT incx
-        0.0,                           // const double beta
-        node_values.end()[-1].data(),  // double *y
+        0.0,                           // const Precision beta
+        node_values.end()[-1].data(),  // Precision *y
         1);                            // const MKL_INT incy
     // Differentiate backwards
     node_derivs.end()[-2] = weights.back();
@@ -130,35 +134,36 @@ auto  MultilayerPerceptron::evaluate_gradient(
                 node_derivs[l+1][i*shape[l+1]+j] *= node_activation_derivs[l+1][j];
             }
         }
-        cblas_dgemm(
+        symmetrix_blas_gemm<Precision>(
             CblasRowMajor,            // const CBLAS_LAYOUT Layout
             CblasNoTrans,             // const CBLAS_TRANSPOSE transa
             CblasNoTrans,             // const CBLAS_TRANSPOSE transb
             shape.back(),             // const MKL_INT m
             shape[l],                 // const MKL_INT n
             shape[l+1],               // const MKL_INT k
-            1.0,                      // const double alpha
-            node_derivs[l+1].data(),  // const double *a
+            1.0,                      // const Precision alpha
+            node_derivs[l+1].data(),  // const Precision *a
             shape[l+1],               // const MKL_INT lda
-            weights[l].data(),        // const double *b
+            weights[l].data(),        // const Precision *b
             shape[l],                 // const MKL_INT ldb
-            0.0,                      // const double beta
-            node_derivs[l].data(),    // double *c
+            0.0,                      // const Precision beta
+            node_derivs[l].data(),    // Precision *c
             shape[l]);                // const MKL_INT ldc
     }
     return {node_values.back(), node_derivs[0]};
 }
 
-auto MultilayerPerceptron::evaluate_gradient_directional(
-    std::vector<double> input,
-    std::vector<double> input_dot)
-    -> std::tuple<std::vector<double>,std::vector<double>,std::vector<double>>
+template <typename Precision>
+auto MultilayerPerceptronT<Precision>::evaluate_gradient_directional(
+    std::vector<Precision> input,
+    std::vector<Precision> input_dot)
+    -> std::tuple<std::vector<Precision>,std::vector<Precision>,std::vector<Precision>>
 {
-    auto values = std::vector<std::vector<double>>(shape.size());
-    auto value_dots = std::vector<std::vector<double>>(shape.size());
-    auto pre_activation_dots = std::vector<std::vector<double>>(shape.size());
-    auto activation_derivs = std::vector<std::vector<double>>(shape.size());
-    auto activation_second_derivs = std::vector<std::vector<double>>(shape.size());
+    auto values = std::vector<std::vector<Precision>>(shape.size());
+    auto value_dots = std::vector<std::vector<Precision>>(shape.size());
+    auto pre_activation_dots = std::vector<std::vector<Precision>>(shape.size());
+    auto activation_derivs = std::vector<std::vector<Precision>>(shape.size());
+    auto activation_second_derivs = std::vector<std::vector<Precision>>(shape.size());
     for (int l=0; l<shape.size(); ++l) {
         values[l].resize(shape[l], 0.0);
         value_dots[l].resize(shape[l], 0.0);
@@ -172,16 +177,16 @@ auto MultilayerPerceptron::evaluate_gradient_directional(
 
     for (int l=0; l<shape.size()-2; ++l) {
         for (int j=0; j<shape[l+1]; ++j) {
-            double z = 0.0;
-            double z_dot = 0.0;
+            Precision z = 0.0;
+            Precision z_dot = 0.0;
             for (int i=0; i<shape[l]; ++i) {
-                const double weight = weights[l][j*shape[l]+i];
+                const Precision weight = weights[l][j*shape[l]+i];
                 z += weight*values[l][i];
                 z_dot += weight*value_dots[l][i];
             }
-            const double sigmoid = 1.0/(1.0+std::exp(-z));
-            const double sigmoid_deriv = sigmoid*(1.0-sigmoid);
-            const double sigmoid_second_deriv = sigmoid_deriv*(1.0-2.0*sigmoid);
+            const Precision sigmoid = 1.0/(1.0+std::exp(-z));
+            const Precision sigmoid_deriv = sigmoid*(1.0-sigmoid);
+            const Precision sigmoid_second_deriv = sigmoid_deriv*(1.0-2.0*sigmoid);
             values[l+1][j] = activation_scale_factor*z*sigmoid;
             value_dots[l+1][j] =
                 activation_scale_factor*(sigmoid + z*sigmoid_deriv)*z_dot;
@@ -195,17 +200,17 @@ auto MultilayerPerceptron::evaluate_gradient_directional(
 
     const int output_size = shape.back();
     const int final_input_size = shape.end()[-2];
-    auto output = std::vector<double>(output_size, 0.0);
+    auto output = std::vector<Precision>(output_size, 0.0);
     for (int o=0; o<output_size; ++o) {
         for (int i=0; i<final_input_size; ++i)
             output[o] += weights.back()[o*final_input_size+i] * values.end()[-2][i];
     }
 
     auto jac_next = weights.back();
-    auto jac_next_dot = std::vector<double>(jac_next.size(), 0.0);
+    auto jac_next_dot = std::vector<Precision>(jac_next.size(), 0.0);
     for (int l=shape.size()-3; l>=0; --l) {
-        auto jac_z = std::vector<double>(output_size*shape[l+1], 0.0);
-        auto jac_z_dot = std::vector<double>(output_size*shape[l+1], 0.0);
+        auto jac_z = std::vector<Precision>(output_size*shape[l+1], 0.0);
+        auto jac_z_dot = std::vector<Precision>(output_size*shape[l+1], 0.0);
         for (int o=0; o<output_size; ++o) {
             for (int j=0; j<shape[l+1]; ++j) {
                 const int index = o*shape[l+1]+j;
@@ -218,12 +223,12 @@ auto MultilayerPerceptron::evaluate_gradient_directional(
             }
         }
 
-        auto jac_prev = std::vector<double>(output_size*shape[l], 0.0);
-        auto jac_prev_dot = std::vector<double>(output_size*shape[l], 0.0);
+        auto jac_prev = std::vector<Precision>(output_size*shape[l], 0.0);
+        auto jac_prev_dot = std::vector<Precision>(output_size*shape[l], 0.0);
         for (int o=0; o<output_size; ++o) {
             for (int i=0; i<shape[l]; ++i) {
                 for (int j=0; j<shape[l+1]; ++j) {
-                    const double weight = weights[l][j*shape[l]+i];
+                    const Precision weight = weights[l][j*shape[l]+i];
                     jac_prev[o*shape[l]+i] += jac_z[o*shape[l+1]+j] * weight;
                     jac_prev_dot[o*shape[l]+i] += jac_z_dot[o*shape[l+1]+j] * weight;
                 }
@@ -236,10 +241,11 @@ auto MultilayerPerceptron::evaluate_gradient_directional(
     return {output, jac_next, jac_next_dot};
 }
 
-auto MultilayerPerceptron::evaluate_batch(
-    std::vector<double> input,
+template <typename Precision>
+auto MultilayerPerceptronT<Precision>::evaluate_batch(
+    std::vector<Precision> input,
     const int batch_size
-    )-> std::vector<double>
+    )-> std::vector<Precision>
 {
     // TODO: Check/sanitize input
     // Reshape node arrays and send input to nodes
@@ -249,49 +255,50 @@ auto MultilayerPerceptron::evaluate_batch(
     std::copy(input.begin(), input.end(), node_values[0].begin());
     // Evaluate layers
     for (int l=0; l<shape.size()-2; ++l) {
-        cblas_dgemm(
+        symmetrix_blas_gemm<Precision>(
             CblasRowMajor,            // const CBLAS_LAYOUT Layout
             CblasNoTrans,             // const CBLAS_TRANSPOSE transa
             CblasTrans,               // const CBLAS_TRANSPOSE transb
             batch_size,               // const MKL_INT m
             shape[l+1],               // const MKL_INT n
             shape[l],                 // const MKL_INT k
-            1.0,                      // const double alpha
-            node_values[l].data(),    // const double *a
+            1.0,                      // const Precision alpha
+            node_values[l].data(),    // const Precision *a
             shape[l],                 // const MKL_INT lda
-            weights[l].data(),        // const double *b
+            weights[l].data(),        // const Precision *b
             shape[l],                 // const MKL_INT ldb
-            0.0,                      // const double beta
-            node_values[l+1].data(),  // double *c
+            0.0,                      // const Precision beta
+            node_values[l+1].data(),  // Precision *c
             shape[l+1]);              // const MKL_INT ldc
         for (int i=0; i<node_values[l+1].size(); ++i) {
-            const double x = node_values[l+1][i];
+            const Precision x = node_values[l+1][i];
             node_values[l+1][i] = activation_scale_factor*x/(1.0+std::exp(-x));
         }
     }
     // Evaluate final layer (no nonlinearity)
-    cblas_dgemm(
+    symmetrix_blas_gemm<Precision>(
         CblasRowMajor,                 // const CBLAS_LAYOUT Layout
         CblasNoTrans,                  // const CBLAS_TRANSPOSE transa
         CblasTrans,                    // const CBLAS_TRANSPOSE transb
         batch_size,                    // const MKL_INT m
         shape.end()[-1],               // const MKL_INT n
         shape.end()[-2],               // const MKL_INT k
-        1.0,                           // const double alpha
-        node_values.end()[-2].data(),  // const double *a
+        1.0,                           // const Precision alpha
+        node_values.end()[-2].data(),  // const Precision *a
         shape.end()[-2],               // const MKL_INT lda
-        weights.end()[-1].data(),      // const double *b
+        weights.end()[-1].data(),      // const Precision *b
         shape.end()[-2],               // const MKL_INT ldb
-        0.0,                           // const double beta
-        node_values.end()[-1].data(),  // double *c
+        0.0,                           // const Precision beta
+        node_values.end()[-1].data(),  // Precision *c
         shape.end()[-1]);              // const MKL_INT ldc
     return node_values.end()[-1];
 }
 
-auto MultilayerPerceptron::evaluate_gradient_batch(
-    std::vector<double> input,
+template <typename Precision>
+auto MultilayerPerceptronT<Precision>::evaluate_gradient_batch(
+    std::vector<Precision> input,
     const int batch_size
-    )-> std::tuple<std::vector<double>,std::vector<double>>
+    )-> std::tuple<std::vector<Precision>,std::vector<Precision>>
 {
     // TODO: Check/sanitize input
     // Reshape node arrays and send input to nodes
@@ -303,44 +310,44 @@ auto MultilayerPerceptron::evaluate_gradient_batch(
     std::copy(input.begin(), input.end(), node_values[0].begin());
     // Evaluate layers
     for (int l=0; l<shape.size()-2; ++l) {
-        cblas_dgemm(
+        symmetrix_blas_gemm<Precision>(
             CblasRowMajor,            // const CBLAS_LAYOUT Layout
             CblasNoTrans,             // const CBLAS_TRANSPOSE transa
             CblasTrans,               // const CBLAS_TRANSPOSE transb
             batch_size,               // const MKL_INT m
             shape[l+1],               // const MKL_INT n
             shape[l],                 // const MKL_INT k
-            1.0,                      // const double alpha
-            node_values[l].data(),    // const double *a
+            1.0,                      // const Precision alpha
+            node_values[l].data(),    // const Precision *a
             shape[l],                 // const MKL_INT lda
-            weights[l].data(),        // const double *b
+            weights[l].data(),        // const Precision *b
             shape[l],                 // const MKL_INT ldb
-            0.0,                      // const double beta
-            node_values[l+1].data(),  // double *c
+            0.0,                      // const Precision beta
+            node_values[l+1].data(),  // Precision *c
             shape[l+1]);              // const MKL_INT ldc
         for (int i=0; i<node_values[l+1].size(); ++i) {
-            const double x = node_values[l+1][i];
-            const double sigmoid = 1.0/(1.0+std::exp(-x));
+            const Precision x = node_values[l+1][i];
+            const Precision sigmoid = 1.0/(1.0+std::exp(-x));
             node_values[l+1][i] = activation_scale_factor*x*sigmoid;
             node_activation_derivs[l+1][i] = activation_scale_factor*sigmoid
                 + activation_scale_factor*x*sigmoid*(1-sigmoid);
         }
     }
     // Evaluate final layer (no nonlinearity)
-    cblas_dgemm(
+    symmetrix_blas_gemm<Precision>(
         CblasRowMajor,                 // const CBLAS_LAYOUT Layout
         CblasNoTrans,                  // const CBLAS_TRANSPOSE transa
         CblasTrans,                    // const CBLAS_TRANSPOSE transb
         batch_size,                    // const MKL_INT m
         shape.end()[-1],               // const MKL_INT n
         shape.end()[-2],               // const MKL_INT k
-        1.0,                           // const double alpha
-        node_values.end()[-2].data(),  // const double *a
+        1.0,                           // const Precision alpha
+        node_values.end()[-2].data(),  // const Precision *a
         shape.end()[-2],               // const MKL_INT lda
-        weights.end()[-1].data(),      // const double *b
+        weights.end()[-1].data(),      // const Precision *b
         shape.end()[-2],               // const MKL_INT ldb
-        0.0,                           // const double beta
-        node_values.end()[-1].data(),  // double *c
+        0.0,                           // const Precision beta
+        node_values.end()[-1].data(),  // Precision *c
         shape.end()[-1]);              // const MKL_INT ldc
     // Differentiate backwards
     for (int i=0; i<batch_size; ++i) {
@@ -354,21 +361,24 @@ auto MultilayerPerceptron::evaluate_gradient_batch(
                 }
             }
         }
-        cblas_dgemm(
+        symmetrix_blas_gemm<Precision>(
             CblasRowMajor,            // const CBLAS_LAYOUT Layout
             CblasNoTrans,             // const CBLAS_TRANSPOSE transa
             CblasNoTrans,             // const CBLAS_TRANSPOSE transb
             batch_size*shape.back(),  // const MKL_INT m
             shape[l],                 // const MKL_INT n
             shape[l+1],               // const MKL_INT k
-            1.0,                      // const double alpha
-            node_derivs[l+1].data(),  // const double *a
+            1.0,                      // const Precision alpha
+            node_derivs[l+1].data(),  // const Precision *a
             shape[l+1],               // const MKL_INT lda
-            weights[l].data(),        // const double *b
+            weights[l].data(),        // const Precision *b
             shape[l],                 // const MKL_INT ldb
-            0.0,                      // const double beta
-            node_derivs[l].data(),    // double *c
+            0.0,                      // const Precision beta
+            node_derivs[l].data(),    // Precision *c
             shape[l]);                // const MKL_INT ldc
     }
     return {node_values.back(), node_derivs[0]};
 }
+
+template class MultilayerPerceptronT<float>;
+template class MultilayerPerceptronT<double>;
