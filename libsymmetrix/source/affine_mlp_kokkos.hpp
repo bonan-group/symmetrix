@@ -2,6 +2,8 @@
 
 #include <Kokkos_Core.hpp>
 
+#include <cstddef>
+
 #include "nlohmann/json.hpp"
 
 class AffineMLPKokkos {
@@ -27,6 +29,9 @@ public:
         Kokkos::View<const double**,Kokkos::LayoutRight> output_adjoint,
         Kokkos::View<double**,Kokkos::LayoutRight> input_adjoint);
     void prepare_conditioned_weight(int active_input_size);
+    int workspace_rows() const;
+    std::size_t workspace_bytes() const;
+    void clear_workspace();
     void forward_impl(
         Kokkos::View<const double**,Kokkos::LayoutRight> input,
         Kokkos::View<const double**,Kokkos::LayoutRight> row_contributions);

@@ -131,6 +131,26 @@ products, gated residual irreps, LayerNorm/SiLU edge networks, and official
 remain dynamic. Universal JSON with all 89 model elements is supported without
 providing an explicit species list.
 
+For this strict architecture, both CPU evaluators default to
+`streamed_edges="all"`. The modes have layer-level semantics: `legacy` retains
+full-edge intermediate state for both interactions, `r1` streams only the
+second interaction, and `all` streams both interactions. Streaming evaluates
+the conditioned edge networks and tensor products in blocks of at most 1024
+directed edges, accumulates their node contributions immediately, and
+recomputes each block during analytic reverse propagation. Shared radial and
+angular geometry remains available for the final force chain rule. Evaluator
+properties `edge_workspace_rows` and, for Kokkos, `edge_workspace_bytes` expose
+the retained layer-edge workspace. Changing a Kokkos evaluator from `legacy`
+to `r1` or `all` releases the corresponding grow-only full-edge capacities.
+
+Related format-version-3 nonlinear models that do not satisfy the complete
+fast-path predicate remain in `legacy` mode and reject explicit `r1` or `all`
+requests. The streamed MH-1 specialization is qualified for native serial,
+Kokkos Serial, and Kokkos OpenMP CPU execution in float64. It remains disabled
+in Kokkos CUDA builds, which continue to use the generic nonlinear evaluator.
+That generic CUDA fallback supports energy, analytic forces, and stress; it has
+been qualified against native CPU float64 on an RTX 5090 with CUDA 13.3.
+
 The Kokkos CPU path is selected by the default `use_kokkos=True`. It shares the
 serial model-load compiler for sparse product coefficients, then executes
 native Kokkos kernels for sparse products and tensor products, compact

@@ -7,6 +7,7 @@
 #include "affine_mlp.hpp"
 #include "e3nn.hpp"
 #include "e3nn_product.hpp"
+#include "mace_streamed_edges.hpp"
 #include "zbl.hpp"
 
 class MaceNonlinear {
@@ -20,6 +21,10 @@ public:
     double r_cut = 0.0;
     bool has_field_coupling = false;
     bool uses_mh1_fast_path() const { return mh1_fast_path; }
+    bool supports_streamed_edges() const { return mh1_fast_path; }
+    std::string streamed_edges_mode() const;
+    void set_streamed_edges(std::string mode);
+    int edge_workspace_rows() const { return last_edge_workspace_rows; }
 
     void compute_node_energies_forces(
         int num_nodes,
@@ -122,6 +127,10 @@ private:
     E3ProductBasisBatchWorkspace product_batch_workspace;
     AffineMLPBatchWorkspace affine_batch_workspace;
     bool mh1_fast_path = false;
+    int last_edge_workspace_rows = 0;
+    MACEStreamedEdgesMode streamed_edges = MACEStreamedEdgesMode::legacy;
+    static constexpr int streamed_edge_block_size = 1024;
+    bool streams_layer(int layer) const;
     bool has_zbl = false;
     ZBL zbl;
     std::vector<double> spherical_harmonics;

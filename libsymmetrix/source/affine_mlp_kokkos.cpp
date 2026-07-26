@@ -67,6 +67,36 @@ bool AffineMLPKokkos::supports_conditioned_input(int dynamic_input_size) const
         &&dynamic_input_size<input_size();
 }
 
+int AffineMLPKokkos::workspace_rows() const
+{
+    int rows=0;
+    for(int index=0;index<value_storage.extent_int(0);++index) {
+        rows=std::max(rows,value_storage(index).extent_int(0));
+        rows=std::max(rows,adjoint_storage(index).extent_int(0));
+    }
+    return rows;
+}
+
+std::size_t AffineMLPKokkos::workspace_bytes() const
+{
+    std::size_t bytes=0;
+    for(int index=0;index<value_storage.extent_int(0);++index)
+        bytes+=sizeof(double)*(value_storage(index).size()+adjoint_storage(index).size());
+    return bytes;
+}
+
+void AffineMLPKokkos::clear_workspace()
+{
+    for(int index=0;index<value_storage.extent_int(0);++index) {
+        values(index)={};
+        adjoints(index)={};
+        value_storage(index)={};
+        adjoint_storage(index)={};
+    }
+    tape_batch_size=-1;
+    tape_input_size=-1;
+}
+
 void AffineMLPKokkos::prepare(int batch_size,int active_input_size)
 {
     if (value_storage(0).extent(0)<batch_size

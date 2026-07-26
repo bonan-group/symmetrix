@@ -51,24 +51,24 @@ MaceNonlinearKokkos::Gate::Gate(const nlohmann::json& data)
     if(data.at("scalar_activation").get<std::string>()!="silu"||data.at("gate_activation").get<std::string>()!="sigmoid")throw std::invalid_argument("MACE_Nonlinear Kokkos gate has unsupported activations.");
     Irreps scalars(data.at("irreps_scalars").get<std::string>()),gates(data.at("irreps_gates").get<std::string>()),gated(data.at("irreps_gated").get<std::string>()),output(data.at("irreps_out").get<std::string>());
     scalar_size=scalars.dimension(); gate_size=gates.dimension(); gated_size=gated.dimension(); output_size=output.dimension(); scalar_blocks=scalars.blocks; gated_blocks=gated.blocks;
-    scalar_constants=toKokkosView("scalar activation constants",data.at("scalar_activation_constants").get<std::vector<double>>()); gate_constants=toKokkosView("gate constants",data.at("gate_activation_constants").get<std::vector<double>>());
+    scalar_constants=data.at("scalar_activation_constants").get<std::vector<double>>(); gate_constants=data.at("gate_activation_constants").get<std::vector<double>>();
     if(scalar_constants.size()!=scalar_blocks.size()||gate_constants.size()!=gated_blocks.size())throw std::invalid_argument("MACE_Nonlinear Kokkos gate activation counts are inconsistent.");
 }
 
 void MaceNonlinearKokkos::Gate::evaluate(Kokkos::View<const double**,Kokkos::LayoutRight> input,Kokkos::View<double**,Kokkos::LayoutRight> output) const
 {
-    for(int block_index=0;block_index<static_cast<int>(scalar_blocks.size());++block_index){const auto block=scalar_blocks[block_index];const double constant=scalar_constants(block_index);Kokkos::parallel_for("nonlinear gate scalars",Kokkos::MDRangePolicy<Kokkos::Rank<2>>({0,0},{static_cast<int>(input.extent(0)),block.dimension()}),KOKKOS_LAMBDA(int sample,int index){const int offset=block.offset+index;const double x=input(sample,offset);output(sample,offset)=constant*x/(1.0+Kokkos::exp(-x));});}
+    for(int block_index=0;block_index<static_cast<int>(scalar_blocks.size());++block_index){const auto block=scalar_blocks[block_index];const double constant=scalar_constants[block_index];Kokkos::parallel_for("nonlinear gate scalars",Kokkos::MDRangePolicy<Kokkos::Rank<2>>({0,0},{static_cast<int>(input.extent(0)),block.dimension()}),KOKKOS_LAMBDA(int sample,int index){const int offset=block.offset+index;const double x=input(sample,offset);output(sample,offset)=constant*x/(1.0+Kokkos::exp(-x));});}
     int gate_offset=scalar_size,gated_offset=scalar_size+gate_size,output_offset=scalar_size;
-    for(int block_index=0;block_index<static_cast<int>(gated_blocks.size());++block_index){const auto block=gated_blocks[block_index];const int width=2*block.l+1;const int go=gate_offset,gio=gated_offset,oo=output_offset;const double constant=gate_constants(block_index);
+    for(int block_index=0;block_index<static_cast<int>(gated_blocks.size());++block_index){const auto block=gated_blocks[block_index];const int width=2*block.l+1;const int go=gate_offset,gio=gated_offset,oo=output_offset;const double constant=gate_constants[block_index];
         Kokkos::parallel_for("nonlinear gate tensors",Kokkos::MDRangePolicy<Kokkos::Rank<3>>({0,0,0},{static_cast<int>(input.extent(0)),block.multiplicity,width}),KOKKOS_LAMBDA(int sample,int feature,int component){const double probability=1.0/(1.0+Kokkos::exp(-input(sample,go+feature)));output(sample,oo+feature*width+component)=constant*probability*input(sample,gio+feature*width+component);});
         gate_offset+=block.multiplicity;gated_offset+=block.dimension();output_offset+=block.dimension();}
 }
 
 void MaceNonlinearKokkos::Gate::reverse(Kokkos::View<const double**,Kokkos::LayoutRight> input,Kokkos::View<const double**,Kokkos::LayoutRight> output_adjoint,Kokkos::View<double**,Kokkos::LayoutRight> input_adjoint) const
 {
-    Kokkos::deep_copy(input_adjoint,0.0);for(int block_index=0;block_index<static_cast<int>(scalar_blocks.size());++block_index){const auto block=scalar_blocks[block_index];const double constant=scalar_constants(block_index);Kokkos::parallel_for("reverse gate scalars",Kokkos::MDRangePolicy<Kokkos::Rank<2>>({0,0},{static_cast<int>(input.extent(0)),block.dimension()}),KOKKOS_LAMBDA(int sample,int index){const int offset=block.offset+index;const double x=input(sample,offset),probability=1.0/(1.0+Kokkos::exp(-x));input_adjoint(sample,offset)=output_adjoint(sample,offset)*constant*(probability+x*probability*(1.0-probability));});}
+    Kokkos::deep_copy(input_adjoint,0.0);for(int block_index=0;block_index<static_cast<int>(scalar_blocks.size());++block_index){const auto block=scalar_blocks[block_index];const double constant=scalar_constants[block_index];Kokkos::parallel_for("reverse gate scalars",Kokkos::MDRangePolicy<Kokkos::Rank<2>>({0,0},{static_cast<int>(input.extent(0)),block.dimension()}),KOKKOS_LAMBDA(int sample,int index){const int offset=block.offset+index;const double x=input(sample,offset),probability=1.0/(1.0+Kokkos::exp(-x));input_adjoint(sample,offset)=output_adjoint(sample,offset)*constant*(probability+x*probability*(1.0-probability));});}
     int gate_offset=scalar_size,gated_offset=scalar_size+gate_size,output_offset=scalar_size;
-    for(int block_index=0;block_index<static_cast<int>(gated_blocks.size());++block_index){const auto block=gated_blocks[block_index];const int width=2*block.l+1,go=gate_offset,gio=gated_offset,oo=output_offset;const double constant=gate_constants(block_index);
+    for(int block_index=0;block_index<static_cast<int>(gated_blocks.size());++block_index){const auto block=gated_blocks[block_index];const int width=2*block.l+1,go=gate_offset,gio=gated_offset,oo=output_offset;const double constant=gate_constants[block_index];
         Kokkos::parallel_for("reverse gate tensors",Kokkos::MDRangePolicy<Kokkos::Rank<2>>({0,0},{static_cast<int>(input.extent(0)),block.multiplicity}),KOKKOS_LAMBDA(int sample,int feature){const double probability=1.0/(1.0+Kokkos::exp(-input(sample,go+feature))),gate=constant*probability;double gate_adjoint=0.0;for(int component=0;component<width;++component){input_adjoint(sample,gio+feature*width+component)=gate*output_adjoint(sample,oo+feature*width+component);gate_adjoint+=input(sample,gio+feature*width+component)*output_adjoint(sample,oo+feature*width+component);}input_adjoint(sample,go+feature)=gate_adjoint*constant*probability*(1.0-probability);});
         gate_offset+=block.multiplicity;gated_offset+=block.dimension();output_offset+=block.dimension();}
 }
@@ -157,6 +157,121 @@ MaceNonlinearKokkos::MaceNonlinearKokkos(const std::string& filename)
     :MaceNonlinearKokkos(load_model_json(filename))
 {}
 
+std::string MaceNonlinearKokkos::streamed_edges_mode() const
+{
+    return mace_streamed_edges_mode_name(streamed_edges);
+}
+
+void MaceNonlinearKokkos::set_streamed_edges(std::string mode)
+{
+    const auto requested=parse_mace_streamed_edges_mode(mode);
+    if(requested!=MACEStreamedEdgesMode::legacy&&!supports_streamed_edges())
+        throw std::invalid_argument(
+            "Streamed edges require the published MACE-MH-1 fast-path architecture.");
+    streamed_edges=requested;
+    if(streamed_edges==MACEStreamedEdgesMode::r1)
+        release_layer_edge_workspace(1);
+    else if(streamed_edges==MACEStreamedEdgesMode::all)
+        for(int layer=0;layer<static_cast<int>(states.size());++layer)
+            release_layer_edge_workspace(layer);
+}
+
+bool MaceNonlinearKokkos::streams_layer(int layer) const
+{
+    return streamed_edges==MACEStreamedEdgesMode::all
+        ||(streamed_edges==MACEStreamedEdgesMode::r1&&layer==1);
+}
+
+void MaceNonlinearKokkos::release_layer_edge_workspace(int layer)
+{
+    if(layer<0||layer>=static_cast<int>(states.size()))return;
+    auto& state=states[layer];
+#define SYMMETRIX_CLEAR_EDGE_VIEW(name) state.name={};state.name##_storage={}
+    SYMMETRIX_CLEAR_EDGE_VIEW(edge_features);
+    SYMMETRIX_CLEAR_EDGE_VIEW(raw_weights);
+    SYMMETRIX_CLEAR_EDGE_VIEW(weights);
+    SYMMETRIX_CLEAR_EDGE_VIEW(edge_up);
+    SYMMETRIX_CLEAR_EDGE_VIEW(edge_messages);
+    SYMMETRIX_CLEAR_EDGE_VIEW(convolution_contributions);
+    SYMMETRIX_CLEAR_EDGE_VIEW(density_contributions);
+    SYMMETRIX_CLEAR_EDGE_VIEW(density_matrix);
+    SYMMETRIX_CLEAR_EDGE_VIEW(edge_message_adj);
+    SYMMETRIX_CLEAR_EDGE_VIEW(edge_up_adj);
+    SYMMETRIX_CLEAR_EDGE_VIEW(edge_harmonic_adj);
+    SYMMETRIX_CLEAR_EDGE_VIEW(weight_adj);
+    SYMMETRIX_CLEAR_EDGE_VIEW(raw_weight_adj);
+    SYMMETRIX_CLEAR_EDGE_VIEW(edge_feature_adj);
+    SYMMETRIX_CLEAR_EDGE_VIEW(density_raw_adj);
+    SYMMETRIX_CLEAR_EDGE_VIEW(density_feature_adj);
+    SYMMETRIX_CLEAR_EDGE_VIEW(density_raw);
+    SYMMETRIX_CLEAR_EDGE_VIEW(density_base);
+#undef SYMMETRIX_CLEAR_EDGE_VIEW
+    interactions[layer].convolution_weights.clear_workspace();
+    interactions[layer].density.clear_workspace();
+}
+
+int MaceNonlinearKokkos::edge_workspace_rows() const
+{
+    int rows=0;
+    for(int layer=0;layer<static_cast<int>(states.size());++layer) {
+        const auto& state=states[layer];
+#define SYMMETRIX_MAX_EDGE_ROWS(name) rows=std::max(rows,state.name##_storage.extent_int(0))
+        SYMMETRIX_MAX_EDGE_ROWS(edge_features);
+        SYMMETRIX_MAX_EDGE_ROWS(raw_weights);
+        SYMMETRIX_MAX_EDGE_ROWS(weights);
+        SYMMETRIX_MAX_EDGE_ROWS(edge_up);
+        SYMMETRIX_MAX_EDGE_ROWS(edge_messages);
+        SYMMETRIX_MAX_EDGE_ROWS(convolution_contributions);
+        SYMMETRIX_MAX_EDGE_ROWS(density_contributions);
+        SYMMETRIX_MAX_EDGE_ROWS(density_matrix);
+        SYMMETRIX_MAX_EDGE_ROWS(edge_message_adj);
+        SYMMETRIX_MAX_EDGE_ROWS(edge_up_adj);
+        SYMMETRIX_MAX_EDGE_ROWS(edge_harmonic_adj);
+        SYMMETRIX_MAX_EDGE_ROWS(weight_adj);
+        SYMMETRIX_MAX_EDGE_ROWS(raw_weight_adj);
+        SYMMETRIX_MAX_EDGE_ROWS(edge_feature_adj);
+        SYMMETRIX_MAX_EDGE_ROWS(density_raw_adj);
+        SYMMETRIX_MAX_EDGE_ROWS(density_feature_adj);
+        SYMMETRIX_MAX_EDGE_ROWS(density_raw);
+        SYMMETRIX_MAX_EDGE_ROWS(density_base);
+#undef SYMMETRIX_MAX_EDGE_ROWS
+        rows=std::max(rows,interactions[layer].convolution_weights.workspace_rows());
+        rows=std::max(rows,interactions[layer].density.workspace_rows());
+    }
+    return rows;
+}
+
+std::size_t MaceNonlinearKokkos::edge_workspace_bytes() const
+{
+    std::size_t bytes=0;
+    for(int layer=0;layer<static_cast<int>(states.size());++layer) {
+        const auto& state=states[layer];
+#define SYMMETRIX_ADD_EDGE_BYTES(name) bytes+=sizeof(double)*state.name##_storage.size()
+        SYMMETRIX_ADD_EDGE_BYTES(edge_features);
+        SYMMETRIX_ADD_EDGE_BYTES(raw_weights);
+        SYMMETRIX_ADD_EDGE_BYTES(weights);
+        SYMMETRIX_ADD_EDGE_BYTES(edge_up);
+        SYMMETRIX_ADD_EDGE_BYTES(edge_messages);
+        SYMMETRIX_ADD_EDGE_BYTES(convolution_contributions);
+        SYMMETRIX_ADD_EDGE_BYTES(density_contributions);
+        SYMMETRIX_ADD_EDGE_BYTES(density_matrix);
+        SYMMETRIX_ADD_EDGE_BYTES(edge_message_adj);
+        SYMMETRIX_ADD_EDGE_BYTES(edge_up_adj);
+        SYMMETRIX_ADD_EDGE_BYTES(edge_harmonic_adj);
+        SYMMETRIX_ADD_EDGE_BYTES(weight_adj);
+        SYMMETRIX_ADD_EDGE_BYTES(raw_weight_adj);
+        SYMMETRIX_ADD_EDGE_BYTES(edge_feature_adj);
+        SYMMETRIX_ADD_EDGE_BYTES(density_raw_adj);
+        SYMMETRIX_ADD_EDGE_BYTES(density_feature_adj);
+        SYMMETRIX_ADD_EDGE_BYTES(density_raw);
+        SYMMETRIX_ADD_EDGE_BYTES(density_base);
+#undef SYMMETRIX_ADD_EDGE_BYTES
+        bytes+=interactions[layer].convolution_weights.workspace_bytes();
+        bytes+=interactions[layer].density.workspace_bytes();
+    }
+    return bytes;
+}
+
 MaceNonlinearKokkos::MaceNonlinearKokkos(const nlohmann::json& data)
     :node_embedding(data.at("node_embedding"))
 {
@@ -184,6 +299,7 @@ MaceNonlinearKokkos::MaceNonlinearKokkos(const nlohmann::json& data)
                 &&mh1_fast_path;
 #endif
     states.resize(interactions.size());has_zbl=data.at("has_zbl").get<bool>();if(has_zbl){const auto& value=data.at("zbl");zbl=ZBLKokkos(value.at("a_exp").get<double>(),value.at("a_prefactor").get<double>(),tensor_values(value.at("c")),tensor_values(value.at("covalent_radii")),static_cast<int>(tensor_values(value.at("p")).at(0)));}
+    if(supports_streamed_edges())streamed_edges=MACEStreamedEdgesMode::all;
     spherical_harmonics_state=std::make_unique<SphericalHarmonicsState>(l_max);
 }
 
@@ -306,6 +422,116 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
         interaction.linear_res.evaluate(state.up,state.residual);
         interaction.skip.evaluate(features,state.skip);
 
+        ensure_view(state.messages,state.messages_storage,num_nodes,message_width);
+        ensure_view(state.densities,state.densities_storage,num_nodes);
+        auto messages=state.messages;
+        auto densities=state.densities;
+        const bool stream_layer=streams_layer(layer);
+        if(stream_layer) {
+            Kokkos::deep_copy(messages,0.0);
+            Kokkos::deep_copy(densities,0.0);
+            const int convolution_width=
+                interaction.convolution_source_contributions.extent(1);
+            const int density_width=interaction.density_source_contributions.extent(1);
+            const int weight_width=interaction.convolution.weight_size();
+            auto convolution_source=interaction.convolution_source_contributions;
+            auto convolution_target=interaction.convolution_target_contributions;
+            auto density_source=interaction.density_source_contributions;
+            auto density_target=interaction.density_target_contributions;
+            auto up=state.up;
+            for(int first_edge=0;first_edge<edges;first_edge+=streamed_edge_block_size) {
+                const int samples=std::min(streamed_edge_block_size,edges-first_edge);
+                ensure_view(state.convolution_contributions,
+                    state.convolution_contributions_storage,samples,convolution_width);
+                ensure_view(state.density_contributions,
+                    state.density_contributions_storage,samples,density_width);
+                auto convolution_contributions=state.convolution_contributions;
+                auto density_contributions=state.density_contributions;
+                Kokkos::parallel_for(
+                    "stream nonlinear edge conditioning",samples,
+                    KOKKOS_LAMBDA(int local_edge) {
+                        const int edge=first_edge+local_edge;
+                        const int source_type=neigh_types(edge);
+                        const int target_type=node_types(local_targets(edge));
+                        for(int column=0;column<convolution_width;++column)
+                            convolution_contributions(local_edge,column)=
+                                convolution_source(source_type,column)
+                                +convolution_target(target_type,column);
+                        for(int column=0;column<density_width;++column)
+                            density_contributions(local_edge,column)=
+                                density_source(source_type,column)
+                                +density_target(target_type,column);
+                    });
+                auto radial_block=Kokkos::subview(
+                    radial,std::make_pair(first_edge,first_edge+samples),Kokkos::ALL);
+                auto harmonics_block=Kokkos::subview(
+                    edge_harmonics,std::make_pair(first_edge,first_edge+samples),Kokkos::ALL);
+                ensure_view(state.raw_weights,state.raw_weights_storage,samples,weight_width);
+                ensure_view(state.weights,state.weights_storage,samples,weight_width);
+                interaction.convolution_weights.evaluate_conditioned(
+                    radial_block,state.convolution_contributions,state.raw_weights);
+                Kokkos::deep_copy(state.weights,state.raw_weights);
+                if(!apply_cutoff) {
+                    auto weights=state.weights;
+                    Kokkos::parallel_for(
+                        "stream nonlinear weight cutoff",weights.size(),
+                        KOKKOS_LAMBDA(int flat) {
+                            const int local_edge=flat/weights.extent(1);
+                            weights(local_edge,flat%weights.extent(1))
+                                *=local_cutoffs(first_edge+local_edge);
+                        });
+                }
+                ensure_view(state.edge_up,state.edge_up_storage,samples,up_width);
+                auto edge_up=state.edge_up;
+                Kokkos::parallel_for(
+                    "stream nonlinear gather edge up",
+                    Kokkos::MDRangePolicy<Kokkos::Rank<2>>(
+                        {0,0},{samples,up_width}),
+                    KOKKOS_LAMBDA(int local_edge,int k) {
+                        edge_up(local_edge,k)=up(neigh_indices(first_edge+local_edge),k);
+                    });
+                ensure_view(state.edge_messages,state.edge_messages_storage,
+                    samples,message_width);
+                interaction.convolution.evaluate(
+                    state.edge_up,harmonics_block,state.weights,state.edge_messages);
+                auto edge_messages=state.edge_messages;
+                Kokkos::parallel_for(
+                    "stream nonlinear gather messages",
+                    Kokkos::MDRangePolicy<Kokkos::Rank<2>>(
+                        {0,0},{num_nodes,message_width}),
+                    KOKKOS_LAMBDA(int node,int k) {
+                        const int begin=local_offsets(node)>first_edge
+                            ?local_offsets(node):first_edge;
+                        const int block_end=first_edge+samples;
+                        const int end=local_offsets(node+1)<block_end
+                            ?local_offsets(node+1):block_end;
+                        double value=0.0;
+                        for(int edge=begin;edge<end;++edge)
+                            value+=edge_messages(edge-first_edge,k);
+                        messages(node,k)+=value;
+                    });
+                ensure_view(state.density_matrix,state.density_matrix_storage,samples,1);
+                interaction.density.evaluate_conditioned(
+                    radial_block,state.density_contributions,state.density_matrix);
+                auto density_matrix=state.density_matrix;
+                Kokkos::parallel_for(
+                    "stream nonlinear gather density",num_nodes,
+                    KOKKOS_LAMBDA(int node) {
+                        const int begin=local_offsets(node)>first_edge
+                            ?local_offsets(node):first_edge;
+                        const int block_end=first_edge+samples;
+                        const int end=local_offsets(node+1)<block_end
+                            ?local_offsets(node+1):block_end;
+                        double value=0.0;
+                        for(int edge=begin;edge<end;++edge) {
+                            const double raw=density_matrix(edge-first_edge,0);
+                            value+=Kokkos::tanh(raw*raw)
+                                *(embed_cutoff?1.0:local_cutoffs(edge));
+                        }
+                        densities(node)+=value;
+                    });
+            }
+        } else {
         if(mh1_fast_path) {
             const int convolution_width=
                 interaction.convolution_source_contributions.extent(1);
@@ -383,8 +609,6 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
         ensure_view(state.edge_messages,state.edge_messages_storage,edges,message_width);
         interaction.convolution.evaluate(
             state.edge_up,edge_harmonics,state.weights,state.edge_messages);
-        ensure_view(state.messages,state.messages_storage,num_nodes,message_width);
-        auto messages=state.messages;
         auto edge_messages=state.edge_messages;
         Kokkos::parallel_for("nonlinear gather messages",
             Kokkos::MDRangePolicy<Kokkos::Rank<2>>({0,0},{num_nodes,message_width}),
@@ -398,14 +622,12 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
         ensure_view(state.density_matrix,state.density_matrix_storage,edges,1);
         ensure_view(state.density_raw,state.density_raw_storage,edges);
         ensure_view(state.density_base,state.density_base_storage,edges);
-        ensure_view(state.densities,state.densities_storage,num_nodes);
         if(mh1_fast_path)
             interaction.density.evaluate_conditioned(
                 radial,state.density_contributions,state.density_matrix);
         else interaction.density.evaluate(state.edge_features,state.density_matrix);
         auto density_raw=state.density_raw;
         auto density_base=state.density_base;
-        auto densities=state.densities;
         auto density_matrix=state.density_matrix;
         Kokkos::parallel_for("nonlinear density",edges,KOKKOS_LAMBDA(int edge) {
             const double raw=density_matrix(edge,0);
@@ -419,6 +641,7 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
                 value+=density_base(edge)*(embed_cutoff?1.0:local_cutoffs(edge));
             densities(node)=value;
         });
+        }
 
         ensure_view(state.linear_1_output,state.linear_1_output_storage,num_nodes,
             interaction.linear_1.output_dimension());
@@ -539,6 +762,170 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
         ensure_view(state.up_adj,state.up_adj_storage,num_nodes,up_width);
         Kokkos::deep_copy(state.up_adj,state.residual_up_adj);
 
+        const bool stream_layer=streams_layer(layer);
+        if(stream_layer) {
+            const int convolution_width=
+                interaction.convolution_source_contributions.extent(1);
+            const int density_width=interaction.density_source_contributions.extent(1);
+            const int weight_width=interaction.convolution.weight_size();
+            auto convolution_source=interaction.convolution_source_contributions;
+            auto convolution_target=interaction.convolution_target_contributions;
+            auto density_source=interaction.density_source_contributions;
+            auto density_target=interaction.density_target_contributions;
+            auto local_message_adj=state.message_adj;
+            auto local_up_adj=state.up_adj;
+            auto up=state.up;
+            for(int first_edge=0;first_edge<edges;first_edge+=streamed_edge_block_size) {
+                const int samples=std::min(streamed_edge_block_size,edges-first_edge);
+                ensure_view(state.convolution_contributions,
+                    state.convolution_contributions_storage,samples,convolution_width);
+                ensure_view(state.density_contributions,
+                    state.density_contributions_storage,samples,density_width);
+                auto convolution_contributions=state.convolution_contributions;
+                auto density_contributions=state.density_contributions;
+                Kokkos::parallel_for(
+                    "stream reverse nonlinear edge conditioning",samples,
+                    KOKKOS_LAMBDA(int local_edge) {
+                        const int edge=first_edge+local_edge;
+                        const int source_type=neigh_types(edge);
+                        const int target_type=node_types(local_targets(edge));
+                        for(int column=0;column<convolution_width;++column)
+                            convolution_contributions(local_edge,column)=
+                                convolution_source(source_type,column)
+                                +convolution_target(target_type,column);
+                        for(int column=0;column<density_width;++column)
+                            density_contributions(local_edge,column)=
+                                density_source(source_type,column)
+                                +density_target(target_type,column);
+                    });
+                auto radial_block=Kokkos::subview(
+                    radial,std::make_pair(first_edge,first_edge+samples),Kokkos::ALL);
+                auto harmonics_block=Kokkos::subview(
+                    edge_harmonics,std::make_pair(first_edge,first_edge+samples),Kokkos::ALL);
+                ensure_view(state.raw_weights,state.raw_weights_storage,samples,weight_width);
+                ensure_view(state.weights,state.weights_storage,samples,weight_width);
+                interaction.convolution_weights.evaluate_conditioned(
+                    radial_block,state.convolution_contributions,state.raw_weights);
+                Kokkos::deep_copy(state.weights,state.raw_weights);
+                if(!apply_cutoff) {
+                    auto weights=state.weights;
+                    Kokkos::parallel_for(
+                        "stream reverse nonlinear weight cutoff",weights.size(),
+                        KOKKOS_LAMBDA(int flat) {
+                            const int local_edge=flat/weights.extent(1);
+                            weights(local_edge,flat%weights.extent(1))
+                                *=local_cutoffs(first_edge+local_edge);
+                        });
+                }
+                ensure_view(state.edge_up,state.edge_up_storage,samples,up_width);
+                auto edge_up=state.edge_up;
+                Kokkos::parallel_for(
+                    "stream reverse nonlinear gather edge up",
+                    Kokkos::MDRangePolicy<Kokkos::Rank<2>>(
+                        {0,0},{samples,up_width}),
+                    KOKKOS_LAMBDA(int local_edge,int k) {
+                        edge_up(local_edge,k)=up(neigh_indices(first_edge+local_edge),k);
+                    });
+                ensure_view(state.edge_message_adj,state.edge_message_adj_storage,
+                    samples,message_width);
+                auto edge_message_adj=state.edge_message_adj;
+                Kokkos::parallel_for(
+                    "stream gather edge message adjoint",
+                    Kokkos::MDRangePolicy<Kokkos::Rank<2>>(
+                        {0,0},{samples,message_width}),
+                    KOKKOS_LAMBDA(int local_edge,int k) {
+                        edge_message_adj(local_edge,k)=
+                            local_message_adj(local_targets(first_edge+local_edge),k);
+                    });
+                ensure_view(state.edge_up_adj,state.edge_up_adj_storage,samples,up_width);
+                ensure_view(state.edge_harmonic_adj,state.edge_harmonic_adj_storage,
+                    samples,num_lm);
+                ensure_view(state.weight_adj,state.weight_adj_storage,samples,weight_width);
+                interaction.convolution.reverse(
+                    state.edge_up,harmonics_block,state.weights,state.edge_message_adj,
+                    state.edge_up_adj,state.edge_harmonic_adj,state.weight_adj);
+                auto edge_up_adj=state.edge_up_adj;
+                auto edge_harmonic_adj=state.edge_harmonic_adj;
+                Kokkos::parallel_for(
+                    "stream scatter edge up adjoint",
+                    Kokkos::MDRangePolicy<Kokkos::Rank<2>>(
+                        {0,0},{samples,up_width}),
+                    KOKKOS_LAMBDA(int local_edge,int k) {
+                        Kokkos::atomic_add(
+                            &local_up_adj(neigh_indices(first_edge+local_edge),k),
+                            edge_up_adj(local_edge,k));
+                    });
+                Kokkos::parallel_for(
+                    "stream sum harmonic adjoints",
+                    Kokkos::MDRangePolicy<Kokkos::Rank<2>>(
+                        {0,0},{samples,num_lm}),
+                    KOKKOS_LAMBDA(int local_edge,int lm) {
+                        harmonic_adjoint_values(first_edge+local_edge,lm)
+                            +=edge_harmonic_adj(local_edge,lm);
+                    });
+                ensure_view(state.raw_weight_adj,state.raw_weight_adj_storage,
+                    samples,weight_width);
+                auto raw_weight_adj=state.raw_weight_adj;
+                auto weight_adj=state.weight_adj;
+                auto raw_weights=state.raw_weights;
+                if(!apply_cutoff) {
+                    Kokkos::parallel_for(
+                        "stream reverse convolution cutoff",samples,
+                        KOKKOS_LAMBDA(int local_edge) {
+                            const int edge=first_edge+local_edge;
+                            double cutoff_value=0.0;
+                            for(int k=0;k<weight_width;++k) {
+                                cutoff_value+=weight_adj(local_edge,k)
+                                    *raw_weights(local_edge,k);
+                                raw_weight_adj(local_edge,k)=
+                                    weight_adj(local_edge,k)*local_cutoffs(edge);
+                            }
+                            cutoff_adjoint_values(edge)+=cutoff_value;
+                        });
+                } else Kokkos::deep_copy(raw_weight_adj,weight_adj);
+                ensure_view(state.edge_feature_adj,state.edge_feature_adj_storage,
+                    samples,num_bessel);
+                interaction.convolution_weights.reverse_from_tape(
+                    state.raw_weight_adj,state.edge_feature_adj);
+
+                ensure_view(state.density_matrix,state.density_matrix_storage,samples,1);
+                interaction.density.evaluate_conditioned(
+                    radial_block,state.density_contributions,state.density_matrix);
+                ensure_view(state.density_raw_adj,state.density_raw_adj_storage,samples,1);
+                auto density_matrix=state.density_matrix;
+                auto density_raw_adj=state.density_raw_adj;
+                Kokkos::parallel_for(
+                    "stream reverse density envelope",samples,
+                    KOKKOS_LAMBDA(int local_edge) {
+                        const int edge=first_edge+local_edge;
+                        const double raw=density_matrix(local_edge,0);
+                        const double base=Kokkos::tanh(raw*raw);
+                        double value=density_adj(local_targets(edge))
+                            *(1.0-base*base)*2.0*raw;
+                        if(!embed_cutoff) {
+                            cutoff_adjoint_values(edge)+=
+                                density_adj(local_targets(edge))*base;
+                            value*=local_cutoffs(edge);
+                        }
+                        density_raw_adj(local_edge,0)=value;
+                    });
+                ensure_view(state.density_feature_adj,
+                    state.density_feature_adj_storage,samples,num_bessel);
+                interaction.density.reverse_from_tape(
+                    state.density_raw_adj,state.density_feature_adj);
+                auto edge_feature_adj=state.edge_feature_adj;
+                auto density_feature_adj=state.density_feature_adj;
+                Kokkos::parallel_for(
+                    "stream sum radial adjoints",
+                    Kokkos::MDRangePolicy<Kokkos::Rank<2>>(
+                        {0,0},{samples,num_bessel}),
+                    KOKKOS_LAMBDA(int local_edge,int k) {
+                        radial_adjoint_values(first_edge+local_edge,k)
+                            +=edge_feature_adj(local_edge,k)
+                            +density_feature_adj(local_edge,k);
+                    });
+            }
+        } else {
         ensure_view(state.edge_message_adj,state.edge_message_adj_storage,edges,
             message_width);
         auto edge_message_adj=state.edge_message_adj;
@@ -622,6 +1009,7 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
                 radial_adjoint_values(edge,k)+=edge_feature_adj(edge,k)
                     +density_feature_adj(edge,k);
             });
+        }
 
         ensure_view(state.up_input_adj,state.up_input_adj_storage,num_nodes,input_width);
         ensure_view(state.skip_input_adj,state.skip_input_adj_storage,num_nodes,input_width);

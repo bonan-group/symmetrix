@@ -264,6 +264,26 @@ MaceNonlinear::MaceNonlinear(const std::string& filename)
     : MaceNonlinear(load_model_json(filename))
 {}
 
+std::string MaceNonlinear::streamed_edges_mode() const
+{
+    return mace_streamed_edges_mode_name(streamed_edges);
+}
+
+void MaceNonlinear::set_streamed_edges(std::string mode)
+{
+    const auto requested = parse_mace_streamed_edges_mode(mode);
+    if (requested != MACEStreamedEdgesMode::legacy && !supports_streamed_edges())
+        throw std::invalid_argument(
+            "Streamed edges require the published MACE-MH-1 fast-path architecture.");
+    streamed_edges = requested;
+}
+
+bool MaceNonlinear::streams_layer(int layer) const
+{
+    return streamed_edges == MACEStreamedEdgesMode::all
+        || (streamed_edges == MACEStreamedEdgesMode::r1 && layer == 1);
+}
+
 MaceNonlinear::MaceNonlinear(const nlohmann::json& data)
     : node_embedding(data.at("node_embedding"))
 {
@@ -317,6 +337,8 @@ MaceNonlinear::MaceNonlinear(const nlohmann::json& data)
         for (auto& interaction : interactions)
             interaction.prepare_pair_conditioning(
                 bessel_weights.size(), model_num_elements, model_indices);
+    if (supports_streamed_edges())
+        streamed_edges = MACEStreamedEdgesMode::all;
     has_zbl = data.at("has_zbl").get<bool>();
     if (has_zbl) {
         const auto& value = data.at("zbl");
@@ -463,6 +485,9 @@ void MaceNonlinear::compute_node_energies_forces(
     }
     if (edge_count != r.size())
         throw std::invalid_argument("MACE_Nonlinear neighbor counts do not match the edge arrays.");
+    last_edge_workspace_rows = streamed_edges == MACEStreamedEdgesMode::all
+        ? std::min(streamed_edge_block_size,static_cast<int>(r.size()))
+        : static_cast<int>(r.size());
     for (std::size_t edge=0; edge<r.size(); ++edge) {
         if (neigh_indices[edge] < 0 || neigh_indices[edge] >= num_nodes
             || neigh_types[edge] < 0
@@ -486,9 +511,11 @@ void MaceNonlinear::compute_node_energies_forces(
     std::vector<double> cutoffs(r.size());
     const int radial_width = static_cast<int>(bessel_weights.size());
     std::vector<double> radial(r.size()*radial_width);
+    std::vector<int> edge_targets(r.size());
     int edge = 0;
     for (int target=0; target<num_nodes; ++target)
         for (int local=0; local<num_neigh[target]; ++local, ++edge) {
+            edge_targets[edge] = target;
             cutoffs[edge] = cutoff(r[edge]);
             const auto values = radial_features(
                 r[edge], neigh_types[edge], node_types[target]);
@@ -496,6 +523,46 @@ void MaceNonlinear::compute_node_energies_forces(
                 values.begin(), values.end(),
                 radial.begin()+static_cast<std::size_t>(edge)*radial_width);
         }
+    auto prepare_conditioned_block = [&] (
+        const Interaction& interaction, int first_edge, int samples,
+        std::vector<double>& radial_block,
+        std::vector<double>& convolution_contributions,
+        std::vector<double>& density_contributions,
+        AffineMLPBatchTape& convolution_tape,
+        AffineMLPBatchTape& density_tape) {
+        const int convolution_width =
+            interaction.convolution_source_contributions.front().size();
+        const int density_width =
+            interaction.density_source_contributions.front().size();
+        radial_block.assign(
+            radial.begin()+static_cast<std::size_t>(first_edge)*radial_width,
+            radial.begin()+static_cast<std::size_t>(first_edge+samples)*radial_width);
+        convolution_contributions.resize(
+            static_cast<std::size_t>(samples)*convolution_width);
+        density_contributions.resize(static_cast<std::size_t>(samples)*density_width);
+        for (int local_edge=0; local_edge<samples; ++local_edge) {
+            const int edge_index = first_edge+local_edge;
+            const int source_type = node_types[neigh_indices[edge_index]];
+            const int target_type = node_types[edge_targets[edge_index]];
+            interaction.validate_conditioned_type(source_type);
+            interaction.validate_conditioned_type(target_type);
+            for (int index=0; index<convolution_width; ++index)
+                convolution_contributions[
+                    static_cast<std::size_t>(local_edge)*convolution_width+index]
+                    = interaction.convolution_source_contributions[source_type][index]
+                    + interaction.convolution_target_contributions[target_type][index];
+            for (int index=0; index<density_width; ++index)
+                density_contributions[
+                    static_cast<std::size_t>(local_edge)*density_width+index]
+                    = interaction.density_source_contributions[source_type][index]
+                    + interaction.density_target_contributions[target_type][index];
+        }
+        interaction.convolution_weights.evaluate_conditioned_batch(
+            radial_block, samples, radial_width,
+            convolution_contributions, convolution_tape);
+        interaction.density.evaluate_conditioned_batch(
+            radial_block, samples, radial_width, density_contributions, density_tape);
+    };
     struct LayerState {
         std::vector<double> input, up, residual, skip, messages, linear_1_output;
         std::vector<double> pre_gate, interaction_output, output, densities;
@@ -531,14 +598,17 @@ void MaceNonlinear::compute_node_energies_forces(
         }
         state.messages.assign(num_nodes*message_width,0.0);
         state.densities.assign(num_nodes,0.0);
+        const bool stream_layer = streams_layer(layer);
         if (!mh1_fast_path) {
             state.edge_features.resize(r.size());
             state.raw_weights.resize(r.size());
         }
-        state.weights.resize(r.size());
-        state.density_raw.resize(r.size());
-        state.density_base.resize(r.size());
-        if (mh1_fast_path) {
+        if (!stream_layer) {
+            state.weights.resize(r.size());
+            state.density_raw.resize(r.size());
+            state.density_base.resize(r.size());
+        }
+        if (mh1_fast_path && !stream_layer) {
             const int convolution_conditioning_width =
                 interaction.convolution_source_contributions.front().size();
             const int density_conditioning_width =
@@ -572,9 +642,10 @@ void MaceNonlinear::compute_node_energies_forces(
                 radial, static_cast<int>(r.size()), radial_width,
                 density_contributions, state.density_tape);
         }
-        edge = 0;
-        for (int target=0; target<num_nodes; ++target)
-            for (int local=0; local<num_neigh[target]; ++local, ++edge) {
+        if (!stream_layer) {
+            edge = 0;
+            for (int target=0; target<num_nodes; ++target)
+                for (int local=0; local<num_neigh[target]; ++local, ++edge) {
                 const int source = neigh_indices[edge];
                 std::vector<double> edge_features;
                 if (!mh1_fast_path) {
@@ -611,8 +682,49 @@ void MaceNonlinear::compute_node_energies_forces(
                 double density_value = std::tanh(density_raw*density_raw);
                 state.density_base[edge] = density_value;
                 if (!apply_cutoff) density_value *= cutoffs[edge];
-                state.densities[target] += density_value;
+                    state.densities[target] += density_value;
+                }
+        } else {
+            for (int first_edge=0; first_edge<static_cast<int>(r.size());
+                 first_edge+=streamed_edge_block_size) {
+                const int samples = std::min(
+                    streamed_edge_block_size,
+                    static_cast<int>(r.size())-first_edge);
+                std::vector<double> radial_block;
+                std::vector<double> convolution_contributions;
+                std::vector<double> density_contributions;
+                AffineMLPBatchTape convolution_tape;
+                AffineMLPBatchTape density_tape;
+                prepare_conditioned_block(
+                    interaction, first_edge, samples, radial_block,
+                    convolution_contributions, density_contributions,
+                    convolution_tape, density_tape);
+                const auto& raw_weights = convolution_tape.values.back();
+                const auto& density_raw_values = density_tape.values.back();
+                const int weight_width = interaction.convolution_weights.output_size();
+                for (int local_edge=0; local_edge<samples; ++local_edge) {
+                    const int edge_index = first_edge+local_edge;
+                    const int source = neigh_indices[edge_index];
+                    const int target = edge_targets[edge_index];
+                    const auto first = raw_weights.begin()
+                        +static_cast<std::size_t>(local_edge)*weight_width;
+                    std::vector<double> weights(first,first+weight_width);
+                    if (!apply_cutoff)
+                        for (double& value : weights) value *= cutoffs[edge_index];
+                    const auto up_source = node_slice(state.up,source,up_width);
+                    const auto harmonics = std::vector<double>(
+                        spherical_harmonics.begin()+edge_index*num_lm,
+                        spherical_harmonics.begin()+(edge_index+1)*num_lm);
+                    add_node_slice(
+                        state.messages,target,
+                        interaction.convolution.evaluate(up_source,harmonics,weights));
+                    const double raw = density_raw_values[local_edge];
+                    double density_value = std::tanh(raw*raw);
+                    if (!apply_cutoff) density_value *= cutoffs[edge_index];
+                    state.densities[target] += density_value;
+                }
             }
+        }
         interaction.linear_1.evaluate_batch(
             state.messages, num_nodes, state.linear_1_output, linear_batch_workspace);
         state.pre_gate.resize(state.linear_1_output.size());
@@ -705,16 +817,18 @@ void MaceNonlinear::compute_node_energies_forces(
         std::vector<double> up_adj;
         interaction.linear_res.reverse_batch(
             residual_adj, num_nodes, up_adj, linear_batch_workspace);
-        std::vector<double> convolution_output_adjoints;
-        std::vector<double> density_output_adjoints;
-        if (mh1_fast_path) {
-            convolution_output_adjoints.assign(
-                r.size()*interaction.convolution_weights.output_size(), 0.0);
-            density_output_adjoints.assign(r.size(), 0.0);
-        }
-        edge = 0;
-        for (int target=0; target<num_nodes; ++target)
-            for (int local=0; local<num_neigh[target]; ++local, ++edge) {
+        const bool stream_layer = streams_layer(layer);
+        if (!stream_layer) {
+            std::vector<double> convolution_output_adjoints;
+            std::vector<double> density_output_adjoints;
+            if (mh1_fast_path) {
+                convolution_output_adjoints.assign(
+                    r.size()*interaction.convolution_weights.output_size(), 0.0);
+                density_output_adjoints.assign(r.size(), 0.0);
+            }
+            edge = 0;
+            for (int target=0; target<num_nodes; ++target)
+                for (int local=0; local<num_neigh[target]; ++local, ++edge) {
                 const int source = neigh_indices[edge];
                 const auto up_source = node_slice(state.up,source,up_width);
                 const auto harmonics = std::vector<double>(
@@ -760,21 +874,100 @@ void MaceNonlinear::compute_node_energies_forces(
                     for (int index=0; index<radial_width; ++index)
                         radial_adjoints[edge][index] += edge_feature_adj[index];
                 }
+                }
+            if (mh1_fast_path) {
+                std::vector<double> convolution_input_adjoints;
+                interaction.convolution_weights.reverse_conditioned_batch(
+                    convolution_output_adjoints, state.convolution_tape,
+                    convolution_input_adjoints, affine_batch_workspace);
+                std::vector<double> density_input_adjoints;
+                interaction.density.reverse_conditioned_batch(
+                    density_output_adjoints, state.density_tape,
+                    density_input_adjoints, affine_batch_workspace);
+                for (std::size_t edge_index=0; edge_index<r.size(); ++edge_index)
+                    for (int index=0; index<radial_width; ++index)
+                        radial_adjoints[edge_index][index]
+                            += convolution_input_adjoints[edge_index*radial_width+index]
+                            + density_input_adjoints[edge_index*radial_width+index];
             }
-        if (mh1_fast_path) {
-            std::vector<double> convolution_input_adjoints;
-            interaction.convolution_weights.reverse_conditioned_batch(
-                convolution_output_adjoints, state.convolution_tape,
-                convolution_input_adjoints, affine_batch_workspace);
-            std::vector<double> density_input_adjoints;
-            interaction.density.reverse_conditioned_batch(
-                density_output_adjoints, state.density_tape,
-                density_input_adjoints, affine_batch_workspace);
-            for (std::size_t edge_index=0; edge_index<r.size(); ++edge_index)
-                for (int index=0; index<radial_width; ++index)
-                    radial_adjoints[edge_index][index]
-                        += convolution_input_adjoints[edge_index*radial_width+index]
-                        + density_input_adjoints[edge_index*radial_width+index];
+        } else {
+            const int weight_width = interaction.convolution_weights.output_size();
+            for (int first_edge=0; first_edge<static_cast<int>(r.size());
+                 first_edge+=streamed_edge_block_size) {
+                const int samples = std::min(
+                    streamed_edge_block_size,
+                    static_cast<int>(r.size())-first_edge);
+                std::vector<double> radial_block;
+                std::vector<double> convolution_contributions;
+                std::vector<double> density_contributions;
+                AffineMLPBatchTape convolution_tape;
+                AffineMLPBatchTape density_tape;
+                prepare_conditioned_block(
+                    interaction, first_edge, samples, radial_block,
+                    convolution_contributions, density_contributions,
+                    convolution_tape, density_tape);
+                const auto& raw_weights = convolution_tape.values.back();
+                const auto& density_raw_values = density_tape.values.back();
+                std::vector<double> convolution_output_adjoints(
+                    static_cast<std::size_t>(samples)*weight_width,0.0);
+                std::vector<double> density_output_adjoints(samples,0.0);
+                for (int local_edge=0; local_edge<samples; ++local_edge) {
+                    const int edge_index = first_edge+local_edge;
+                    const int source = neigh_indices[edge_index];
+                    const int target = edge_targets[edge_index];
+                    const auto raw_first = raw_weights.begin()
+                        +static_cast<std::size_t>(local_edge)*weight_width;
+                    std::vector<double> weights(raw_first,raw_first+weight_width);
+                    if (!apply_cutoff)
+                        for (double& value : weights) value *= cutoffs[edge_index];
+                    const auto up_source = node_slice(state.up,source,up_width);
+                    const auto harmonics = std::vector<double>(
+                        spherical_harmonics.begin()+edge_index*num_lm,
+                        spherical_harmonics.begin()+(edge_index+1)*num_lm);
+                    std::vector<double> up_source_adj,harmonics_adj,weights_adj;
+                    interaction.convolution.reverse(
+                        up_source,harmonics,weights,
+                        node_slice(message_adj,target,message_width),
+                        up_source_adj,harmonics_adj,weights_adj);
+                    add_node_slice(up_adj,source,up_source_adj);
+                    for (int lm=0; lm<num_lm; ++lm)
+                        harmonic_adjoints[edge_index*num_lm+lm] += harmonics_adj[lm];
+                    if (!apply_cutoff)
+                        for (int index=0; index<weight_width; ++index) {
+                            cutoff_adjoints[edge_index]
+                                += weights_adj[index]*raw_first[index];
+                            weights_adj[index] *= cutoffs[edge_index];
+                        }
+                    const double raw = density_raw_values[local_edge];
+                    const double density_base = std::tanh(raw*raw);
+                    double density_raw_adj = density_adj[target]
+                        *(1.0-density_base*density_base)*2.0*raw;
+                    if (!apply_cutoff) {
+                        cutoff_adjoints[edge_index] += density_adj[target]*density_base;
+                        density_raw_adj *= cutoffs[edge_index];
+                    }
+                    std::copy(
+                        weights_adj.begin(), weights_adj.end(),
+                        convolution_output_adjoints.begin()
+                            +static_cast<std::size_t>(local_edge)*weight_width);
+                    density_output_adjoints[local_edge] = density_raw_adj;
+                }
+                std::vector<double> convolution_input_adjoints;
+                interaction.convolution_weights.reverse_conditioned_batch(
+                    convolution_output_adjoints, convolution_tape,
+                    convolution_input_adjoints, affine_batch_workspace);
+                std::vector<double> density_input_adjoints;
+                interaction.density.reverse_conditioned_batch(
+                    density_output_adjoints, density_tape,
+                    density_input_adjoints, affine_batch_workspace);
+                for (int local_edge=0; local_edge<samples; ++local_edge)
+                    for (int index=0; index<radial_width; ++index)
+                        radial_adjoints[first_edge+local_edge][index]
+                            += convolution_input_adjoints[
+                                static_cast<std::size_t>(local_edge)*radial_width+index]
+                            + density_input_adjoints[
+                                static_cast<std::size_t>(local_edge)*radial_width+index];
+            }
         }
         std::vector<double> input_adj(state.input.size(),0.0);
         interaction.linear_up.reverse_batch(

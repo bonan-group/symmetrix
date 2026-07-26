@@ -1,3 +1,4 @@
+import gc
 import json
 import os
 from pathlib import Path
@@ -149,6 +150,105 @@ def test_mh1_subset_schema_preserves_dynamic_architecture(mh1_si_artifact):
     ) >= 3
 
 
+@pytest.mark.parametrize("use_kokkos", [False, True])
+def test_mh1_streamed_edge_modes_agree(mh1_si_artifact, use_kokkos):
+    _, model_path = mh1_si_artifact
+    if use_kokkos and not hasattr(native_symmetrix, "MACENonlinearKokkos"):
+        pytest.skip("Symmetrix was built without Kokkos support")
+    atoms = bulk("Si", "diamond", a=5.43, cubic=True).repeat((2, 1, 1))
+    properties = ["energy", "energies", "forces", "stress"]
+    results = {}
+    workspace_rows = {}
+    workspace_bytes = {}
+    edge_count = None
+    for mode in ("legacy", "r1", "all"):
+        calculator = Symmetrix(
+            model_path,
+            use_kokkos=use_kokkos,
+            dtype="float64",
+            streamed_edges=mode,
+        )
+        assert calculator.evaluator.uses_mh1_fast_path
+        assert calculator.evaluator.supports_streamed_edges
+        assert calculator.evaluator.streamed_edges_mode == mode
+        calculator.calculate(atoms.copy(), properties=properties)
+        if edge_count is None:
+            edge_count = len(calculator._mace_inputs(atoms)[6])
+        workspace_rows[mode] = calculator.evaluator.edge_workspace_rows
+        if hasattr(calculator.evaluator, "edge_workspace_bytes"):
+            workspace_bytes[mode] = calculator.evaluator.edge_workspace_bytes
+        results[mode] = {
+            name: np.array(calculator.results[name], copy=True)
+            for name in properties
+        }
+    for mode in ("r1", "all"):
+        for name in properties:
+            assert np.allclose(results[mode][name], results["legacy"][name], atol=2e-12)
+    assert workspace_rows["legacy"] == edge_count
+    assert workspace_rows["r1"] == edge_count
+    assert workspace_rows["all"] <= min(edge_count, 1024)
+    if workspace_bytes:
+        assert workspace_bytes["all"] < workspace_bytes["legacy"]
+
+    automatic = Symmetrix(model_path, use_kokkos=use_kokkos, dtype="float64")
+    assert automatic.streamed_edges == "all"
+
+
+def test_mh1_kokkos_mode_switch_releases_full_edge_workspaces(mh1_si_artifact):
+    if not hasattr(native_symmetrix, "MACENonlinearKokkos"):
+        pytest.skip("Symmetrix was built without Kokkos support")
+    _, model_path = mh1_si_artifact
+    atoms = bulk("Si", "diamond", a=5.43).repeat((3, 3, 3))
+    calculator = Symmetrix(
+        model_path,
+        use_kokkos=True,
+        dtype="float64",
+        streamed_edges="legacy",
+    )
+    calculator.calculate(atoms, properties=["energy", "forces"])
+    edge_count = len(calculator._mace_inputs(atoms)[6])
+    legacy_bytes = calculator.evaluator.edge_workspace_bytes
+    assert calculator.evaluator.edge_workspace_rows == edge_count
+
+    calculator.evaluator.set_streamed_edges("all")
+    calculator.calculate(atoms, properties=["energy", "forces"])
+    assert calculator.evaluator.edge_workspace_rows <= min(edge_count, 1024)
+    assert calculator.evaluator.edge_workspace_bytes < legacy_bytes
+
+
+def test_mh1_cuda_generic_fallback_matches_native(mh1_si_artifact):
+    if not hasattr(native_symmetrix, "MACENonlinearKokkos"):
+        pytest.skip("Symmetrix was built without Kokkos support")
+    if native_symmetrix._kokkos_default_execution_space() != "Cuda":
+        pytest.skip("CUDA-only nonlinear fallback regression")
+    _, model_path = mh1_si_artifact
+    atoms = Atoms(
+        "Si3",
+        positions=[[0.0, 0.0, 0.0], [2.2, 0.1, 0.0], [0.4, 2.1, 0.3]],
+        cell=[8.0, 8.0, 8.0],
+        pbc=False,
+    )
+    properties = ["energy", "energies", "forces", "stress"]
+    reference = Symmetrix(
+        model_path,
+        use_kokkos=False,
+        dtype="float64",
+        streamed_edges="legacy",
+    )
+    cuda = Symmetrix(model_path, use_kokkos=True, dtype="float64")
+    assert not cuda.evaluator.uses_mh1_fast_path
+    assert not cuda.evaluator.supports_streamed_edges
+    assert cuda.streamed_edges == "legacy"
+    reference.calculate(atoms, properties=properties)
+    cuda.calculate(atoms, properties=properties)
+    for name in properties:
+        np.testing.assert_allclose(
+            cuda.results[name], reference.results[name], rtol=0.0, atol=2e-11
+        )
+    del cuda, reference
+    gc.collect()
+
+
 @pytest.mark.parametrize("head", MH1_HEADS)
 def test_mh1_extracts_and_evaluates_each_head(head, tmp_path):
     data = extract_mace_data(_mh1_model_path(), species=[14], head=head)
@@ -271,6 +371,10 @@ def test_mh1_fast_path_requires_exact_architecture(
     )
     evaluator = evaluator_type(str(path))
     assert not evaluator.uses_mh1_fast_path
+    assert not evaluator.supports_streamed_edges
+    assert evaluator.streamed_edges_mode == "legacy"
+    with pytest.raises(ValueError, match="published MACE-MH-1"):
+        evaluator.set_streamed_edges("all")
     atoms = Atoms(
         "Si2",
         positions=[[0.0, 0.0, 0.0], [2.2, 0.1, 0.0]],

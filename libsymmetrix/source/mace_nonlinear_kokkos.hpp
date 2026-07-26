@@ -7,6 +7,7 @@
 #include "affine_mlp_kokkos.hpp"
 #include "e3nn_kokkos.hpp"
 #include "e3nn_product_kokkos.hpp"
+#include "mace_streamed_edges.hpp"
 #include "zbl_kokkos.hpp"
 
 class MaceNonlinearKokkos {
@@ -16,6 +17,11 @@ public:
     double r_cut=0.0;
     bool has_field_coupling=false;
     bool uses_mh1_fast_path() const { return mh1_fast_path; }
+    bool supports_streamed_edges() const { return mh1_fast_path; }
+    std::string streamed_edges_mode() const;
+    void set_streamed_edges(std::string mode);
+    int edge_workspace_rows() const;
+    std::size_t edge_workspace_bytes() const;
     std::vector<int> atomic_numbers_host;
     Kokkos::View<int*> atomic_numbers;
     Kokkos::View<double*> atomic_energies,node_energies,node_forces;
@@ -33,8 +39,8 @@ public:
     struct Gate {
         int scalar_size=0,gate_size=0,gated_size=0,output_size=0;
         std::vector<IrrepBlock> scalar_blocks,gated_blocks;
-        Kokkos::View<double*> scalar_constants;
-        Kokkos::View<double*> gate_constants;
+        std::vector<double> scalar_constants;
+        std::vector<double> gate_constants;
         explicit Gate(const nlohmann::json& data);
         void evaluate(Kokkos::View<const double**,Kokkos::LayoutRight> input,
                       Kokkos::View<double**,Kokkos::LayoutRight> output) const;
@@ -103,6 +109,10 @@ private:
     };
     int l_max=0,num_lm=0,model_num_elements=0,cutoff_power=0,num_bessel=0;
     bool apply_cutoff=false,has_agnesi=false,has_zbl=false,mh1_fast_path=false;
+    MACEStreamedEdgesMode streamed_edges=MACEStreamedEdgesMode::legacy;
+    static constexpr int streamed_edge_block_size=1024;
+    bool streams_layer(int layer) const;
+    void release_layer_edge_workspace(int layer);
     double radial_prefactor=0.0,agnesi_a=0.0,agnesi_q=0.0,agnesi_p=0.0,scale=1.0,shift=0.0;
     Kokkos::View<int*> model_indices,model_atomic_numbers;
     Kokkos::View<double*> bessel_weights,covalent_radii,cutoffs,Y,Y_grad,xyz_shuffled,Y_grad_shuffled;

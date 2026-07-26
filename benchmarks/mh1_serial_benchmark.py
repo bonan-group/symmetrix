@@ -134,20 +134,35 @@ def _current_rss_bytes():
     return resident_pages * os.sysconf("SC_PAGE_SIZE")
 
 
-def _samples_summary(samples):
+def _samples_summary(samples, atom_count):
     return {
         "median_ms": statistics.median(samples),
+        "median_ms_per_atom": statistics.median(samples) / atom_count,
         "min_ms": min(samples),
+        "min_ms_per_atom": min(samples) / atom_count,
         "max_ms": max(samples),
+        "max_ms_per_atom": max(samples) / atom_count,
         "samples_ms": samples,
     }
 
 
-def _benchmark(calculator, atoms, repeats):
+def _peak_rss_bytes():
+    status = pathlib.Path("/proc/self/status")
+    if not status.is_file():
+        return None
+    for line in status.read_text().splitlines():
+        if line.startswith("VmHWM:"):
+            return int(line.split()[1]) * 1024
+    return None
+
+
+def _benchmark(calculator, atoms, warmups, repeats, include_ase):
     inputs = calculator._mace_inputs(atoms)
     native_args = (*inputs[:5], inputs[5].flatten(), inputs[6])
 
-    calculator.evaluator.compute_node_energies_forces(*native_args)
+    rss_before = _current_rss_bytes()
+    for _ in range(warmups):
+        calculator.evaluator.compute_node_energies_forces(*native_args)
     evaluator_samples = []
     for _ in range(repeats):
         start = time.perf_counter()
@@ -155,18 +170,25 @@ def _benchmark(calculator, atoms, repeats):
         evaluator_samples.append(1000.0 * (time.perf_counter() - start))
     evaluator_results = calculator._collect_mace_results(atoms, inputs)
 
-    calculator.calculate(atoms.copy(), properties=["energy", "forces"])
     ase_samples = []
-    for _ in range(repeats):
-        start = time.perf_counter()
-        calculator.calculate(atoms.copy(), properties=["energy", "forces"])
-        ase_samples.append(1000.0 * (time.perf_counter() - start))
+    if include_ase:
+        for _ in range(warmups):
+            calculator.calculate(atoms.copy(), properties=["energy", "forces"])
+        for _ in range(repeats):
+            start = time.perf_counter()
+            calculator.calculate(atoms.copy(), properties=["energy", "forces"])
+            ase_samples.append(1000.0 * (time.perf_counter() - start))
 
     return {
         "atoms": len(atoms),
         "directed_edges": len(inputs[6]),
-        "evaluator": _samples_summary(evaluator_samples),
-        "ase": _samples_summary(ase_samples),
+        "evaluator": _samples_summary(evaluator_samples, len(atoms)),
+        "ase": _samples_summary(ase_samples, len(atoms)) if ase_samples else None,
+        "rss_before_mib": rss_before / 2**20,
+        "rss_after_mib": _current_rss_bytes() / 2**20,
+        "peak_rss_mib": (
+            _peak_rss_bytes() / 2**20 if _peak_rss_bytes() is not None else None
+        ),
         "energy_eV": float(evaluator_results["energy"]),
         "force_l2_eV_per_A": float(np.linalg.norm(evaluator_results["forces"])),
         "force_sum_eV_per_A": np.sum(evaluator_results["forces"], axis=0).tolist(),
@@ -230,7 +252,18 @@ def main():
         help="Comma-separated CPU affinity for Kokkos threads",
     )
     parser.add_argument("--sizes", default="1,2,3")
+    parser.add_argument(
+        "--atom-counts",
+        help="Comma-separated exact AlN atom counts from 256,864,4000",
+    )
+    parser.add_argument(
+        "--streamed-edges",
+        choices=("legacy", "r1", "all"),
+        default="all",
+    )
+    parser.add_argument("--warmups", type=int, default=3)
     parser.add_argument("--repeats", type=int, default=5)
+    parser.add_argument("--evaluator-only", action="store_true")
     parser.add_argument(
         "--lifecycle-sizes",
         help="Comma-separated supercell sizes to alternate for RSS measurement",
@@ -239,8 +272,10 @@ def main():
     parser.add_argument("--max-lifecycle-growth-mib", type=float)
     parser.add_argument("--output", type=pathlib.Path)
     args = parser.parse_args()
-    if args.repeats < 1:
-        parser.error("--repeats must be positive")
+    if args.warmups < 0 or args.repeats < 1:
+        parser.error("--warmups must be nonnegative and --repeats must be positive")
+    if args.atom_counts is not None and args.sizes != "1,2,3":
+        parser.error("--atom-counts and an explicit --sizes are mutually exclusive")
     if args.lifecycle_cycles < 1:
         parser.error("--lifecycle-cycles must be positive")
     if args.max_lifecycle_growth_mib is not None and args.lifecycle_sizes is None:
@@ -279,7 +314,12 @@ def main():
             )
 
     use_kokkos = args.backend == "kokkos"
-    calculator = Symmetrix(args.model, use_kokkos=use_kokkos, dtype="float64")
+    calculator = Symmetrix(
+        args.model,
+        use_kokkos=use_kokkos,
+        dtype="float64",
+        streamed_edges=args.streamed_edges,
+    )
     if not getattr(calculator.evaluator, "uses_mh1_fast_path", False):
         raise RuntimeError(
             f"Model does not match the specialized MACE-MH-1 {args.backend} CPU architecture"
@@ -301,6 +341,9 @@ def main():
         "cpu_affinity": sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None,
         "thread_affinities": _thread_affinities(),
         "backend": args.backend,
+        "streamed_edges": calculator.streamed_edges,
+        "warmups": args.warmups,
+        "repeats": args.repeats,
         "thread_environment": {name: os.environ.get(name) for name in THREAD_VARIABLES},
         "native_extension": str(extension_path),
         "native_build": _native_build_metadata(extension_path),
@@ -312,12 +355,33 @@ def main():
         },
     }
 
+    if args.atom_counts is None:
+        systems = [
+            bulk("Si", "diamond", a=5.43).repeat((size,) * 3)
+            for size in _parse_sizes(args.sizes, parser, "--sizes")
+        ]
+    else:
+        atom_counts = _parse_sizes(args.atom_counts, parser, "--atom-counts")
+        repeat_by_atoms = {256: 4, 864: 6, 4000: 10}
+        invalid = [count for count in atom_counts if count not in repeat_by_atoms]
+        if invalid:
+            parser.error(f"unsupported --atom-counts values: {invalid}")
+        systems = [
+            bulk("AlN", "wurtzite", a=3.112, c=4.982).repeat(
+                (repeat_by_atoms[count],) * 3
+            )
+            for count in atom_counts
+        ]
+
     results = []
-    for size in _parse_sizes(args.sizes, parser, "--sizes"):
-        atoms = bulk("Si", "diamond", a=5.43).repeat((size,) * 3)
-        record = _benchmark(calculator, atoms, args.repeats)
+    for atoms in systems:
+        record = _benchmark(
+            calculator, atoms, args.warmups, args.repeats, not args.evaluator_only
+        )
         if reference is not None:
-            reference_record = _benchmark(reference, atoms, args.repeats)
+            reference_record = _benchmark(
+                reference, atoms, args.warmups, args.repeats, not args.evaluator_only
+            )
             record["reference"] = reference_record
             record["evaluator_reference_ratio"] = (
                 record["evaluator"]["median_ms"]
@@ -325,6 +389,7 @@ def main():
             )
             record["ase_reference_ratio"] = (
                 record["ase"]["median_ms"] / reference_record["ase"]["median_ms"]
+                if record["ase"] is not None else None
             )
             if (
                 args.max_reference_ratio is not None
