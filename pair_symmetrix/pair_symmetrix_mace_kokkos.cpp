@@ -51,7 +51,7 @@ PairSymmetrixMACEKokkos<DeviceType, Precision>::PairSymmetrixMACEKokkos(LAMMPS *
   comm_forward = 0;  // possibly changed below
   comm_reverse = 0;  // possibly changed below
   electric_field_set = false;
-  streamed_edges = "legacy";
+  streamed_edges = "auto";
 
   kokkosable = 1;
   reverse_comm_device = 1;
@@ -116,7 +116,7 @@ void PairSymmetrixMACEKokkos<DeviceType, Precision>::settings(int narg, char **a
 {
   mode = (comm->nprocs == 1) ? "no_domain_decomposition" : "mpi_message_passing";
   electric_field_set = false;
-  streamed_edges = "legacy";
+  streamed_edges = "auto";
 
   for (int i=0; i<narg; ++i) {
     const std::string token(arg[i]);
@@ -143,10 +143,11 @@ void PairSymmetrixMACEKokkos<DeviceType, Precision>::settings(int narg, char **a
       i += 3;
     } else if (token == "streamed_edges") {
       if (i+1 >= narg)
-        error->all(FLERR, "pair_style symmetrix/mace/kk streamed_edges requires legacy, r1, or all");
+        error->all(FLERR, "pair_style symmetrix/mace/kk streamed_edges requires auto, legacy, r1, or all");
       streamed_edges = arg[++i];
-      if (streamed_edges != "legacy" && streamed_edges != "r1" && streamed_edges != "all")
-        error->all(FLERR, "pair_style symmetrix/mace/kk streamed_edges requires legacy, r1, or all");
+      if (streamed_edges != "auto" && streamed_edges != "legacy"
+          && streamed_edges != "r1" && streamed_edges != "all")
+        error->all(FLERR, "pair_style symmetrix/mace/kk streamed_edges requires auto, legacy, r1, or all");
     } else {
       error->all(FLERR, "The command \'pair_style symmetrix/mace/kk {}\' is invalid", token);
     }
@@ -173,11 +174,18 @@ void PairSymmetrixMACEKokkos<DeviceType, Precision>::coeff(int narg, char **arg)
   utils::logmesg(lmp, "Loading MACEKokkos model from \'{}\' ... ", arg[2]);
   mace = std::make_unique<MACEKokkos<Precision>>(arg[2]);
   utils::logmesg(lmp, "success\n");
-  try {
-    mace->set_streamed_edges(streamed_edges);
-  } catch (const std::exception& exception) {
-    error->all(FLERR, "pair_style symmetrix/mace/kk streamed_edges is incompatible with this model: {}", exception.what());
+  if (streamed_edges != "auto") {
+    try {
+      mace->set_streamed_edges(streamed_edges);
+    } catch (const std::exception& exception) {
+      error->all(FLERR, "pair_style symmetrix/mace/kk streamed_edges is incompatible with this model: {}", exception.what());
+    }
   }
+  if (!mace->supports_streamed_edges() && comm->me == 0)
+    error->warning(
+      FLERR,
+      "Loaded legacy Symmetrix format-v1 pair-spline model; using streamed_edges='legacy'. "
+      "Re-export with radial_format='compact' to enable optimized streamed_edges='all' execution.");
   if (mace->has_field_coupling && !electric_field_set)
     error->all(FLERR, "MACEField models require pair_style symmetrix/mace/kk electric_field Ex Ey Ez");
 
@@ -758,10 +766,16 @@ void PairSymmetrixMACEKokkos<DeviceType, Precision>::compute_mpi_message_passing
       num_nodes, node_types, num_neigh, neigh_types,
       mace->atomic_numbers, r, xyz, mace->node_energies, mace->node_forces);
 
+  if (mace->streamed_edges != MACEStreamedEdgesMode::legacy)
+    mace->prepare_streamed_edge_schedule(num_nodes, num_edges, num_neigh);
   mace->compute_Y(xyz);
 
-  mace->compute_R0(num_nodes, node_types, num_neigh, neigh_types, r);
-  mace->compute_A0(num_nodes, node_types, num_neigh, neigh_types);
+  if (mace->streamed_edges == MACEStreamedEdgesMode::all)
+    mace->compute_A0_streamed(num_nodes, node_types, num_neigh, neigh_types, r);
+  else {
+    mace->compute_R0(num_nodes, node_types, num_neigh, neigh_types, r);
+    mace->compute_A0(num_nodes, node_types, num_neigh, neigh_types);
+  }
   mace->compute_A0_scaled(num_nodes, node_types, num_neigh, neigh_types, r);
   mace->compute_M0(num_nodes, node_types);
   if (mace->has_field_coupling)
@@ -792,8 +806,13 @@ void PairSymmetrixMACEKokkos<DeviceType, Precision>::compute_mpi_message_passing
     mace->compute_H1_linear_up(num_h1_nodes);
   }
 
-  mace->compute_R1(num_nodes, node_types, num_neigh, neigh_types, r);
-  mace->compute_Phi1(num_nodes, num_neigh, neigh_indices);
+  if (mace->streamed_edges == MACEStreamedEdgesMode::legacy) {
+    mace->compute_R1(num_nodes, node_types, num_neigh, neigh_types, r);
+    mace->compute_Phi1(num_nodes, num_neigh, neigh_indices);
+  } else {
+    mace->compute_Phi1_streamed(
+      num_nodes, node_types, num_neigh, neigh_indices, neigh_types, r);
+  }
   mace->compute_A1(num_nodes);
   mace->compute_A1_scaled(num_nodes, node_types, num_neigh, neigh_types, r);
   mace->compute_M1(num_nodes, node_types);
@@ -805,7 +824,13 @@ void PairSymmetrixMACEKokkos<DeviceType, Precision>::compute_mpi_message_passing
   mace->reverse_M1(num_nodes, node_types);
   mace->reverse_A1_scaled(num_nodes, node_types, num_neigh, neigh_types, xyz, r);
   mace->reverse_A1(num_nodes);
-  mace->reverse_Phi1(num_nodes, num_neigh, neigh_indices, xyz, r, false, false);
+  if (mace->streamed_edges == MACEStreamedEdgesMode::legacy)
+    mace->reverse_Phi1(
+      num_nodes, num_neigh, neigh_indices, xyz, r, false, false);
+  else
+    mace->reverse_Phi1_streamed(
+      num_nodes, node_types, num_neigh, neigh_indices, neigh_types,
+      xyz, r, false, false);
 
   if (mace->has_field_coupling) {
     mace->reverse_H1_linear_up(num_h1_nodes);
@@ -822,7 +847,11 @@ void PairSymmetrixMACEKokkos<DeviceType, Precision>::compute_mpi_message_passing
     mace->reverse_H1(num_nodes);
   mace->reverse_M0(num_nodes, node_types);
   mace->reverse_A0_scaled(num_nodes, node_types, num_neigh, neigh_types, xyz, r);
-  mace->reverse_A0(num_nodes, node_types, num_neigh, neigh_types, xyz, r);
+  if (mace->streamed_edges == MACEStreamedEdgesMode::all)
+    mace->reverse_A0_streamed(
+      num_nodes, node_types, num_neigh, neigh_types, xyz, r);
+  else
+    mace->reverse_A0(num_nodes, node_types, num_neigh, neigh_types, xyz, r);
 
   if (eflag_global) {
     auto node_energies = mace->node_energies;
@@ -1124,10 +1153,20 @@ void PairSymmetrixMACEKokkos<DeviceType, Precision>::compute_no_mpi_message_pass
       num_local_nodes, node_types, num_neigh, neigh_types,
       mace->atomic_numbers, r, xyz, mace->node_energies, mace->node_forces);
 
+  if (mace->streamed_edges != MACEStreamedEdgesMode::legacy)
+    mace->prepare_streamed_edge_schedule(
+      num_local_nodes, num_local_edges, num_neigh);
   mace->compute_Y(xyz);
 
-  mace->compute_R0(num_local_nodes+num_ghost_nodes, node_types, num_neigh, neigh_types, r);
-  mace->compute_A0(num_local_nodes+num_ghost_nodes, node_types, num_neigh, neigh_types);
+  if (mace->streamed_edges == MACEStreamedEdgesMode::all)
+    mace->compute_A0_streamed(
+      num_local_nodes+num_ghost_nodes, node_types, num_neigh, neigh_types, r);
+  else {
+    mace->compute_R0(
+      num_local_nodes+num_ghost_nodes, node_types, num_neigh, neigh_types, r);
+    mace->compute_A0(
+      num_local_nodes+num_ghost_nodes, node_types, num_neigh, neigh_types);
+  }
   mace->compute_A0_scaled(num_local_nodes+num_ghost_nodes, node_types, num_neigh, neigh_types, r);
   mace->compute_M0(num_local_nodes+num_ghost_nodes, node_types);
   if (mace->has_field_coupling) {
@@ -1138,8 +1177,13 @@ void PairSymmetrixMACEKokkos<DeviceType, Precision>::compute_no_mpi_message_pass
     mace->compute_H1(num_local_nodes+num_ghost_nodes);
   }
 
-  mace->compute_R1(num_local_nodes, node_types, num_neigh, neigh_types, r);
-  mace->compute_Phi1(num_local_nodes, num_neigh, neigh_ii_indices);
+  if (mace->streamed_edges == MACEStreamedEdgesMode::legacy) {
+    mace->compute_R1(num_local_nodes, node_types, num_neigh, neigh_types, r);
+    mace->compute_Phi1(num_local_nodes, num_neigh, neigh_ii_indices);
+  } else {
+    mace->compute_Phi1_streamed(
+      num_local_nodes, node_types, num_neigh, neigh_ii_indices, neigh_types, r);
+  }
   mace->compute_A1(num_local_nodes);
   mace->compute_A1_scaled(num_local_nodes, node_types, num_neigh, neigh_types, r);
   mace->compute_M1(num_local_nodes, node_types);
@@ -1151,7 +1195,13 @@ void PairSymmetrixMACEKokkos<DeviceType, Precision>::compute_no_mpi_message_pass
   mace->reverse_M1(num_local_nodes, node_types);
   mace->reverse_A1_scaled(num_local_nodes, node_types, num_neigh, neigh_types, xyz, r);
   mace->reverse_A1(num_local_nodes);
-  mace->reverse_Phi1(num_local_nodes, num_neigh, neigh_ii_indices, xyz, r, false, false);
+  if (mace->streamed_edges == MACEStreamedEdgesMode::legacy)
+    mace->reverse_Phi1(
+      num_local_nodes, num_neigh, neigh_ii_indices, xyz, r, false, false);
+  else
+    mace->reverse_Phi1_streamed(
+      num_local_nodes, node_types, num_neigh, neigh_ii_indices, neigh_types,
+      xyz, r, false, false);
 
   if (mace->has_field_coupling) {
     mace->reverse_H1_linear_up(num_local_nodes+num_ghost_nodes);
@@ -1162,7 +1212,14 @@ void PairSymmetrixMACEKokkos<DeviceType, Precision>::compute_no_mpi_message_pass
   }
   mace->reverse_M0(num_local_nodes+num_ghost_nodes, node_types);
   mace->reverse_A0_scaled(num_local_nodes+num_ghost_nodes, node_types, num_neigh, neigh_types, xyz, r);
-  mace->reverse_A0(num_local_nodes+num_ghost_nodes, node_types, num_neigh, neigh_types, xyz, r);
+  if (mace->streamed_edges == MACEStreamedEdgesMode::all)
+    mace->reverse_A0_streamed(
+      num_local_nodes+num_ghost_nodes, node_types, num_neigh, neigh_types,
+      xyz, r);
+  else
+    mace->reverse_A0(
+      num_local_nodes+num_ghost_nodes, node_types, num_neigh, neigh_types,
+      xyz, r);
 
   // ----- end mace evaluation -----
 

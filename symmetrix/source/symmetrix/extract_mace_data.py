@@ -60,6 +60,11 @@ def extract_mace_data(
         )
     if radial_format == "compact" and num_spline_points < 4:
         raise ValueError("Compact radial output requires at least 4 spline points.")
+    if radial_format == "pair-splines":
+        logging.warning(
+            "Generating legacy Symmetrix format-v1 pair-spline data. "
+            "Use radial_format='compact' for the optimized format-v2 runtime."
+        )
 
     # extract atomic numbers
     atomic_numbers = []

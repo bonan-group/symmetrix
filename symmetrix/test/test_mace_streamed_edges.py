@@ -7,7 +7,6 @@ from ase import Atoms
 
 from symmetrix import Symmetrix
 from symmetrix import symmetrix as native_symmetrix
-from model_downloads import MODEL_URLS, cached_model_path
 
 try:
     from symmetrix.extract_mace_data import extract_mace_data
@@ -40,14 +39,20 @@ def streamed_model_paths(tmp_path_factory, macefield_model_path):
 
 
 @pytest.fixture(scope="module")
-def legacy_standard_model_path():
-    try:
-        return cached_model_path(
-            "MACE-OFF23_small-1-8.json",
-            MODEL_URLS["MACE-OFF23_small-1-8.json"],
-        )
-    except RuntimeError as exc:
-        pytest.skip(str(exc))
+def legacy_standard_model_path(tmp_path_factory, macefield_model_path):
+    legacy_data = extract_mace_data(
+        macefield_model_path,
+        species=[7, 13],
+        head="mp-dielectric",
+        num_spline_points=16,
+        radial_format="pair-splines",
+    )
+    legacy_data["model_type"] = "MACE"
+    legacy_data["has_field_coupling"] = False
+    legacy_data.pop("field_couplings", None)
+    legacy_path = tmp_path_factory.mktemp("mace-legacy-edges") / "legacy.json"
+    legacy_path.write_text(json.dumps(legacy_data))
+    return legacy_path
 
 
 def _small_structure():
@@ -62,6 +67,19 @@ def _small_structure():
         cell=[8.0, 8.0, 8.0],
         pbc=False,
     )
+
+
+@pytest.mark.parametrize("use_kokkos", [False, True])
+def test_compact_v2_defaults_to_fully_streamed_execution(
+    streamed_model_paths,
+    use_kokkos,
+):
+    standard_path, _ = streamed_model_paths
+    calculator = Symmetrix(standard_path, use_kokkos=use_kokkos)
+
+    assert calculator.streamed_edges == "all"
+    assert calculator.evaluator.supports_streamed_edges
+    assert calculator.evaluator.streamed_edges_mode == "all"
 
 
 @pytest.mark.parametrize(
@@ -243,9 +261,21 @@ def test_kokkos_rejects_out_of_range_phi1_hidden_degree(
         native_symmetrix.MACEKokkos(str(invalid_path))
 
 
-def test_streamed_modes_reject_legacy_pair_spline_models(legacy_standard_model_path):
-    evaluator = native_symmetrix.MACE(str(legacy_standard_model_path))
+@pytest.mark.parametrize("use_kokkos", [False, True])
+def test_legacy_pair_spline_models_warn_and_default_to_legacy(
+    legacy_standard_model_path,
+    use_kokkos,
+):
+    with pytest.warns(UserWarning, match="format-v1.*streamed_edges='legacy'"):
+        calculator = Symmetrix(
+            legacy_standard_model_path,
+            use_kokkos=use_kokkos,
+        )
+
+    evaluator = calculator.evaluator
+    assert calculator.streamed_edges == "legacy"
     assert not evaluator.supports_streamed_edges
+    assert evaluator.streamed_edges_mode == "legacy"
     with pytest.raises(ValueError, match="format-v2 compact MACE or MACEField"):
         evaluator.set_streamed_edges("all")
 

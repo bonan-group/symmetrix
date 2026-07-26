@@ -3,6 +3,8 @@
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
 
+#include <memory>
+
 #include "utilities_kokkos.hpp"
 #include "mace_kokkos.hpp"
 
@@ -11,6 +13,23 @@ using ContiguousIntArray =
     py::array_t<int, py::array::c_style | py::array::forcecast>;
 using ContiguousDoubleArray =
     py::array_t<double, py::array::c_style | py::array::forcecast>;
+
+template <typename Precision>
+std::unique_ptr<MACEKokkos<Precision>> load_mace_kokkos(
+    const std::string& filename)
+{
+    auto evaluator = std::make_unique<MACEKokkos<Precision>>(filename);
+    if (!evaluator->supports_streamed_edges()) {
+        if (PyErr_WarnEx(
+                PyExc_UserWarning,
+                "Loaded legacy Symmetrix format-v1 pair-spline model; using "
+                "streamed_edges='legacy'. Re-export with radial_format='compact' "
+                "to enable optimized streamed_edges='all' execution.",
+                1) < 0)
+            throw py::error_already_set();
+    }
+    return evaluator;
+}
 
 template <typename Precision>
 void prepare_active_types(
@@ -53,7 +72,7 @@ void bind_mace_kokkos(py::module_ &m, const char* class_name)
         py::array_t<Precision, py::array::c_style | py::array::forcecast>;
 
     py::class_<MACEKokkos<Precision>>(m, class_name)
-        .def(py::init<std::string>())
+        .def(py::init(&load_mace_kokkos<Precision>))
         .def("set_streamed_edges", &MACEKokkos<Precision>::set_streamed_edges)
         .def_property_readonly(
             "streamed_edges_mode", &MACEKokkos<Precision>::streamed_edges_mode)

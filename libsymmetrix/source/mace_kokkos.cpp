@@ -165,6 +165,8 @@ template <typename Precision>
 MACEKokkos<Precision>::MACEKokkos(std::string filename)
 {
     load_from_json(filename);
+    if (supports_streamed_edges())
+        streamed_edges = MACEStreamedEdgesMode::all;
 }
 
 template <typename Precision>

@@ -125,6 +125,11 @@ void PairSymmetrixMACE::coeff(int narg, char **arg)
   utils::logmesg(lmp, "Loading MACE model from \'{}\' ... ", arg[2]);
   mace = std::make_unique<MACE>(arg[2]);
   utils::logmesg(lmp, "success\n");
+  if (!mace->supports_streamed_edges() && comm->me == 0)
+    error->warning(
+      FLERR,
+      "Loaded legacy Symmetrix format-v1 pair-spline model; using streamed_edges='legacy'. "
+      "Re-export with radial_format='compact' to enable optimized streamed_edges='all' execution.");
 
   // extract atomic numbers from pair_coeff
   mace_types = std::vector<int>();
@@ -460,8 +465,12 @@ void PairSymmetrixMACE::compute_mpi_message_passing(int eflag, int vflag)
 
   mace->compute_Y(xyz);
 
-  mace->compute_R0(num_nodes, node_types, num_neigh, neigh_types, r);
-  mace->compute_A0(num_nodes, node_types, num_neigh, neigh_types);
+  if (mace->streamed_edges == MACEStreamedEdgesMode::all)
+    mace->compute_A0_streamed(num_nodes, node_types, num_neigh, neigh_types, r);
+  else {
+    mace->compute_R0(num_nodes, node_types, num_neigh, neigh_types, r);
+    mace->compute_A0(num_nodes, node_types, num_neigh, neigh_types);
+  }
   mace->compute_A0_scaled(num_nodes, node_types, num_neigh, neigh_types, r);
   mace->compute_M0(num_nodes, node_types);
   mace->compute_H1(num_nodes);
@@ -477,8 +486,13 @@ void PairSymmetrixMACE::compute_mpi_message_passing(int eflag, int vflag)
   comm->forward_comm(this);
   mace->H1 = H1;
 
-  mace->compute_R1(num_nodes, node_types, num_neigh, neigh_types, r);
-  mace->compute_Phi1(num_nodes, num_neigh, neigh_j);
+  if (mace->streamed_edges == MACEStreamedEdgesMode::legacy) {
+    mace->compute_R1(num_nodes, node_types, num_neigh, neigh_types, r);
+    mace->compute_Phi1(num_nodes, num_neigh, neigh_j);
+  } else {
+    mace->compute_Phi1_streamed(
+      num_nodes, node_types, num_neigh, neigh_j, neigh_types, r);
+  }
   mace->compute_A1(num_nodes);
   mace->compute_A1_scaled(num_nodes, node_types, num_neigh, neigh_types, r);
   mace->compute_M1(num_nodes, node_types);
@@ -490,7 +504,12 @@ void PairSymmetrixMACE::compute_mpi_message_passing(int eflag, int vflag)
   mace->reverse_M1(num_nodes, node_types);
   mace->reverse_A1_scaled(num_nodes, node_types, num_neigh, neigh_types, xyz, r, false);
   mace->reverse_A1(num_nodes);
-  mace->reverse_Phi1(num_nodes, num_neigh, neigh_j, xyz, r, false, false);
+  if (mace->streamed_edges == MACEStreamedEdgesMode::legacy)
+    mace->reverse_Phi1(num_nodes, num_neigh, neigh_j, xyz, r, false, false);
+  else
+    mace->reverse_Phi1_streamed(
+      num_nodes, node_types, num_neigh, neigh_j, neigh_types,
+      xyz, r, false, false);
 
   H1_adj = mace->H1_adj;
   comm->reverse_comm(this);
@@ -499,7 +518,11 @@ void PairSymmetrixMACE::compute_mpi_message_passing(int eflag, int vflag)
   mace->reverse_H1(num_nodes);
   mace->reverse_M0(num_nodes, node_types);
   mace->reverse_A0_scaled(num_nodes, node_types, num_neigh, neigh_types, xyz, r);
-  mace->reverse_A0(num_nodes, node_types, num_neigh, neigh_types, xyz, r);
+  if (mace->streamed_edges == MACEStreamedEdgesMode::all)
+    mace->reverse_A0_streamed(
+      num_nodes, node_types, num_neigh, neigh_types, xyz, r);
+  else
+    mace->reverse_A0(num_nodes, node_types, num_neigh, neigh_types, xyz, r);
 
   // ----- end mace evaluation -----
 
@@ -678,14 +701,26 @@ void PairSymmetrixMACE::compute_no_mpi_message_passing(int eflag, int vflag)
 
   mace->compute_Y(xyz);
 
-  mace->compute_R0(num_local_nodes+num_ghost_nodes, node_types, num_neigh, neigh_types, r);
-  mace->compute_A0(num_local_nodes+num_ghost_nodes, node_types, num_neigh, neigh_types);
+  if (mace->streamed_edges == MACEStreamedEdgesMode::all)
+    mace->compute_A0_streamed(
+      num_local_nodes+num_ghost_nodes, node_types, num_neigh, neigh_types, r);
+  else {
+    mace->compute_R0(
+      num_local_nodes+num_ghost_nodes, node_types, num_neigh, neigh_types, r);
+    mace->compute_A0(
+      num_local_nodes+num_ghost_nodes, node_types, num_neigh, neigh_types);
+  }
   mace->compute_A0_scaled(num_local_nodes+num_ghost_nodes, node_types, num_neigh, neigh_types, r);
   mace->compute_M0(num_local_nodes+num_ghost_nodes, node_types);
   mace->compute_H1(num_local_nodes+num_ghost_nodes);
 
-  mace->compute_R1(num_local_nodes, node_types, num_neigh, neigh_types, r);
-  mace->compute_Phi1(num_local_nodes, num_neigh, neigh_indices);
+  if (mace->streamed_edges == MACEStreamedEdgesMode::legacy) {
+    mace->compute_R1(num_local_nodes, node_types, num_neigh, neigh_types, r);
+    mace->compute_Phi1(num_local_nodes, num_neigh, neigh_indices);
+  } else {
+    mace->compute_Phi1_streamed(
+      num_local_nodes, node_types, num_neigh, neigh_indices, neigh_types, r);
+  }
   mace->compute_A1(num_local_nodes);
   mace->compute_A1_scaled(num_local_nodes, node_types, num_neigh, neigh_types, r);
   mace->compute_M1(num_local_nodes, node_types);
@@ -697,12 +732,25 @@ void PairSymmetrixMACE::compute_no_mpi_message_passing(int eflag, int vflag)
   mace->reverse_M1(num_local_nodes, node_types);
   mace->reverse_A1_scaled(num_local_nodes, node_types, num_neigh, neigh_types, xyz, r, false);
   mace->reverse_A1(num_local_nodes);
-  mace->reverse_Phi1(num_local_nodes, num_neigh, neigh_indices, xyz, r, false, false);
+  if (mace->streamed_edges == MACEStreamedEdgesMode::legacy)
+    mace->reverse_Phi1(
+      num_local_nodes, num_neigh, neigh_indices, xyz, r, false, false);
+  else
+    mace->reverse_Phi1_streamed(
+      num_local_nodes, node_types, num_neigh, neigh_indices, neigh_types,
+      xyz, r, false, false);
 
   mace->reverse_H1(num_local_nodes+num_ghost_nodes);
   mace->reverse_M0(num_local_nodes+num_ghost_nodes, node_types);
   mace->reverse_A0_scaled(num_local_nodes+num_ghost_nodes, node_types, num_neigh, neigh_types, xyz, r);
-  mace->reverse_A0(num_local_nodes+num_ghost_nodes, node_types, num_neigh, neigh_types, xyz, r);
+  if (mace->streamed_edges == MACEStreamedEdgesMode::all)
+    mace->reverse_A0_streamed(
+      num_local_nodes+num_ghost_nodes, node_types, num_neigh, neigh_types,
+      xyz, r);
+  else
+    mace->reverse_A0(
+      num_local_nodes+num_ghost_nodes, node_types, num_neigh, neigh_types,
+      xyz, r);
 
   // ----- end mace evaluation -----
 

@@ -3,6 +3,8 @@
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
 
+#include <memory>
+
 #include "mace.hpp"
 
 namespace py = pybind11;
@@ -12,6 +14,21 @@ using ContiguousDoubleArray =
     py::array_t<double, py::array::c_style | py::array::forcecast>;
 
 namespace {
+
+std::unique_ptr<MACE> load_mace(const std::string& filename)
+{
+    auto evaluator = std::make_unique<MACE>(filename);
+    if (!evaluator->supports_streamed_edges()) {
+        if (PyErr_WarnEx(
+                PyExc_UserWarning,
+                "Loaded legacy Symmetrix format-v1 pair-spline model; using "
+                "streamed_edges='legacy'. Re-export with radial_format='compact' "
+                "to enable optimized streamed_edges='all' execution.",
+                1) < 0)
+            throw py::error_already_set();
+    }
+    return evaluator;
+}
 
 void prepare_active_types(
     MACE& self,
@@ -42,7 +59,7 @@ void prepare_active_types(
 void bind_mace(py::module_ &m)
 {
     py::class_<MACE>(m, "MACE")
-        .def(py::init<std::string>())
+        .def(py::init(&load_mace))
         .def("set_streamed_edges", &MACE::set_streamed_edges)
         .def_property_readonly("streamed_edges_mode", &MACE::streamed_edges_mode)
         .def_property_readonly("supports_streamed_edges", &MACE::supports_streamed_edges)

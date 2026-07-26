@@ -31,7 +31,7 @@ pair styles reject these models explicitly at `pair_coeff`.
 For MACEField JSON models, use the Kokkos pair style with an explicit
 uniform electric field:
 ```
-pair_style    symmetrix/mace electric_field 0.01 0.0 0.0 streamed_edges all
+pair_style    symmetrix/mace electric_field 0.01 0.0 0.0
 pair_coeff    * * my-macefield-universal.json Al N
 ```
 The field is currently a static graph-level vector in the active LAMMPS
@@ -39,10 +39,13 @@ unit system. Per-atom fields, time-dependent fields, field-response
 properties, non-Kokkos MACEField LAMMPS runs, and atomic virials are not
 yet supported.
 
-The Kokkos pair style accepts `streamed_edges legacy|r1|all` for compact
+The Kokkos pair style accepts `streamed_edges auto|legacy|r1|all` for compact
 format-version-2 MACE and MACEField models. `r1` removes the second-interaction
 edge radial tensor; `all` also removes the first-interaction radial tensor.
-The default is `legacy` for input compatibility.
+The default `auto` mode selects `all` for compact format-version-2 models and
+retains `legacy` for version-1 pair-spline models. Loading version 1 prints a
+migration warning; explicit mode selections override `auto`. The serial pair
+style applies the same format-aware default automatically.
 
 ### Building LAMMPS
 

@@ -73,6 +73,12 @@ format version 1. Compact version 2 is the new converter default, including
 when an explicit species subset is provided. Older Symmetrix installations
 cannot read version 2 artifacts.
 
+At runtime, compact version-2 MACE and MACEField models default to fully
+streamed `R0` and `R1` execution (`streamed_edges="all"`). Version-1
+pair-spline models retain legacy execution and emit a migration warning. Pass
+`streamed_edges="legacy"`, `"r1"`, or `"all"` explicitly to override the
+automatic selection where the model format supports it.
+
 To generate version 1 data for an older reader or for code that consumes the
 legacy `radial_spline_*` keys, request pair splines explicitly. The equivalent
 Python API is:

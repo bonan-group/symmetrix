@@ -1,4 +1,5 @@
 import json
+import logging
 
 import numpy as np
 import pytest
@@ -61,7 +62,11 @@ def test_macefield_extractor_includes_field_schema(macefield_model_path):
 
 
 @pytest.mark.skipif(extract_mace_data is None, reason=f"extract_mace_data is not available: {extract_mace_data_import_error}")
-def test_macefield_extractor_retains_legacy_pair_splines(macefield_model_path):
+def test_macefield_extractor_retains_legacy_pair_splines(
+    macefield_model_path,
+    caplog,
+):
+    caplog.set_level(logging.WARNING)
     data = extract_mace_data(
         macefield_model_path,
         species=[7, 13],
@@ -79,6 +84,7 @@ def test_macefield_extractor_retains_legacy_pair_splines(macefield_model_path):
     assert len(data["radial_spline_values_1"]) == 3
     assert len(data["A0_spline_values"]) == 3
     assert len(data["A1_spline_values"]) == 3
+    assert "Generating legacy Symmetrix format-v1" in caplog.text
 
 
 @pytest.mark.skipif(extract_mace_data is None, reason=f"extract_mace_data is not available: {extract_mace_data_import_error}")

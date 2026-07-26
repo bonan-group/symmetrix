@@ -49,9 +49,10 @@ class Symmetrix(Calculator):
     ----------
     model_file: str
         JSON-format model file used for potential energy
-    streamed_edges: {"legacy", "r1", "all"}
-        Compact MACE/MACEField execution mode. ``r1`` streams the second
-        interaction radial functions; ``all`` also streams the first.
+    streamed_edges: {"auto", "legacy", "r1", "all"}
+        Compact MACE/MACEField execution mode. ``auto`` selects ``all`` for
+        compact format-v2 models and ``legacy`` otherwise. ``r1`` streams the
+        second interaction radial functions; ``all`` also streams the first.
 
     Notes
     -----
@@ -67,14 +68,16 @@ class Symmetrix(Calculator):
         model_file,
         dtype="float64",
         use_kokkos=True,
-        streamed_edges="legacy",
+        streamed_edges="auto",
         **kwargs,
     ):
         Calculator.__init__(self, **kwargs)
         if dtype not in ["float32", "float64"]:
             raise ValueError(f"Unsupported dtype '{dtype}'. Supported dtypes are 'float64' and 'float32'.")
-        if streamed_edges not in ("legacy", "r1", "all"):
-            raise ValueError("streamed_edges must be one of 'legacy', 'r1', or 'all'.")
+        if streamed_edges not in ("auto", "legacy", "r1", "all"):
+            raise ValueError(
+                "streamed_edges must be one of 'auto', 'legacy', 'r1', or 'all'."
+            )
         self._macefield_electric_field = None
         self._electric_field = kwargs.get("electric_field", None)
         json_metadata = self._json_metadata(model_file)
@@ -121,12 +124,16 @@ class Symmetrix(Calculator):
                 self.evaluator = MACE(fout.name)
 
         if hasattr(self.evaluator, "set_streamed_edges"):
-            self.evaluator.set_streamed_edges(streamed_edges)
-        elif streamed_edges != "legacy":
+            if streamed_edges != "auto":
+                self.evaluator.set_streamed_edges(streamed_edges)
+            selected_streamed_edges = self.evaluator.streamed_edges_mode
+        elif streamed_edges not in ("auto", "legacy"):
             raise ValueError(
                 "streamed_edges is only supported by compact MACE or MACEField evaluators."
             )
-        self.streamed_edges = streamed_edges
+        else:
+            selected_streamed_edges = "legacy"
+        self.streamed_edges = selected_streamed_edges
         self.cutoff = self.evaluator.r_cut
         self.implemented_properties = list(type(self).implemented_properties)
         if self._has_native_field_coupling():
