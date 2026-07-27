@@ -780,6 +780,59 @@ def test_mh1_e3_linear_batch_matches_repeated_scalar_calls():
         assert np.allclose(
             kokkos.reverse_batch(seeds.ravel(), samples), expected_adjoint, atol=2e-14
         )
+    if hasattr(native_symmetrix, "E3LinearKokkosFloat"):
+        float_module = native_symmetrix.E3LinearKokkosFloat(
+            json.dumps(definition)
+        )
+        float_module.set_backend("scalar")
+        scalar_values = np.asarray(
+            float_module.evaluate_batch(values.astype(np.float32).ravel(), samples)
+        )
+        scalar_adjoints = np.asarray(
+            float_module.reverse_batch(seeds.astype(np.float32).ravel(), samples)
+        )
+        float_module.set_backend("packed_gemm")
+        packed_values = np.asarray(
+            float_module.evaluate_batch(values.astype(np.float32).ravel(), samples)
+        )
+        packed_adjoints = np.asarray(
+            float_module.reverse_batch(seeds.astype(np.float32).ravel(), samples)
+        )
+        assert float_module.backend == "packed_gemm"
+        assert np.allclose(packed_values, scalar_values, atol=2e-6)
+        assert np.allclose(packed_adjoints, scalar_adjoints, atol=2e-6)
+
+
+@pytest.mark.parametrize("layer", [0, 1])
+def test_mh1_float32_linear_backends_match_on_official_shapes(
+    mh1_si_artifact, layer
+):
+    if not hasattr(native_symmetrix, "E3LinearKokkosFloat"):
+        pytest.skip("Symmetrix was built without Float32 Kokkos E3 primitives")
+    if not native_symmetrix._kokkos_is_initialized():
+        native_symmetrix._init_kokkos()
+    data, _ = mh1_si_artifact
+    module = native_symmetrix.E3LinearKokkosFloat(
+        json.dumps(data["interactions"][layer]["linear_up"])
+    )
+    rng = np.random.default_rng(2048 + layer)
+    samples = 17
+    values = rng.normal(
+        scale=0.1, size=(samples, module.input_dimension)
+    ).astype(np.float32)
+    seeds = rng.normal(
+        scale=0.1, size=(samples, module.output_dimension)
+    ).astype(np.float32)
+    module.set_backend("scalar")
+    scalar_values = np.asarray(module.evaluate_batch(values.ravel(), samples))
+    scalar_adjoints = np.asarray(module.reverse_batch(seeds.ravel(), samples))
+    module.set_backend("packed_gemm")
+    packed_values = np.asarray(module.evaluate_batch(values.ravel(), samples))
+    packed_adjoints = np.asarray(module.reverse_batch(seeds.ravel(), samples))
+    assert module.selected_backend(samples) == "packed_gemm"
+    assert module.workspace_bytes > 0
+    assert np.allclose(packed_values, scalar_values, atol=3e-6)
+    assert np.allclose(packed_adjoints, scalar_adjoints, atol=3e-6)
 
 
 @pytest.mark.parametrize("layer", [0, 1])
@@ -824,6 +877,49 @@ def test_mh1_tensor_product_forward_and_reverse_match_autograd(
         assert np.allclose(kokkos_x_adj, x_adj, atol=2e-12)
         assert np.allclose(kokkos_y_adj, y_adj, atol=2e-12)
         assert np.allclose(kokkos_w_adj, w_adj, atol=2e-12)
+    if hasattr(native_symmetrix, "E3TensorProductKokkosFloat"):
+        float_module = native_symmetrix.E3TensorProductKokkosFloat(
+            json.dumps(data["interactions"][layer]["conv_tp"])
+        )
+        factors = np.array([1.0, 0.7, -0.4], dtype=np.float32)
+        first = np.asarray([factor * x for factor in factors], dtype=np.float32)
+        second = np.asarray(
+            [(1.0 - 0.2 * factor) * y for factor in factors],
+            dtype=np.float32,
+        )
+        batch_weights = np.asarray(
+            [(1.0 + 0.1 * factor) * w for factor in factors],
+            dtype=np.float32,
+        )
+        seeds = np.asarray(
+            [(1.0 - 0.1 * factor) * seed for factor in factors],
+            dtype=np.float32,
+        )
+        expected_values = np.concatenate([
+            native_module.evaluate(node_x, node_y, node_w)
+            for node_x, node_y, node_w in zip(first, second, batch_weights)
+        ])
+        expected_adjoints = [
+            native_module.reverse(node_x, node_y, node_w, node_seed)
+            for node_x, node_y, node_w, node_seed
+            in zip(first, second, batch_weights, seeds)
+        ]
+        actual_values = float_module.evaluate_batch(
+            first.ravel(), second.ravel(), batch_weights.ravel(), len(factors)
+        )
+        actual_adjoints = float_module.reverse_batch(
+            first.ravel(), second.ravel(), batch_weights.ravel(),
+            seeds.ravel(), len(factors)
+        )
+        assert float_module.uses_mh1_fast_path
+        assert float_module.backend == "official_kokkos"
+        assert np.allclose(actual_values, expected_values, atol=3e-6)
+        for actual_component, expected_component in zip(
+            actual_adjoints, zip(*expected_adjoints)
+        ):
+            assert np.allclose(
+                actual_component, np.concatenate(expected_component), atol=3e-6
+            )
 
 
 @pytest.mark.parametrize("use_kokkos", [False, True])
@@ -1312,6 +1408,63 @@ def test_mh1_kokkos_float32_streamed_modes_match_float64(mh1_si_artifact):
 
     automatic = Symmetrix(model_path, use_kokkos=True, dtype="float32")
     assert automatic.streamed_edges == "all"
+
+
+def test_mh1_kokkos_exposes_synchronized_linear_controls(mh1_si_artifact):
+    if not hasattr(native_symmetrix, "MACENonlinearKokkosFloat"):
+        pytest.skip("Symmetrix was built without Float32 Kokkos nonlinear support")
+    if not native_symmetrix._kokkos_is_initialized():
+        native_symmetrix._init_kokkos()
+    _, model_path = mh1_si_artifact
+    evaluator = native_symmetrix.MACENonlinearKokkosFloat(str(model_path))
+    expected_backend = (
+        "packed_gemm"
+        if native_symmetrix._kokkos_default_execution_space() == "Cuda"
+        else "auto"
+    )
+    assert evaluator.e3_linear_backend == expected_backend
+    assert evaluator.tensor_product_backend == "official_kokkos"
+    assert evaluator.linear_workspace_bytes == 0
+    assert evaluator.tensor_workspace_bytes == 0
+    assert evaluator.precision_workspace_bytes == evaluator.edge_workspace_bytes
+    evaluator.set_e3_linear_backend("scalar")
+    assert evaluator.e3_linear_backend == "scalar"
+    evaluator.set_e3_linear_backend("packed_gemm")
+    assert evaluator.e3_linear_backend == "packed_gemm"
+    with pytest.raises(ValueError, match="auto, scalar, or packed_gemm"):
+        evaluator.set_e3_linear_backend("invalid")
+    evaluator.fence()
+
+
+def test_mh1_cuda_packed_linear_matches_scalar(mh1_si_artifact):
+    if not hasattr(native_symmetrix, "MACENonlinearKokkosFloat"):
+        pytest.skip("Symmetrix was built without Float32 Kokkos nonlinear support")
+    if native_symmetrix._kokkos_default_execution_space() != "Cuda":
+        pytest.skip("packed E3-linear regression requires Kokkos CUDA")
+    _, model_path = mh1_si_artifact
+    atoms = bulk("Si", "diamond", a=5.43, cubic=True)
+    properties = ["energy", "energies", "forces", "stress"]
+    results = {}
+    for backend in ("scalar", "packed_gemm"):
+        calculator = Symmetrix(
+            model_path,
+            use_kokkos=True,
+            dtype="float32",
+            streamed_edges="all",
+        )
+        calculator.evaluator.set_e3_linear_backend(backend)
+        calculator.calculate(atoms.copy(), properties=properties)
+        results[backend] = {
+            name: np.array(calculator.results[name], copy=True)
+            for name in properties
+        }
+    for name in properties:
+        np.testing.assert_allclose(
+            results["packed_gemm"][name],
+            results["scalar"][name],
+            rtol=0.0,
+            atol=2e-5,
+        )
 
 
 def test_legacy_evaluator_rejects_nonlinear_schema(mh1_si_artifact):

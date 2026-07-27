@@ -19,6 +19,19 @@ view_type generate_view(size_t);
 
 void modify_view(view_type);
 
+// Preserve launch order without forcing a host-side CUDA synchronization for
+// internal device fills and copies. CPU execution spaces retain their existing
+// blocking behavior.
+template<class Destination,class Source>
+void ordered_kokkos_deep_copy(Destination destination,Source source)
+{
+#ifdef KOKKOS_ENABLE_CUDA
+    Kokkos::deep_copy(Kokkos::DefaultExecutionSpace{},destination,source);
+#else
+    Kokkos::deep_copy(destination,source);
+#endif
+}
+
 // Template function to convert a std::vector to a Kokkos::View
 template<typename T>
 Kokkos::View<T*> toKokkosView(const char* name,const std::vector<T>& stdVector) {

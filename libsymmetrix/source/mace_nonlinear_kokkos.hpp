@@ -24,6 +24,13 @@ public:
     void set_streamed_edges(std::string mode);
     int edge_workspace_rows() const;
     std::size_t edge_workspace_bytes() const;
+    void fence() const { Kokkos::fence("MACE_Nonlinear public fence"); }
+    void set_e3_linear_backend(const std::string& backend);
+    std::string e3_linear_backend() const;
+    std::string tensor_product_backend() const;
+    std::size_t linear_workspace_bytes() const;
+    std::size_t tensor_workspace_bytes() const;
+    std::size_t precision_workspace_bytes() const;
     std::vector<int> atomic_numbers_host;
     Kokkos::View<int*> atomic_numbers;
     Kokkos::View<double*> atomic_energies,node_energies,node_forces;
@@ -65,6 +72,10 @@ private:
         bool prepare_pair_conditioning(
             const nlohmann::json& data,int radial_size,int model_element_count,
             const std::vector<int>& selected_model_indices);
+        void set_e3_linear_backend(const std::string& backend);
+        void set_e3_linear_workspace(
+            const std::shared_ptr<typename E3LinearKokkosT<Precision>::Workspace>& workspace);
+        std::size_t linear_workspace_bytes() const;
     };
 public:
     struct Readout {
@@ -74,6 +85,10 @@ public:
         Kokkos::View<Precision**,Kokkos::LayoutRight> hidden_storage,activated_storage,
             result_storage,seed_storage,activated_adj_storage,hidden_adj_storage;
         explicit Readout(const nlohmann::json& data);
+        void set_e3_linear_backend(const std::string& backend);
+        void set_e3_linear_workspace(
+            const std::shared_ptr<typename E3LinearKokkosT<Precision>::Workspace>& workspace);
+        std::size_t linear_workspace_bytes() const;
         void evaluate(Kokkos::View<const Precision**,Kokkos::LayoutRight> input,Kokkos::View<Precision*> output);
         void reverse(Kokkos::View<const Precision**,Kokkos::LayoutRight> input,Precision scale,
                      Kokkos::View<Precision**,Kokkos::LayoutRight> input_adjoint);
@@ -133,6 +148,8 @@ private:
         edge_harmonics_storage,features_storage,radial_adjoints,
         radial_adjoints_storage,harmonic_adjoints,harmonic_adjoints_storage;
     Kokkos::View<int*> targets_storage,product_elements_storage,offsets_storage;
+    std::shared_ptr<typename E3LinearKokkosT<Precision>::Workspace>
+        e3_linear_workspace;
     E3LinearKokkosT<Precision> node_embedding;
     std::vector<Interaction> interactions;
     std::vector<E3ProductBasisKokkosT<Precision>> products;

@@ -14,6 +14,129 @@
 
 namespace py = pybind11;
 
+#ifdef SYMMETRIX_KOKKOS
+namespace {
+void bind_float_e3_primitives(py::module_& module)
+{
+    using Linear=E3LinearFloatKokkos;
+    py::class_<Linear>(module,"E3LinearKokkosFloat")
+        .def(py::init([](const std::string& definition) {
+            return Linear(nlohmann::json::parse(definition));
+        }))
+        .def_property_readonly("input_dimension",&Linear::input_dimension)
+        .def_property_readonly("output_dimension",&Linear::output_dimension)
+        .def_property_readonly("backend",&Linear::backend)
+        .def_property_readonly("workspace_bytes",&Linear::workspace_bytes)
+        .def("set_backend",&Linear::set_backend)
+        .def("selected_backend",&Linear::selected_backend)
+        .def("evaluate_batch",[](
+            const Linear& self,const std::vector<float>& values,int samples) {
+            if(samples<0||values.size()!=static_cast<std::size_t>(samples)
+                    *self.input_dimension())
+                throw std::invalid_argument(
+                    "Float Kokkos e3 linear input dimensions are inconsistent.");
+            Kokkos::View<float**,Kokkos::LayoutRight> input,output;
+            set_kokkos_view(input,values,samples,self.input_dimension());
+            Kokkos::realloc(output,samples,self.output_dimension());
+            self.evaluate(input,output);
+            return view2vector(output);
+        })
+        .def("reverse_batch",[](
+            const Linear& self,const std::vector<float>& seed,int samples) {
+            if(samples<0||seed.size()!=static_cast<std::size_t>(samples)
+                    *self.output_dimension())
+                throw std::invalid_argument(
+                    "Float Kokkos e3 linear adjoint dimensions are inconsistent.");
+            Kokkos::View<float**,Kokkos::LayoutRight> output_adjoint,input_adjoint;
+            set_kokkos_view(
+                output_adjoint,seed,samples,self.output_dimension());
+            Kokkos::realloc(input_adjoint,samples,self.input_dimension());
+            self.reverse(output_adjoint,input_adjoint);
+            return view2vector(input_adjoint);
+        });
+
+    using Tensor=E3TensorProductFloatKokkos;
+    py::class_<Tensor>(module,"E3TensorProductKokkosFloat")
+        .def(py::init([](const std::string& definition) {
+            return Tensor(nlohmann::json::parse(definition));
+        }))
+        .def_property_readonly("input_1_dimension",&Tensor::input_1_dimension)
+        .def_property_readonly("input_2_dimension",&Tensor::input_2_dimension)
+        .def_property_readonly("output_dimension",&Tensor::output_dimension)
+        .def_property_readonly("weight_size",&Tensor::weight_size)
+        .def_property_readonly(
+            "has_internal_weights",&Tensor::has_internal_weights)
+        .def_property_readonly(
+            "uses_mh1_fast_path",&Tensor::uses_mh1_fast_path)
+        .def_property_readonly("backend",&Tensor::backend)
+        .def("evaluate_batch",[](
+            const Tensor& self,const std::vector<float>& input_1,
+            const std::vector<float>& input_2,const std::vector<float>& weights,
+            int samples) {
+            if(samples<0
+                ||input_1.size()!=static_cast<std::size_t>(samples)
+                    *self.input_1_dimension()
+                ||input_2.size()!=static_cast<std::size_t>(samples)
+                    *self.input_2_dimension())
+                throw std::invalid_argument(
+                    "Float Kokkos tensor-product input dimensions are inconsistent.");
+            const bool use_internal=weights.empty()&&self.has_internal_weights();
+            if(!use_internal&&weights.size()!=static_cast<std::size_t>(samples)
+                    *self.weight_size())
+                throw std::invalid_argument(
+                    "Float Kokkos tensor-product weight dimensions are inconsistent.");
+            Kokkos::View<float**,Kokkos::LayoutRight> first,second,weight,output;
+            set_kokkos_view(first,input_1,samples,self.input_1_dimension());
+            set_kokkos_view(second,input_2,samples,self.input_2_dimension());
+            set_kokkos_view(
+                weight,weights,samples,use_internal?0:self.weight_size());
+            Kokkos::realloc(output,samples,self.output_dimension());
+            self.evaluate(first,second,weight,output);
+            return view2vector(output);
+        })
+        .def("reverse_batch",[](
+            const Tensor& self,const std::vector<float>& input_1,
+            const std::vector<float>& input_2,const std::vector<float>& weights,
+            const std::vector<float>& seed,int samples) {
+            if(samples<0
+                ||input_1.size()!=static_cast<std::size_t>(samples)
+                    *self.input_1_dimension()
+                ||input_2.size()!=static_cast<std::size_t>(samples)
+                    *self.input_2_dimension()
+                ||seed.size()!=static_cast<std::size_t>(samples)
+                    *self.output_dimension())
+                throw std::invalid_argument(
+                    "Float Kokkos tensor-product reverse dimensions are inconsistent.");
+            const bool use_internal=weights.empty()&&self.has_internal_weights();
+            if(!use_internal&&weights.size()!=static_cast<std::size_t>(samples)
+                    *self.weight_size())
+                throw std::invalid_argument(
+                    "Float Kokkos tensor-product weight dimensions are inconsistent.");
+            Kokkos::View<float**,Kokkos::LayoutRight> first,second,weight;
+            Kokkos::View<float**,Kokkos::LayoutRight> output_adjoint;
+            Kokkos::View<float**,Kokkos::LayoutRight> first_adjoint;
+            Kokkos::View<float**,Kokkos::LayoutRight> second_adjoint;
+            Kokkos::View<float**,Kokkos::LayoutRight> weight_adjoint;
+            set_kokkos_view(first,input_1,samples,self.input_1_dimension());
+            set_kokkos_view(second,input_2,samples,self.input_2_dimension());
+            set_kokkos_view(
+                weight,weights,samples,use_internal?0:self.weight_size());
+            set_kokkos_view(
+                output_adjoint,seed,samples,self.output_dimension());
+            Kokkos::realloc(first_adjoint,samples,self.input_1_dimension());
+            Kokkos::realloc(second_adjoint,samples,self.input_2_dimension());
+            Kokkos::realloc(weight_adjoint,samples,self.weight_size());
+            self.reverse(
+                first,second,weight,output_adjoint,first_adjoint,
+                second_adjoint,weight_adjoint);
+            return py::make_tuple(
+                view2vector(first_adjoint),view2vector(second_adjoint),
+                view2vector(weight_adjoint));
+        });
+}
+}
+#endif
+
 void bind_e3nn(py::module_& module)
 {
     py::class_<AffineMLP>(module, "AffineMLP")
@@ -148,6 +271,7 @@ void bind_e3nn(py::module_& module)
         });
 
 #ifdef SYMMETRIX_KOKKOS
+    bind_float_e3_primitives(module);
     py::class_<AffineMLPKokkos>(module, "AffineMLPKokkos")
         .def(py::init([](const std::string& definition) {
             return AffineMLPKokkos(nlohmann::json::parse(definition));

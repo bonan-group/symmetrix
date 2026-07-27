@@ -9,16 +9,6 @@
 #include "tools_kokkos.hpp"
 
 namespace {
-template<class Destination,class Source>
-void affine_deep_copy(Destination destination,Source source)
-{
-#ifdef KOKKOS_ENABLE_CUDA
-    Kokkos::deep_copy(Kokkos::DefaultExecutionSpace{},destination,source);
-#else
-    Kokkos::deep_copy(destination,source);
-#endif
-}
-
 template<typename Precision>
 std::vector<Precision> tensor_values(const nlohmann::json& value)
 {
@@ -182,7 +172,7 @@ void AffineMLPKokkosT<Precision>::forward_impl(
         throw std::invalid_argument("Kokkos affine MLP conditioned dimensions are inconsistent.");
     prepare(input.extent(0),input.extent(1));
     if(conditioned) prepare_conditioned_weight(input.extent(1));
-    affine_deep_copy(values(0),input);
+    ordered_kokkos_deep_copy(values(0),input);
     for (int layer=0; layer<types.size();) {
         if(types(layer)==LayerNorm&&layer+1<types.size()&&types(layer+1)==SiLU) {
             auto source=values(layer);
@@ -259,7 +249,7 @@ void AffineMLPKokkosT<Precision>::forward_impl(
 template<typename Precision>
 void AffineMLPKokkosT<Precision>::evaluate(Kokkos::View<const Precision**,Kokkos::LayoutRight> input,Kokkos::View<Precision**,Kokkos::LayoutRight> output)
 {
-    forward(input); affine_deep_copy(output,values(types.size()));
+    forward(input); ordered_kokkos_deep_copy(output,values(types.size()));
 }
 
 template<typename Precision>
@@ -269,7 +259,7 @@ void AffineMLPKokkosT<Precision>::evaluate_conditioned(
     Kokkos::View<Precision**,Kokkos::LayoutRight> output)
 {
     forward_impl(input,row_contributions);
-    affine_deep_copy(output,values(types.size()));
+    ordered_kokkos_deep_copy(output,values(types.size()));
 }
 
 template<typename Precision>
@@ -293,7 +283,7 @@ void AffineMLPKokkosT<Precision>::reverse_from_tape(
         ||input_adjoint.extent(0)!=static_cast<std::size_t>(tape_batch_size)
         ||input_adjoint.extent(1)!=static_cast<std::size_t>(tape_input_size))
         throw std::invalid_argument("Kokkos affine MLP reverse tape dimensions are inconsistent.");
-    affine_deep_copy(adjoints(types.size()),output_adjoint);
+    ordered_kokkos_deep_copy(adjoints(types.size()),output_adjoint);
     for (int layer=types.size()-1; layer>=0;) {
         if(types(layer)==SiLU&&layer>0&&types(layer-1)==LayerNorm) {
             auto source=values(layer-1);
@@ -359,7 +349,7 @@ void AffineMLPKokkosT<Precision>::reverse_from_tape(
                 });
             }
         } else if (types(layer)==LayerNorm) {
-            affine_deep_copy(source_adj,Precision(0));
+            ordered_kokkos_deep_copy(source_adj,Precision(0));
             auto gamma=weights(layer); const Precision epsilon=eps(layer);
             Kokkos::parallel_for("affine reverse layer norm",source.extent(0),KOKKOS_LAMBDA(int sample) {
                 const int width=source.extent(1); Precision mean=Precision(0); for (int i=0;i<width;++i) mean+=source(sample,i); mean/=width;
@@ -369,14 +359,14 @@ void AffineMLPKokkosT<Precision>::reverse_from_tape(
                 for (int i=0;i<width;++i) { const Precision scaled=target_adj(sample,i)*gamma(0,i); const Precision normalized=(source(sample,i)-mean)*inverse; source_adj(sample,i)=inverse*(width*scaled-sum-normalized*sum_normalized)/width; }
             });
         } else {
-            affine_deep_copy(source_adj,Precision(0));
+            ordered_kokkos_deep_copy(source_adj,Precision(0));
             Kokkos::parallel_for("affine reverse silu",source_adj.size(),KOKKOS_LAMBDA(int flat) {
                 const int sample=flat/source_adj.extent(1), column=flat%source_adj.extent(1); const Precision value=source(sample,column); const Precision probability=Precision(1)/(Precision(1)+Kokkos::exp(-value)); source_adj(sample,column)=target_adj(sample,column)*(probability+value*probability*(Precision(1)-probability));
             });
         }
         --layer;
     }
-    affine_deep_copy(input_adjoint,adjoints(0));
+    ordered_kokkos_deep_copy(input_adjoint,adjoints(0));
 }
 
 template class AffineMLPKokkosT<float>;

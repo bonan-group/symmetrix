@@ -2,26 +2,45 @@
 
 #include <Kokkos_Core.hpp>
 
+#include <memory>
+
 #include "e3nn.hpp"
 
 template<typename Precision>
 class E3LinearKokkosT {
 public:
+    enum class Backend { automatic, scalar, packed_gemm };
+    struct Workspace {
+        Kokkos::View<Precision**,Kokkos::LayoutRight> packed_input,
+            packed_output;
+        std::size_t bytes() const {
+            return sizeof(Precision)*(packed_input.size()+packed_output.size());
+        }
+    };
     struct Instruction {
         int input_offset, output_offset, input_multiplicity, output_multiplicity, width, weight_offset;
         Precision path_weight;
-        mutable Kokkos::View<Precision**,Kokkos::LayoutRight> packed_input,packed_output;
     };
     E3LinearKokkosT() = default;
     explicit E3LinearKokkosT(const nlohmann::json& data);
     int input_dimension() const { return input_dimension_; }
     int output_dimension() const { return output_dimension_; }
+    void set_backend(const std::string& backend);
+    std::string backend() const;
+    std::string selected_backend(std::size_t samples) const;
+    std::size_t workspace_bytes() const;
+    void set_workspace(std::shared_ptr<Workspace> workspace) {
+        workspace_=std::move(workspace);
+    }
     void evaluate(Kokkos::View<const Precision**,Kokkos::LayoutRight> input,
                   Kokkos::View<Precision**,Kokkos::LayoutRight> output) const;
     void reverse(Kokkos::View<const Precision**,Kokkos::LayoutRight> output_adjoint,
                  Kokkos::View<Precision**,Kokkos::LayoutRight> input_adjoint) const;
 private:
+    bool use_scalar_backend(std::size_t samples) const;
     int input_dimension_=0, output_dimension_=0;
+    Backend backend_=Backend::automatic;
+    std::shared_ptr<Workspace> workspace_=std::make_shared<Workspace>();
     std::vector<Instruction> instructions;
     Kokkos::View<Precision*> weights, bias, output_mask;
 };
@@ -49,6 +68,10 @@ public:
     int weight_size() const { return weight_size_; }
     bool has_internal_weights() const { return !internal_weights.empty(); }
     bool uses_mh1_fast_path() const { return mh1_fast_path; }
+    std::string backend() const {
+        return mh1_fast_path ? "official_kokkos" : "generic_kokkos";
+    }
+    std::size_t workspace_bytes() const { return 0; }
     void evaluate(Kokkos::View<const Precision**,Kokkos::LayoutRight> input_1,
                   Kokkos::View<const Precision**,Kokkos::LayoutRight> input_2,
                   Kokkos::View<const Precision**,Kokkos::LayoutRight> weights,

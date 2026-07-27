@@ -113,7 +113,7 @@ void E3ProductBasisKokkosT<Precision>::to_feature_major(Kokkos::View<const Preci
 template<typename Precision>
 void E3ProductBasisKokkosT<Precision>::evaluate(Kokkos::View<const Precision**,Kokkos::LayoutRight> source,Kokkos::View<const Precision**,Kokkos::LayoutRight> skip,Kokkos::View<const int*> elements,Kokkos::View<Precision**,Kokkos::LayoutRight> result)
 {
-    prepare(source.extent(0)); to_feature_major(source); Kokkos::deep_copy(contracted,Precision(0)); auto features=feature_major; auto target=contracted; const int feature_count=num_features;
+    prepare(source.extent(0)); to_feature_major(source); ordered_kokkos_deep_copy(contracted,Precision(0)); auto features=feature_major; auto target=contracted; const int feature_count=num_features;
     if(uses_compiled_plan()) {
         int invalid_elements=0;
         const int element_count=compiled_blocks.front().num_elements;
@@ -169,7 +169,7 @@ void E3ProductBasisKokkosT<Precision>::evaluate(Kokkos::View<const Precision**,K
 template<typename Precision>
 void E3ProductBasisKokkosT<Precision>::reverse(Kokkos::View<const Precision**,Kokkos::LayoutRight> source,Kokkos::View<const int*> elements,Kokkos::View<const Precision**,Kokkos::LayoutRight> output_adjoint,Kokkos::View<Precision**,Kokkos::LayoutRight> input_adjoint,Kokkos::View<Precision**,Kokkos::LayoutRight> skip_adjoint)
 {
-    prepare(source.extent(0)); to_feature_major(source); linear.reverse(output_adjoint,contracted_adjoint); Kokkos::deep_copy(feature_major_adjoint,Precision(0)); auto features=feature_major; auto features_adj=feature_major_adjoint; auto target_adj=contracted_adjoint; const int feature_count=num_features;
+    prepare(source.extent(0)); to_feature_major(source); linear.reverse(output_adjoint,contracted_adjoint); ordered_kokkos_deep_copy(feature_major_adjoint,Precision(0)); auto features=feature_major; auto features_adj=feature_major_adjoint; auto target_adj=contracted_adjoint; const int feature_count=num_features;
     if(uses_compiled_plan()) {
         int invalid_elements=0;
         const int element_count=compiled_blocks.front().num_elements;
@@ -231,9 +231,9 @@ void E3ProductBasisKokkosT<Precision>::reverse(Kokkos::View<const Precision**,Ko
                         features_adj(sample,feature,angular)=local[angular];
                 });
         }
-        Kokkos::deep_copy(input_adjoint,Precision(0)); int angular_offset=0;
+        ordered_kokkos_deep_copy(input_adjoint,Precision(0)); int angular_offset=0;
         for(const auto block:input.blocks) { const int width=2*block.l+1; const int offset=angular_offset; Kokkos::parallel_for("product reverse layout",Kokkos::MDRangePolicy<Kokkos::Rank<3>>({0,0,0},{static_cast<int>(source.extent(0)),num_features,width}),KOKKOS_LAMBDA(int sample,int feature,int component) { input_adjoint(sample,block.offset+feature*width+component)=features_adj(sample,feature,offset+component); }); angular_offset+=width; }
-        if(use_sc) Kokkos::deep_copy(skip_adjoint,output_adjoint); else Kokkos::deep_copy(skip_adjoint,Precision(0));
+        if(use_sc) ordered_kokkos_deep_copy(skip_adjoint,output_adjoint); else ordered_kokkos_deep_copy(skip_adjoint,Precision(0));
         return;
     }
     for(int block_index=0;block_index<static_cast<int>(output.blocks.size());++block_index) { const auto block=output.blocks[block_index]; const int width=2*block.l+1; const auto& contraction=contractions[block_index];
@@ -243,9 +243,9 @@ void E3ProductBasisKokkosT<Precision>::reverse(Kokkos::View<const Precision**,Ko
             });
         }
     }
-    Kokkos::deep_copy(input_adjoint,Precision(0)); int angular_offset=0;
+    ordered_kokkos_deep_copy(input_adjoint,Precision(0)); int angular_offset=0;
     for(const auto block:input.blocks) { const int width=2*block.l+1; const int offset=angular_offset; Kokkos::parallel_for("product reverse layout",Kokkos::MDRangePolicy<Kokkos::Rank<3>>({0,0,0},{static_cast<int>(source.extent(0)),num_features,width}),KOKKOS_LAMBDA(int sample,int feature,int component) { input_adjoint(sample,block.offset+feature*width+component)=features_adj(sample,feature,offset+component); }); angular_offset+=width; }
-    if(use_sc) Kokkos::deep_copy(skip_adjoint,output_adjoint); else Kokkos::deep_copy(skip_adjoint,Precision(0));
+    if(use_sc) ordered_kokkos_deep_copy(skip_adjoint,output_adjoint); else ordered_kokkos_deep_copy(skip_adjoint,Precision(0));
 }
 
 template class E3ProductBasisKokkosT<float>;

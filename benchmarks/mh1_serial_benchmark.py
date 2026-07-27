@@ -194,22 +194,31 @@ def _benchmark(calculator, atoms, warmups, repeats, include_ase):
         and native_symmetrix._kokkos_default_execution_space() == "Cuda"
     )
     gpu_memory_before = _gpu_process_memory_mib() if cuda else None
+    synchronize = getattr(calculator.evaluator, "fence", lambda: None)
     for _ in range(warmups):
+        synchronize()
         calculator.evaluator.compute_node_energies_forces(*native_args)
+        synchronize()
     evaluator_samples = []
     for _ in range(repeats):
+        synchronize()
         start = time.perf_counter()
         calculator.evaluator.compute_node_energies_forces(*native_args)
+        synchronize()
         evaluator_samples.append(1000.0 * (time.perf_counter() - start))
     evaluator_results = calculator._collect_mace_results(atoms, inputs)
 
     ase_samples = []
     if include_ase:
         for _ in range(warmups):
+            synchronize()
             calculator.calculate(atoms.copy(), properties=["energy", "forces"])
+            synchronize()
         for _ in range(repeats):
+            synchronize()
             start = time.perf_counter()
             calculator.calculate(atoms.copy(), properties=["energy", "forces"])
+            synchronize()
             ase_samples.append(1000.0 * (time.perf_counter() - start))
 
     edge_workspace_bytes = getattr(
@@ -232,6 +241,21 @@ def _benchmark(calculator, atoms, warmups, repeats, include_ase):
         "edge_workspace_mib": (
             edge_workspace_bytes / 2**20
             if edge_workspace_bytes is not None else None
+        ),
+        "e3_linear_backend": getattr(
+            calculator.evaluator, "e3_linear_backend", None
+        ),
+        "tensor_product_backend": getattr(
+            calculator.evaluator, "tensor_product_backend", None
+        ),
+        "linear_workspace_bytes": getattr(
+            calculator.evaluator, "linear_workspace_bytes", None
+        ),
+        "tensor_workspace_bytes": getattr(
+            calculator.evaluator, "tensor_workspace_bytes", None
+        ),
+        "precision_workspace_bytes": getattr(
+            calculator.evaluator, "precision_workspace_bytes", edge_workspace_bytes
         ),
         "energy_eV": float(evaluator_results["energy"]),
         "force_l2_eV_per_A": float(np.linalg.norm(evaluator_results["forces"])),
@@ -308,6 +332,12 @@ def main():
     )
     parser.add_argument("--warmups", type=int, default=3)
     parser.add_argument("--repeats", type=int, default=5)
+    parser.add_argument(
+        "--e3-linear-backend",
+        choices=("auto", "scalar", "packed_gemm"),
+        default="auto",
+        help="Benchmark-only Kokkos E3-linear execution policy",
+    )
     parser.add_argument("--evaluator-only", action="store_true")
     parser.add_argument(
         "--allow-generic",
@@ -370,6 +400,8 @@ def main():
         dtype=args.dtype,
         streamed_edges=args.streamed_edges,
     )
+    if use_kokkos:
+        calculator.evaluator.set_e3_linear_backend(args.e3_linear_backend)
     if (
         not args.allow_generic
         and not getattr(calculator.evaluator, "uses_mh1_fast_path", False)
@@ -398,6 +430,9 @@ def main():
         "scalar_size_bytes": getattr(calculator.evaluator, "scalar_size_bytes", 8),
         "uses_mh1_fast_path": bool(calculator.evaluator.uses_mh1_fast_path),
         "streamed_edges": calculator.streamed_edges,
+        "e3_linear_backend": getattr(
+            calculator.evaluator, "e3_linear_backend", None
+        ),
         "warmups": args.warmups,
         "repeats": args.repeats,
         "thread_environment": {name: os.environ.get(name) for name in THREAD_VARIABLES},
