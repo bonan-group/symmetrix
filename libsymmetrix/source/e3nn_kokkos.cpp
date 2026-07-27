@@ -4,6 +4,7 @@
 #include <numeric>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 
 #include "KokkosBlas.hpp"
@@ -20,11 +21,6 @@ public:
     ~ProfileRegion() { Kokkos::Profiling::popRegion(); }
 };
 
-#ifdef KOKKOS_ENABLE_CUDA
-constexpr int mh1_team_size=128;
-#else
-constexpr int mh1_team_size=1;
-#endif
 }
 
 template<typename Precision>
@@ -95,7 +91,7 @@ void E3LinearKokkosT<Precision>::evaluate(Kokkos::View<const Precision**,Kokkos:
         ||output.extent(0)!=input.extent(0)
         ||output.extent(1)!=static_cast<std::size_t>(output_dimension_))
         throw std::invalid_argument("Kokkos e3 linear batch dimensions are inconsistent.");
-    ProfileRegion profile("symmetrix/mh1/e3_linear/forward");
+    ProfileRegion profile("symmetrix/e3_linear/forward");
     ordered_kokkos_deep_copy(output,Precision(0)); auto all_weights=weights;
     const bool use_scalar_path=use_scalar_backend(input.extent(0));
     if(use_scalar_path) {
@@ -188,7 +184,7 @@ void E3LinearKokkosT<Precision>::reverse(Kokkos::View<const Precision**,Kokkos::
         ||input_adjoint.extent(0)!=output_adjoint.extent(0)
         ||input_adjoint.extent(1)!=static_cast<std::size_t>(input_dimension_))
         throw std::invalid_argument("Kokkos e3 linear reverse batch dimensions are inconsistent.");
-    ProfileRegion profile("symmetrix/mh1/e3_linear/reverse");
+    ProfileRegion profile("symmetrix/e3_linear/reverse");
     ordered_kokkos_deep_copy(input_adjoint,Precision(0)); auto all_weights=weights; auto mask=output_mask;
     const bool use_scalar_path=use_scalar_backend(output_adjoint.extent(0));
     if(use_scalar_path) {
@@ -382,9 +378,21 @@ E3TensorProductKokkosT<Precision>::E3TensorProductKokkosT(const nlohmann::json& 
 }
 
 template<typename Precision>
+std::string E3TensorProductKokkosT<Precision>::execution_backend() const
+{
+    if(!mh1_fast_path) return "generic_kokkos";
+#ifdef KOKKOS_ENABLE_CUDA
+    if constexpr(std::is_same_v<Precision,float>) return "official_cuda_team";
+#endif
+    return "official_kokkos_mdrange";
+}
+
+template<typename Precision>
 void E3TensorProductKokkosT<Precision>::evaluate(Kokkos::View<const Precision**,Kokkos::LayoutRight> input_1,Kokkos::View<const Precision**,Kokkos::LayoutRight> input_2,Kokkos::View<const Precision**,Kokkos::LayoutRight> dynamic_weights,Kokkos::View<Precision**,Kokkos::LayoutRight> output) const
 {
-    ProfileRegion profile("symmetrix/mh1/tensor_product/forward");
+    ProfileRegion profile(mh1_fast_path
+        ? "symmetrix/mh1/tensor_product/forward"
+        : "symmetrix/generic/tensor_product/forward");
     ordered_kokkos_deep_copy(output,Precision(0)); auto mask=output_mask; auto fixed=internal_weights;
     if(mh1_fast_path) {
         auto plan=mh1_instruction_data;
@@ -393,10 +401,12 @@ void E3TensorProductKokkosT<Precision>::evaluate(Kokkos::View<const Precision**,
         auto values=mh1_sparse_values;
         auto component_offsets=mh1_component_offsets;
         const int instruction_count=mh1_instruction_count_;
+#ifdef KOKKOS_ENABLE_CUDA
+        if constexpr(std::is_same_v<Precision,float>) {
         using channel_policy=Kokkos::TeamPolicy<>;
         Kokkos::parallel_for(
             "e3 tensor product mh1 team channels",
-            channel_policy(input_1.extent(0),mh1_team_size),
+            channel_policy(input_1.extent(0),128),
             KOKKOS_LAMBDA(const typename channel_policy::member_type& team) {
                 const int sample=team.league_rank();
                 Kokkos::parallel_for(
@@ -431,6 +441,41 @@ void E3TensorProductKokkosT<Precision>::evaluate(Kokkos::View<const Precision**,
                 });
             });
         return;
+        }
+#endif
+        Kokkos::parallel_for(
+            "e3 tensor product mh1 fused",
+            Kokkos::MDRangePolicy<Kokkos::Rank<2>>(
+                {0,0},{static_cast<int>(input_1.extent(0)),128}),
+            KOKKOS_LAMBDA(int sample,int channel) {
+                for(int instruction=0;instruction<instruction_count;
+                    ++instruction) {
+                    const int input_1_offset=plan(instruction,0);
+                    const int input_2_offset=plan(instruction,1);
+                    const int output_offset=plan(instruction,2);
+                    const int input_width=plan(instruction,3);
+                    const int output_width=plan(instruction,4);
+                    const int weight_offset=plan(instruction,5);
+                    const int component_base=plan(instruction,6);
+                    const Precision scale=paths(instruction)
+                        *dynamic_weights(sample,weight_offset+channel);
+                    for(int component=0;component<output_width;++component) {
+                        Precision result=Precision(0);
+                        for(int entry=component_offsets(component_base+component);
+                            entry<component_offsets(
+                                component_base+component+1);++entry)
+                            result+=values(entry)
+                                *input_1(sample,input_1_offset
+                                    +channel*input_width+indices(entry,0))
+                                *input_2(sample,input_2_offset+indices(entry,1));
+                        const int output_index=output_offset
+                            +channel*output_width+component;
+                        output(sample,output_index)+=
+                            scale*result*mask(output_index);
+                    }
+                }
+            });
+        return;
     }
     for (const auto instruction:instructions) { auto wigner=instruction.wigner;
         Kokkos::parallel_for("e3 tensor product",Kokkos::MDRangePolicy<Kokkos::Rank<3>>({0,0,0},{static_cast<int>(input_1.extent(0)),instruction.output_multiplicity,instruction.output_width}),KOKKOS_LAMBDA(int sample,int u,int c) {
@@ -444,7 +489,9 @@ void E3TensorProductKokkosT<Precision>::evaluate(Kokkos::View<const Precision**,
 template<typename Precision>
 void E3TensorProductKokkosT<Precision>::reverse(Kokkos::View<const Precision**,Kokkos::LayoutRight> input_1,Kokkos::View<const Precision**,Kokkos::LayoutRight> input_2,Kokkos::View<const Precision**,Kokkos::LayoutRight> dynamic_weights,Kokkos::View<const Precision**,Kokkos::LayoutRight> output_adjoint,Kokkos::View<Precision**,Kokkos::LayoutRight> input_1_adjoint,Kokkos::View<Precision**,Kokkos::LayoutRight> input_2_adjoint,Kokkos::View<Precision**,Kokkos::LayoutRight> weights_adjoint) const
 {
-    ProfileRegion profile("symmetrix/mh1/tensor_product/reverse");
+    ProfileRegion profile(mh1_fast_path
+        ? "symmetrix/mh1/tensor_product/reverse"
+        : "symmetrix/generic/tensor_product/reverse");
     ordered_kokkos_deep_copy(input_1_adjoint,Precision(0));
     ordered_kokkos_deep_copy(input_2_adjoint,Precision(0));
     ordered_kokkos_deep_copy(weights_adjoint,Precision(0));
@@ -459,10 +506,12 @@ void E3TensorProductKokkosT<Precision>::reverse(Kokkos::View<const Precision**,K
         auto harmonic_terms=mh1_harmonic_terms;
         auto harmonic_values=mh1_harmonic_values;
         const int instruction_count=mh1_instruction_count_;
+#ifdef KOKKOS_ENABLE_CUDA
+        if constexpr(std::is_same_v<Precision,float>) {
         using channel_policy=Kokkos::TeamPolicy<>;
         Kokkos::parallel_for(
             "e3 tensor reverse mh1 team channels",
-            channel_policy(input_1.extent(0),mh1_team_size),
+            channel_policy(input_1.extent(0),128),
             KOKKOS_LAMBDA(const typename channel_policy::member_type& team) {
                 const int sample=team.league_rank();
                 Kokkos::parallel_for(
@@ -507,7 +556,7 @@ void E3TensorProductKokkosT<Precision>::reverse(Kokkos::View<const Precision**,K
         Kokkos::parallel_for(
             "e3 tensor reverse mh1 team harmonics",
             harmonic_policy(
-                input_1.extent(0)*harmonic_dimension,mh1_team_size),
+                input_1.extent(0)*harmonic_dimension,128),
             KOKKOS_LAMBDA(const typename harmonic_policy::member_type& team) {
                 const int sample=team.league_rank()/harmonic_dimension;
                 const int component=team.league_rank()%harmonic_dimension;
@@ -538,6 +587,76 @@ void E3TensorProductKokkosT<Precision>::reverse(Kokkos::View<const Precision**,K
                 Kokkos::single(Kokkos::PerTeam(team),[&]() {
                     input_2_adjoint(sample,component)=result;
                 });
+            });
+        return;
+        }
+#endif
+        Kokkos::parallel_for(
+            "e3 tensor reverse mh1 fused channels",
+            Kokkos::MDRangePolicy<Kokkos::Rank<2>>(
+                {0,0},{static_cast<int>(input_1.extent(0)),128}),
+            KOKKOS_LAMBDA(int sample,int channel) {
+                for(int instruction=0;instruction<instruction_count;
+                    ++instruction) {
+                    const int input_1_offset=plan(instruction,0);
+                    const int input_2_offset=plan(instruction,1);
+                    const int output_offset=plan(instruction,2);
+                    const int input_width=plan(instruction,3);
+                    const int output_width=plan(instruction,4);
+                    const int weight_offset=plan(instruction,5);
+                    const int component_base=plan(instruction,6);
+                    const int first_entry=component_offsets(component_base);
+                    const int last_entry=component_offsets(
+                        component_base+output_width);
+                    const Precision weight=dynamic_weights(
+                        sample,weight_offset+channel);
+                    Precision weight_value=Precision(0);
+                    for(int entry=first_entry;entry<last_entry;++entry) {
+                        const int a=indices(entry,0);
+                        const int b=indices(entry,1);
+                        const int c=indices(entry,2);
+                        const int output_index=output_offset
+                            +channel*output_width+c;
+                        const Precision common=paths(instruction)*values(entry)
+                            *mask(output_index)*output_adjoint(sample,output_index);
+                        const Precision first=input_1(sample,input_1_offset
+                            +channel*input_width+a);
+                        const Precision second=input_2(sample,input_2_offset+b);
+                        input_1_adjoint(sample,input_1_offset
+                            +channel*input_width+a)+=common*weight*second;
+                        weight_value+=common*first*second;
+                    }
+                    weights_adjoint(sample,weight_offset+channel)=weight_value;
+                }
+            });
+        Kokkos::parallel_for(
+            "e3 tensor reverse mh1 fused harmonics",
+            Kokkos::MDRangePolicy<Kokkos::Rank<2>>(
+                {0,0},{static_cast<int>(input_1.extent(0)),input_2_dimension_}),
+            KOKKOS_LAMBDA(int sample,int component) {
+                Precision result=Precision(0);
+                for(int channel=0;channel<128;++channel)
+                    for(int term=harmonic_offsets(component);
+                        term<harmonic_offsets(component+1);++term) {
+                        const int instruction=harmonic_terms(term,0);
+                        const int a=harmonic_terms(term,1);
+                        const int c=harmonic_terms(term,2);
+                        const int input_1_offset=plan(instruction,0);
+                        const int output_offset=plan(instruction,2);
+                        const int input_width=plan(instruction,3);
+                        const int output_width=plan(instruction,4);
+                        const int weight_offset=plan(instruction,5);
+                        const int output_index=output_offset
+                            +channel*output_width+c;
+                        const Precision common=paths(instruction)
+                            *harmonic_values(term)*mask(output_index)
+                            *output_adjoint(sample,output_index);
+                        result+=common
+                            *dynamic_weights(sample,weight_offset+channel)
+                            *input_1(sample,input_1_offset
+                                +channel*input_width+a);
+                    }
+                input_2_adjoint(sample,component)=result;
             });
         return;
     }

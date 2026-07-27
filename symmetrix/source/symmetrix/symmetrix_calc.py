@@ -50,9 +50,12 @@ class Symmetrix(Calculator):
     model_file: str
         JSON-format model file used for potential energy
     streamed_edges: {"auto", "legacy", "r1", "all"}
-        Compact MACE/MACEField execution mode. ``auto`` selects ``all`` for
-        compact format-v2 models and ``legacy`` otherwise. ``r1`` streams the
-        second interaction radial functions; ``all`` also streams the first.
+        Edge-workspace mode for compact format-v2 MACE/MACEField and strict
+        format-v3 MACE-MH-1 models. ``auto`` selects ``all`` when the loaded
+        model supports streaming and ``legacy`` otherwise. For format v2,
+        ``r1`` streams the second interaction radial functions and ``all`` also
+        streams the first. For strict MH-1, the modes stream the corresponding
+        conditioned edge networks and tensor products.
 
     Notes
     -----

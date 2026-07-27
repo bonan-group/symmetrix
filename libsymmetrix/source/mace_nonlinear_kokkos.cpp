@@ -243,6 +243,7 @@ void MaceNonlinearKokkosT<Precision>::set_streamed_edges(std::string mode)
     if(requested!=MACEStreamedEdgesMode::legacy&&!supports_streamed_edges())
         throw std::invalid_argument(
             "Streamed edges require the published MACE-MH-1 fast-path architecture.");
+    Kokkos::fence("MACE_Nonlinear streamed-mode transition");
     streamed_edges=requested;
     if(streamed_edges==MACEStreamedEdgesMode::r1)
         release_layer_edge_workspace(1);
@@ -373,11 +374,29 @@ std::string MaceNonlinearKokkosT<Precision>::e3_linear_backend() const
 }
 
 template<typename Precision>
+std::string MaceNonlinearKokkosT<Precision>::selected_e3_linear_backend(
+    std::size_t samples) const
+{
+    return node_embedding.selected_backend(samples);
+}
+
+template<typename Precision>
 std::string MaceNonlinearKokkosT<Precision>::tensor_product_backend() const
 {
     return std::all_of(interactions.begin(),interactions.end(),[](const auto& interaction) {
         return interaction.convolution.uses_mh1_fast_path();
     }) ? "official_kokkos" : "generic_kokkos";
+}
+
+template<typename Precision>
+std::string MaceNonlinearKokkosT<Precision>::tensor_product_execution_backend() const
+{
+    if(interactions.empty()) return "none";
+    const auto selected=interactions.front().convolution.execution_backend();
+    return std::all_of(
+        interactions.begin(),interactions.end(),[&selected](const auto& interaction) {
+            return interaction.convolution.execution_backend()==selected;
+        }) ? selected : "mixed";
 }
 
 template<typename Precision>
@@ -453,7 +472,19 @@ void MaceNonlinearKokkosT<Precision>::compute_Y(Kokkos::View<const double*> xyz)
 #ifndef SYMMETRIX_SPHERICART_CUDA
     auto host_xyz=Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),xyz_shuffled);auto host_y=Kokkos::create_mirror_view(Y);auto host_grad=Kokkos::create_mirror_view(Y_grad);spherical_harmonics_state->calculator.compute_array_with_gradients(host_xyz.data(),3*edges,host_y.data(),edges*num_lm,host_grad.data(),3*edges*num_lm);Kokkos::deep_copy(Y,host_y);Kokkos::deep_copy(Y_grad,host_grad);
 #else
-    spherical_harmonics_state->calculator.compute_with_gradients(xyz_shuffled.data(),edges,Y.data(),Y_grad.data());
+    {
+    Kokkos::DefaultExecutionSpace execution_space;
+    spherical_harmonics_state->calculator.compute_with_gradients(
+        xyz_shuffled.data(),edges,Y.data(),Y_grad.data(),
+        reinterpret_cast<void*>(execution_space.cuda_stream()));
+    Kokkos::deep_copy(execution_space,Y_grad_shuffled,Y_grad);
+    auto y=Y;auto grad=Y_grad;auto old=Y_grad_shuffled;const int nlm=num_lm;const Precision factor=Precision(2)*Kokkos::sqrt(Precision(M_PI));
+    Kokkos::parallel_for(
+        "nonlinear normalize harmonics",
+        Kokkos::RangePolicy<Kokkos::DefaultExecutionSpace>(execution_space,0,edges),
+        KOKKOS_LAMBDA(int edge){for(int lm=0;lm<nlm;++lm){y(edge*nlm+lm)*=factor;grad((3*edge+0)*nlm+lm)=factor*old((3*edge+1)*nlm+lm);grad((3*edge+1)*nlm+lm)=factor*old((3*edge+2)*nlm+lm);grad((3*edge+2)*nlm+lm)=factor*old((3*edge+0)*nlm+lm);}});
+    return;
+    }
 #endif
     ordered_kokkos_deep_copy(Y_grad_shuffled,Y_grad);auto y=Y;auto grad=Y_grad;auto old=Y_grad_shuffled;const int nlm=num_lm;const Precision factor=Precision(2)*Kokkos::sqrt(Precision(M_PI));Kokkos::parallel_for("nonlinear normalize harmonics",edges,KOKKOS_LAMBDA(int edge){for(int lm=0;lm<nlm;++lm){y(edge*nlm+lm)*=factor;grad((3*edge+0)*nlm+lm)=factor*old((3*edge+1)*nlm+lm);grad((3*edge+1)*nlm+lm)=factor*old((3*edge+2)*nlm+lm);grad((3*edge+2)*nlm+lm)=factor*old((3*edge+0)*nlm+lm);}});
 }

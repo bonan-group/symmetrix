@@ -27,7 +27,9 @@ public:
     void fence() const { Kokkos::fence("MACE_Nonlinear public fence"); }
     void set_e3_linear_backend(const std::string& backend);
     std::string e3_linear_backend() const;
+    std::string selected_e3_linear_backend(std::size_t samples) const;
     std::string tensor_product_backend() const;
+    std::string tensor_product_execution_backend() const;
     std::size_t linear_workspace_bytes() const;
     std::size_t tensor_workspace_bytes() const;
     std::size_t precision_workspace_bytes() const;

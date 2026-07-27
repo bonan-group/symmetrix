@@ -235,6 +235,67 @@ def test_mh1_kokkos_mode_switch_releases_full_edge_workspaces(
     assert calculator.evaluator.edge_workspace_bytes < legacy_bytes
 
 
+@pytest.mark.parametrize("dtype", ["float64", "float32"])
+def test_mh1_kokkos_mode_switch_fences_pending_evaluation(
+    mh1_si_artifact, dtype
+):
+    evaluator_name = (
+        "MACENonlinearKokkos" if dtype == "float64" else "MACENonlinearKokkosFloat"
+    )
+    if not hasattr(native_symmetrix, evaluator_name):
+        pytest.skip("Symmetrix was built without the requested Kokkos precision")
+    _, model_path = mh1_si_artifact
+    atoms = bulk("Si", "diamond", a=5.43, cubic=True).repeat((2, 1, 1))
+    calculator = Symmetrix(
+        model_path,
+        use_kokkos=True,
+        dtype=dtype,
+        streamed_edges="legacy",
+    )
+    inputs = calculator._mace_inputs(atoms)
+    (
+        num_nodes,
+        node_types,
+        num_neigh,
+        neighbors,
+        neigh_types,
+        xyz,
+        distances,
+        _,
+    ) = inputs
+
+    calculator.evaluator.compute_node_energies_forces(
+        num_nodes,
+        node_types,
+        num_neigh,
+        neighbors,
+        neigh_types,
+        xyz.flatten(),
+        distances,
+    )
+    calculator.evaluator.set_streamed_edges("all")
+    legacy_energies = np.asarray(calculator.evaluator.node_energies)
+    legacy_forces = np.asarray(calculator.evaluator.node_forces)
+
+    calculator.evaluator.compute_node_energies_forces(
+        num_nodes,
+        node_types,
+        num_neigh,
+        neighbors,
+        neigh_types,
+        xyz.flatten(),
+        distances,
+    )
+    calculator.evaluator.set_streamed_edges("legacy")
+    all_energies = np.asarray(calculator.evaluator.node_energies)
+    all_forces = np.asarray(calculator.evaluator.node_forces)
+    tolerance = 2e-12 if dtype == "float64" else 2e-5
+    np.testing.assert_allclose(
+        all_energies, legacy_energies, rtol=0.0, atol=tolerance
+    )
+    np.testing.assert_allclose(all_forces, legacy_forces, rtol=0.0, atol=tolerance)
+
+
 def test_mh1_cuda_streamed_fast_path_matches_native(mh1_si_artifact):
     if not hasattr(native_symmetrix, "MACENonlinearKokkos"):
         pytest.skip("Symmetrix was built without Kokkos support")
@@ -1423,7 +1484,15 @@ def test_mh1_kokkos_exposes_synchronized_linear_controls(mh1_si_artifact):
         else "auto"
     )
     assert evaluator.e3_linear_backend == expected_backend
+    assert evaluator.selected_e3_linear_backend(17) == "packed_gemm"
     assert evaluator.tensor_product_backend == "official_kokkos"
+    execution_space = native_symmetrix._kokkos_default_execution_space()
+    expected_tensor_execution = (
+        "official_cuda_team"
+        if execution_space == "Cuda"
+        else "official_kokkos_mdrange"
+    )
+    assert evaluator.tensor_product_execution_backend == expected_tensor_execution
     assert evaluator.linear_workspace_bytes == 0
     assert evaluator.tensor_workspace_bytes == 0
     assert evaluator.precision_workspace_bytes == evaluator.edge_workspace_bytes
@@ -1433,6 +1502,14 @@ def test_mh1_kokkos_exposes_synchronized_linear_controls(mh1_si_artifact):
     assert evaluator.e3_linear_backend == "packed_gemm"
     with pytest.raises(ValueError, match="auto, scalar, or packed_gemm"):
         evaluator.set_e3_linear_backend("invalid")
+
+    double_evaluator = native_symmetrix.MACENonlinearKokkos(str(model_path))
+    assert (
+        double_evaluator.tensor_product_execution_backend
+        == "official_kokkos_mdrange"
+    )
+    expected_double_linear = "scalar" if execution_space == "Cuda" else "packed_gemm"
+    assert double_evaluator.selected_e3_linear_backend(17) == expected_double_linear
     evaluator.fence()
 
 

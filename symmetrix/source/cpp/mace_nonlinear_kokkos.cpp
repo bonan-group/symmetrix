@@ -29,7 +29,11 @@ void bind_mace_nonlinear_kokkos_evaluator(
         .def("fence",&Evaluator::fence)
         .def("set_e3_linear_backend",&Evaluator::set_e3_linear_backend)
         .def_property_readonly("e3_linear_backend",&Evaluator::e3_linear_backend)
+        .def("selected_e3_linear_backend",&Evaluator::selected_e3_linear_backend)
         .def_property_readonly("tensor_product_backend",&Evaluator::tensor_product_backend)
+        .def_property_readonly(
+            "tensor_product_execution_backend",
+            &Evaluator::tensor_product_execution_backend)
         .def_property_readonly("linear_workspace_bytes",&Evaluator::linear_workspace_bytes)
         .def_property_readonly("tensor_workspace_bytes",&Evaluator::tensor_workspace_bytes)
         .def_property_readonly("precision_workspace_bytes",&Evaluator::precision_workspace_bytes)

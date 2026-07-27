@@ -128,6 +128,8 @@ Final qualification covers 30 CUDA physics, primitive, lifecycle, resizing,
 species, finite-difference, and workspace tests; six direct OpenMP tests; and
 CUDA memcheck of the larger official tensor-product layer with zero errors.
 The optimized evaluator reports `e3_linear_backend="packed_gemm"`,
-`tensor_product_backend="official_kokkos"`, 1,486,880,768 edge-workspace
-bytes, 61,931,520 linear-workspace bytes, and 1,548,812,288 total
-precision-workspace bytes.
+`selected_e3_linear_backend(864)="packed_gemm"`,
+`tensor_product_backend="official_kokkos"`, and
+`tensor_product_execution_backend="official_cuda_team"`. It retains
+1,486,880,768 edge-workspace bytes, 61,931,520 linear-workspace bytes, and
+1,548,812,288 total precision-workspace bytes.

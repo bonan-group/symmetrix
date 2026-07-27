@@ -71,6 +71,7 @@ public:
     std::string backend() const {
         return mh1_fast_path ? "official_kokkos" : "generic_kokkos";
     }
+    std::string execution_backend() const;
     std::size_t workspace_bytes() const { return 0; }
     void evaluate(Kokkos::View<const Precision**,Kokkos::LayoutRight> input_1,
                   Kokkos::View<const Precision**,Kokkos::LayoutRight> input_2,

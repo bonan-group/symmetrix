@@ -69,6 +69,7 @@ void bind_float_e3_primitives(py::module_& module)
         .def_property_readonly(
             "uses_mh1_fast_path",&Tensor::uses_mh1_fast_path)
         .def_property_readonly("backend",&Tensor::backend)
+        .def_property_readonly("execution_backend",&Tensor::execution_backend)
         .def("evaluate_batch",[](
             const Tensor& self,const std::vector<float>& input_1,
             const std::vector<float>& input_2,const std::vector<float>& weights,
@@ -358,6 +359,8 @@ void bind_e3nn(py::module_& module)
             "has_internal_weights", &E3TensorProductKokkos::has_internal_weights)
         .def_property_readonly(
             "uses_mh1_fast_path", &E3TensorProductKokkos::uses_mh1_fast_path)
+        .def_property_readonly(
+            "execution_backend", &E3TensorProductKokkos::execution_backend)
         .def("evaluate", [](
             const E3TensorProductKokkos& self,
             const std::vector<double>& input_1,

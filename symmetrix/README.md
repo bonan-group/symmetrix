@@ -31,6 +31,12 @@ pip install --verbose . \
     --config-settings=cmake.define.SYMMETRIX_SPHERICART_CUDA=ON
 ```
 
+The manually dispatched `CUDA qualification` GitHub Actions workflow builds
+this configuration and runs either the focused production-path checks or the
+complete MACE-MH-1 suite. It requires a Linux x64 self-hosted runner with the
+`cuda` label, an NVIDIA GPU, and `nvcc` on `PATH`; ordinary pull requests do not
+wait for that optional hardware runner.
+
 ### Generating Symmetrix `.json` model files
 
 Once the Python package is installed, use
@@ -144,15 +150,19 @@ node contributions immediately, and recomputes each block during analytic
 reverse propagation. Shared radial and angular geometry remains available for
 the final force chain rule. Evaluator
 properties `edge_workspace_rows` and, for Kokkos, `edge_workspace_bytes` expose
-the retained layer-edge workspace. Changing a Kokkos evaluator from `legacy`
-to `r1` or `all` releases the corresponding grow-only full-edge capacities.
+the retained layer-edge workspace. Changing a Kokkos evaluator's mode first
+completes queued device work; transitions to `r1` or `all` then release the
+corresponding grow-only full-edge capacities.
 On strict Float32 CUDA models, the default specialization also selects shared
 packed SGEMM for equivariant linears and 128-thread sample teams for the
 official tensor products. CPU, Float64, and related nonlinear layouts retain
 their existing dispatch. The selected paths and complete precision-owned
 scratch are available through `e3_linear_backend`,
-`tensor_product_backend`, `linear_workspace_bytes`,
-`tensor_workspace_bytes`, and `precision_workspace_bytes`.
+`selected_e3_linear_backend(samples)`, `tensor_product_backend`,
+`tensor_product_execution_backend`, `linear_workspace_bytes`,
+`tensor_workspace_bytes`, and `precision_workspace_bytes`. The configured
+linear policy and its sample-count-dependent effective selection are reported
+separately.
 
 Related format-version-3 nonlinear models that do not satisfy the complete
 fast-path predicate remain in `legacy` mode and reject explicit `r1` or `all`

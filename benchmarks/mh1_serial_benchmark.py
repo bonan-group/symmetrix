@@ -224,6 +224,9 @@ def _benchmark(calculator, atoms, warmups, repeats, include_ase):
     edge_workspace_bytes = getattr(
         calculator.evaluator, "edge_workspace_bytes", None
     )
+    selected_e3_linear_backend = getattr(
+        calculator.evaluator, "selected_e3_linear_backend", None
+    )
     return {
         "atoms": len(atoms),
         "directed_edges": len(inputs[6]),
@@ -245,8 +248,15 @@ def _benchmark(calculator, atoms, warmups, repeats, include_ase):
         "e3_linear_backend": getattr(
             calculator.evaluator, "e3_linear_backend", None
         ),
+        "selected_e3_linear_backend": (
+            selected_e3_linear_backend(len(atoms))
+            if selected_e3_linear_backend is not None else None
+        ),
         "tensor_product_backend": getattr(
             calculator.evaluator, "tensor_product_backend", None
+        ),
+        "tensor_product_execution_backend": getattr(
+            calculator.evaluator, "tensor_product_execution_backend", None
         ),
         "linear_workspace_bytes": getattr(
             calculator.evaluator, "linear_workspace_bytes", None
@@ -432,6 +442,9 @@ def main():
         "streamed_edges": calculator.streamed_edges,
         "e3_linear_backend": getattr(
             calculator.evaluator, "e3_linear_backend", None
+        ),
+        "tensor_product_execution_backend": getattr(
+            calculator.evaluator, "tensor_product_execution_backend", None
         ),
         "warmups": args.warmups,
         "repeats": args.repeats,
