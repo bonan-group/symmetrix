@@ -146,6 +146,13 @@ the final force chain rule. Evaluator
 properties `edge_workspace_rows` and, for Kokkos, `edge_workspace_bytes` expose
 the retained layer-edge workspace. Changing a Kokkos evaluator from `legacy`
 to `r1` or `all` releases the corresponding grow-only full-edge capacities.
+On strict Float32 CUDA models, the default specialization also selects shared
+packed SGEMM for equivariant linears and 128-thread sample teams for the
+official tensor products. CPU, Float64, and related nonlinear layouts retain
+their existing dispatch. The selected paths and complete precision-owned
+scratch are available through `e3_linear_backend`,
+`tensor_product_backend`, `linear_workspace_bytes`,
+`tensor_workspace_bytes`, and `precision_workspace_bytes`.
 
 Related format-version-3 nonlinear models that do not satisfy the complete
 fast-path predicate remain in `legacy` mode and reject explicit `r1` or `all`

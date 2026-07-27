@@ -84,3 +84,50 @@ kernel time. Consequently, the remaining cuEquivariance gap requires more
 coarse-grained or fused equivariant kernels; further affine-only tuning or a
 larger streamed block does not address the dominant cost. Tested 8,192- and
 32,768-edge blocks regress to 254.163 and 207.055 ms respectively.
+
+## CUDA equivariant-kernel optimization
+
+The strict Float32 CUDA `all` path was subsequently optimized and committed as
+`f9f020969a1cecc4625ccd074b36a20783db2436`. The tracked source was clean at
+that commit; generated build trees and local planning files remained untracked.
+The build uses CUDA 13.3.73, Kokkos CUDA for `BLACKWELL120`, KokkosKernels with
+cuBLAS, and the same RTX 5090/driver 610.43.02. The system, graph, model hash,
+three warmups, ten measured calls, explicit device fences, Float32 precision,
+and 16,384-edge block are unchanged.
+
+| Implementation | Median (ms) | Median (ms/atom) | Process VRAM before/after (MiB) | Precision workspace (MiB) |
+|---|---:|---:|---:|---:|
+| Original synchronized scalar `all` | 174.718 | 0.202220 | 506 / 3,574 | 1,866.00 |
+| Optimized Symmetrix `all` (`f9f0209`) | 62.133 | 0.071913 | 506 / 3,184 | 1,477.06 |
+| PyTorch/cuEquivariance 0.11.0 | 22.823 | 0.026416 | 0 / 3,616 | 2,456.90 peak allocated |
+
+The optimized path is 2.81x faster than the synchronized scalar control, a
+64.4% latency reduction. Process VRAM falls by 390 MiB (10.9%), and total
+precision-owned workspace falls by 388.94 MiB (20.8%) even after including
+the new 59.06 MiB shared linear workspace. It remains 2.72x slower than the
+fresh same-session cuEquivariance result, so it clears the plan's 2x
+Symmetrix speed gate but not its 1.25x cuEquivariance stretch target.
+
+The retained stages are shared packed-SGEMM storage for E3 linears, 128-thread
+sample teams for all official tensor-product forward/reverse channel work,
+parallel harmonic reverse reductions, CUDA execution-space-ordered internal
+copies, and lifetime reuse of forward edge-message storage by reverse
+edge-message adjoints. Float64, Kokkos CPU, and generic nonlinear layouts keep
+their existing selection rules. Rejected controls include workspace-free
+direct-tiled linears, split tensor instruction/channel kernels, adjacent-power
+radial derivatives, CUDA team LayerNorm/SiLU, and a 20,480-edge block.
+
+The optimized ten samples in milliseconds are:
+`[62.153722, 62.110902, 62.108758, 62.120200, 64.423274, 65.991663,
+63.740525, 62.128926, 62.136410, 62.128215]`. The matched cuEquivariance
+samples are:
+`[22.775048, 22.822446, 22.990168, 22.784306, 22.799584, 22.825472,
+22.824000, 22.791510, 22.945676, 22.828027]`.
+
+Final qualification covers 30 CUDA physics, primitive, lifecycle, resizing,
+species, finite-difference, and workspace tests; six direct OpenMP tests; and
+CUDA memcheck of the larger official tensor-product layer with zero errors.
+The optimized evaluator reports `e3_linear_backend="packed_gemm"`,
+`tensor_product_backend="official_kokkos"`, 1,486,880,768 edge-workspace
+bytes, 61,931,520 linear-workspace bytes, and 1,548,812,288 total
+precision-workspace bytes.
