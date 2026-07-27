@@ -156,11 +156,44 @@ def _peak_rss_bytes():
     return None
 
 
+def _gpu_process_memory_mib():
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-compute-apps=pid,used_gpu_memory",
+                "--format=csv,noheader,nounits",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    used_mib = 0
+    for line in result.stdout.splitlines():
+        fields = [field.strip() for field in line.split(",")]
+        if len(fields) == 2 and fields[0] == str(os.getpid()):
+            try:
+                used_mib += int(fields[1])
+            except ValueError:
+                return None
+    return used_mib
+
+
 def _benchmark(calculator, atoms, warmups, repeats, include_ase):
     inputs = calculator._mace_inputs(atoms)
     native_args = (*inputs[:5], inputs[5].flatten(), inputs[6])
 
     rss_before = _current_rss_bytes()
+    cuda = (
+        calculator.use_kokkos
+        and native_symmetrix._kokkos_default_execution_space() == "Cuda"
+    )
+    gpu_memory_before = _gpu_process_memory_mib() if cuda else None
     for _ in range(warmups):
         calculator.evaluator.compute_node_energies_forces(*native_args)
     evaluator_samples = []
@@ -179,6 +212,9 @@ def _benchmark(calculator, atoms, warmups, repeats, include_ase):
             calculator.calculate(atoms.copy(), properties=["energy", "forces"])
             ase_samples.append(1000.0 * (time.perf_counter() - start))
 
+    edge_workspace_bytes = getattr(
+        calculator.evaluator, "edge_workspace_bytes", None
+    )
     return {
         "atoms": len(atoms),
         "directed_edges": len(inputs[6]),
@@ -188,6 +224,14 @@ def _benchmark(calculator, atoms, warmups, repeats, include_ase):
         "rss_after_mib": _current_rss_bytes() / 2**20,
         "peak_rss_mib": (
             _peak_rss_bytes() / 2**20 if _peak_rss_bytes() is not None else None
+        ),
+        "gpu_process_memory_before_mib": gpu_memory_before,
+        "gpu_process_memory_after_mib": _gpu_process_memory_mib() if cuda else None,
+        "edge_workspace_rows": calculator.evaluator.edge_workspace_rows,
+        "edge_workspace_bytes": edge_workspace_bytes,
+        "edge_workspace_mib": (
+            edge_workspace_bytes / 2**20
+            if edge_workspace_bytes is not None else None
         ),
         "energy_eV": float(evaluator_results["energy"]),
         "force_l2_eV_per_A": float(np.linalg.norm(evaluator_results["forces"])),
@@ -240,6 +284,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("model", type=pathlib.Path, help="Extracted MACE-MH-1 JSON model")
     parser.add_argument("--backend", choices=("serial", "kokkos"), default="serial")
+    parser.add_argument("--dtype", choices=("float32", "float64"), default="float64")
     parser.add_argument("--reference-model", type=pathlib.Path, help="Optional native MH-0 JSON")
     parser.add_argument("--max-reference-ratio", type=float)
     parser.add_argument(
@@ -264,6 +309,11 @@ def main():
     parser.add_argument("--warmups", type=int, default=3)
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--evaluator-only", action="store_true")
+    parser.add_argument(
+        "--allow-generic",
+        action="store_true",
+        help="Allow the generic nonlinear evaluator for a control measurement",
+    )
     parser.add_argument(
         "--lifecycle-sizes",
         help="Comma-separated supercell sizes to alternate for RSS measurement",
@@ -317,15 +367,18 @@ def main():
     calculator = Symmetrix(
         args.model,
         use_kokkos=use_kokkos,
-        dtype="float64",
+        dtype=args.dtype,
         streamed_edges=args.streamed_edges,
     )
-    if not getattr(calculator.evaluator, "uses_mh1_fast_path", False):
+    if (
+        not args.allow_generic
+        and not getattr(calculator.evaluator, "uses_mh1_fast_path", False)
+    ):
         raise RuntimeError(
-            f"Model does not match the specialized MACE-MH-1 {args.backend} CPU architecture"
+            f"Model does not match the specialized MACE-MH-1 {args.backend} architecture"
         )
     reference = (
-        Symmetrix(args.reference_model, use_kokkos=use_kokkos, dtype="float64")
+        Symmetrix(args.reference_model, use_kokkos=use_kokkos, dtype=args.dtype)
         if args.reference_model else None
     )
 
@@ -341,6 +394,9 @@ def main():
         "cpu_affinity": sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None,
         "thread_affinities": _thread_affinities(),
         "backend": args.backend,
+        "dtype": args.dtype,
+        "scalar_size_bytes": getattr(calculator.evaluator, "scalar_size_bytes", 8),
+        "uses_mh1_fast_path": bool(calculator.evaluator.uses_mh1_fast_path),
         "streamed_edges": calculator.streamed_edges,
         "warmups": args.warmups,
         "repeats": args.repeats,

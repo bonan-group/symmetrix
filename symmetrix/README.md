@@ -86,9 +86,11 @@ MACEField evaluators support both `dtype="float64"` and `dtype="float32"` with
 fields enter through the existing float64 interface; learned tensors and
 evaluator workspaces use the selected precision, and ASE results are promoted
 to NumPy float64 during assembly. Format-version-1 pair splines are available
-only for standard MACE. Nonlinear format-version-3 models remain float64-only.
-The native LAMMPS pair style also remains float64-only; its Kokkos styles retain
-their existing precision selection.
+only for standard MACE. Strict published MACE-MH-1 format-version-3 models also
+support float32 through Kokkos; generic nonlinear format-version-3 models and
+the native serial nonlinear evaluator remain float64-only. The native LAMMPS
+pair style also remains float64-only; its Kokkos styles retain their existing
+precision selection.
 
 To generate version 1 data for an older reader or for code that consumes the
 legacy `radial_spline_*` keys, request pair splines explicitly. The equivalent
@@ -114,13 +116,14 @@ compact version 2 files.
 `Symmetrix` accepts MACE-MH-1 `.model` checkpoints through the ASE calculator.
 The `RealAgnosticResidualNonLinearInteractionBlock` graph is evaluated natively
 by both the serial and Kokkos backends, including analytic forces and stress.
-Runtime evaluation requires `dtype="float64"`; the default `use_kokkos=True`
-selects the Kokkos evaluator. Select a model head explicitly when needed:
+The Kokkos evaluator supports `dtype="float32"` and `dtype="float64"`; the
+serial evaluator currently requires float64. The default `use_kokkos=True`
+selects Kokkos. Select a model head explicitly when needed:
 
 ```
 from symmetrix import Symmetrix
 
-calc = Symmetrix("mace-mh-1.model", head="matpes_r2scan", dtype="float64")
+calc = Symmetrix("mace-mh-1.model", head="matpes_r2scan", dtype="float32")
 ```
 
 The serial and Kokkos CPU evaluators have specialized fast paths for the
@@ -135,21 +138,36 @@ For this strict architecture, both CPU evaluators default to
 `streamed_edges="all"`. The modes have layer-level semantics: `legacy` retains
 full-edge intermediate state for both interactions, `r1` streams only the
 second interaction, and `all` streams both interactions. Streaming evaluates
-the conditioned edge networks and tensor products in blocks of at most 1024
-directed edges, accumulates their node contributions immediately, and
-recomputes each block during analytic reverse propagation. Shared radial and
-angular geometry remains available for the final force chain rule. Evaluator
+the conditioned edge networks and tensor products in bounded blocks of at most
+1024 directed edges on CPU or 16384 directed edges on CUDA, accumulates their
+node contributions immediately, and recomputes each block during analytic
+reverse propagation. Shared radial and angular geometry remains available for
+the final force chain rule. Evaluator
 properties `edge_workspace_rows` and, for Kokkos, `edge_workspace_bytes` expose
 the retained layer-edge workspace. Changing a Kokkos evaluator from `legacy`
 to `r1` or `all` releases the corresponding grow-only full-edge capacities.
 
 Related format-version-3 nonlinear models that do not satisfy the complete
 fast-path predicate remain in `legacy` mode and reject explicit `r1` or `all`
-requests. The streamed MH-1 specialization is qualified for native serial,
-Kokkos Serial, and Kokkos OpenMP CPU execution in float64. It remains disabled
-in Kokkos CUDA builds, which continue to use the generic nonlinear evaluator.
-That generic CUDA fallback supports energy, analytic forces, and stress; it has
-been qualified against native CPU float64 on an RTX 5090 with CUDA 13.3.
+requests. The streamed MH-1 specialization is qualified in float64 for native
+serial, Kokkos Serial, Kokkos OpenMP, and Kokkos CUDA execution. CUDA energy,
+analytic forces, and stress have been qualified against native CPU float64 on
+an RTX 5090 with CUDA 13.3. The same Kokkos specialization is precision
+templated for float32: learned parameters, radial/angular features,
+equivariant intermediates, tapes, and adjoints are four-byte values, while
+double coordinates and published ASE outputs preserve the existing API. On an
+864-atom CUDA qualification graph, Float32 agrees with Float64 within
+`2.800e-6 eV/atom` in energy and `2.180e-6 eV/A` in a force component while
+halving the retained precision-owned workspace. Timings and absolute memory
+are recorded in [the MH-1 benchmark report](../benchmarks/mh1_streamed_edges_864.md).
+Related nonlinear layouts continue to use the generic float64 evaluator and
+accept only `legacy`.
+
+| Nonlinear format-v3 backend | Strict MH-1 float64 | Strict MH-1 float32 | Related/generic architecture |
+|---|---|---|---|
+| Native serial CPU | `legacy`, `r1`, `all` | Not supported | float64 `legacy` |
+| Kokkos Serial/OpenMP | `legacy`, `r1`, `all` | `legacy`, `r1`, `all` | float64 `legacy` |
+| Kokkos CUDA | `legacy`, `r1`, `all` | `legacy`, `r1`, `all` | float64 `legacy` |
 
 The Kokkos CPU path is selected by the default `use_kokkos=True`. It shares the
 serial model-load compiler for sparse product coefficients, then executes
@@ -205,10 +223,9 @@ calc = Symmetrix(
 Related nonlinear models that do not match the complete MH-1 architecture use
 the generic native evaluator for the selected backend. An explicit
 `use_kokkos=True` request is never redirected to the serial evaluator. The
-specialized Kokkos CPU path is qualified with Kokkos Serial and OpenMP in
-float64. Builds whose Kokkos default execution space includes CUDA disable the
-MH-1 specialization and retain the generic native nonlinear evaluator; CUDA
-performance and specialized-kernel qualification are deferred.
+specialized Kokkos path is available with Kokkos Serial, OpenMP, and CUDA in
+both float32 and float64. Float32 construction fails closed unless the model
+matches the complete published MACE-MH-1 fast-path predicate.
 
 Native nonlinear evaluator objects retain mutable forward tapes and grow-only
 workspaces. Calls on one evaluator instance must be serialized; use a separate
@@ -225,9 +242,10 @@ symmetrix_extract_mace --model mace-mh-1.model \
 ```
 
 Format-version-3 `MACE_Nonlinear` JSON can be used through the ASE calculator
-or the native `MACENonlinear` and `MACENonlinearKokkos` library classes. The
-LAMMPS pair styles do not support this model family in the current release and
-fail at `pair_coeff` with an explicit unsupported-model error.
+or the native `MACENonlinear`, `MACENonlinearKokkos`, and strict-only
+`MACENonlinearKokkosFloat` library classes. The LAMMPS pair styles do not
+support this model family in the current release and fail at `pair_coeff` with
+an explicit unsupported-model error.
 
 Native extraction supports the standard per-layer `LinearReadoutBlock` and
 SiLU `NonLinearReadoutBlock` layout used by MACE-MH-1. Checkpoints using joint

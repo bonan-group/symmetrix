@@ -10,10 +10,12 @@
 #include "mace_streamed_edges.hpp"
 #include "zbl_kokkos.hpp"
 
-class MaceNonlinearKokkos {
+template<typename Precision>
+class MaceNonlinearKokkosT {
 public:
-    explicit MaceNonlinearKokkos(const std::string& filename);
-    ~MaceNonlinearKokkos();
+    using precision_type=Precision;
+    explicit MaceNonlinearKokkosT(const std::string& filename);
+    ~MaceNonlinearKokkosT();
     double r_cut=0.0;
     bool has_field_coupling=false;
     bool uses_mh1_fast_path() const { return mh1_fast_path; }
@@ -33,32 +35,32 @@ public:
 
 private:
     struct SphericalHarmonicsState;
-    explicit MaceNonlinearKokkos(const nlohmann::json& data);
+    explicit MaceNonlinearKokkosT(const nlohmann::json& data);
 
 public:
     struct Gate {
         int scalar_size=0,gate_size=0,gated_size=0,output_size=0;
         std::vector<IrrepBlock> scalar_blocks,gated_blocks;
-        std::vector<double> scalar_constants;
-        std::vector<double> gate_constants;
+        std::vector<Precision> scalar_constants;
+        std::vector<Precision> gate_constants;
         explicit Gate(const nlohmann::json& data);
-        void evaluate(Kokkos::View<const double**,Kokkos::LayoutRight> input,
-                      Kokkos::View<double**,Kokkos::LayoutRight> output) const;
-        void reverse(Kokkos::View<const double**,Kokkos::LayoutRight> input,
-                     Kokkos::View<const double**,Kokkos::LayoutRight> output_adjoint,
-                     Kokkos::View<double**,Kokkos::LayoutRight> input_adjoint) const;
+        void evaluate(Kokkos::View<const Precision**,Kokkos::LayoutRight> input,
+                      Kokkos::View<Precision**,Kokkos::LayoutRight> output) const;
+        void reverse(Kokkos::View<const Precision**,Kokkos::LayoutRight> input,
+                     Kokkos::View<const Precision**,Kokkos::LayoutRight> output_adjoint,
+                     Kokkos::View<Precision**,Kokkos::LayoutRight> input_adjoint) const;
     };
 private:
     struct Interaction {
-        E3LinearKokkos source_embedding,target_embedding,linear_up,skip,linear_res,linear_1,linear_2;
-        E3TensorProductKokkos convolution;
-        AffineMLPKokkos convolution_weights,density;
+        E3LinearKokkosT<Precision> source_embedding,target_embedding,linear_up,skip,linear_res,linear_1,linear_2;
+        E3TensorProductKokkosT<Precision> convolution;
+        AffineMLPKokkosT<Precision> convolution_weights,density;
         Gate gate;
-        Kokkos::View<double**,Kokkos::LayoutRight> convolution_source_contributions;
-        Kokkos::View<double**,Kokkos::LayoutRight> convolution_target_contributions;
-        Kokkos::View<double**,Kokkos::LayoutRight> density_source_contributions;
-        Kokkos::View<double**,Kokkos::LayoutRight> density_target_contributions;
-        double alpha,beta;
+        Kokkos::View<Precision**,Kokkos::LayoutRight> convolution_source_contributions;
+        Kokkos::View<Precision**,Kokkos::LayoutRight> convolution_target_contributions;
+        Kokkos::View<Precision**,Kokkos::LayoutRight> density_source_contributions;
+        Kokkos::View<Precision**,Kokkos::LayoutRight> density_target_contributions;
+        Precision alpha,beta;
         explicit Interaction(const nlohmann::json& data);
         bool prepare_pair_conditioning(
             const nlohmann::json& data,int radial_size,int model_element_count,
@@ -66,30 +68,30 @@ private:
     };
 public:
     struct Readout {
-        bool nonlinear=false; E3LinearKokkos linear,linear_1,linear_2; double activation_constant=1.0;
-        Kokkos::View<double**,Kokkos::LayoutRight> hidden,activated,result,seed,
+        bool nonlinear=false; E3LinearKokkosT<Precision> linear,linear_1,linear_2; Precision activation_constant=1.0;
+        Kokkos::View<Precision**,Kokkos::LayoutRight> hidden,activated,result,seed,
             activated_adj,hidden_adj;
-        Kokkos::View<double**,Kokkos::LayoutRight> hidden_storage,activated_storage,
+        Kokkos::View<Precision**,Kokkos::LayoutRight> hidden_storage,activated_storage,
             result_storage,seed_storage,activated_adj_storage,hidden_adj_storage;
         explicit Readout(const nlohmann::json& data);
-        void evaluate(Kokkos::View<const double**,Kokkos::LayoutRight> input,Kokkos::View<double*> output);
-        void reverse(Kokkos::View<const double**,Kokkos::LayoutRight> input,double scale,
-                     Kokkos::View<double**,Kokkos::LayoutRight> input_adjoint);
+        void evaluate(Kokkos::View<const Precision**,Kokkos::LayoutRight> input,Kokkos::View<Precision*> output);
+        void reverse(Kokkos::View<const Precision**,Kokkos::LayoutRight> input,Precision scale,
+                     Kokkos::View<Precision**,Kokkos::LayoutRight> input_adjoint);
     };
 private:
     struct LayerState {
-        Kokkos::View<double**,Kokkos::LayoutRight> input,up,residual,skip,messages,linear_1_output,pre_gate,gated,interaction_output,output;
-        Kokkos::View<double**,Kokkos::LayoutRight> source_embeddings,target_embeddings,edge_features,raw_weights,weights,edge_up,edge_messages;
-        Kokkos::View<double**,Kokkos::LayoutRight> convolution_contributions,density_contributions;
-        Kokkos::View<double**,Kokkos::LayoutRight> density_matrix,layer_adjoint,
+        Kokkos::View<Precision**,Kokkos::LayoutRight> input,up,residual,skip,messages,linear_1_output,pre_gate,gated,interaction_output,output;
+        Kokkos::View<Precision**,Kokkos::LayoutRight> source_embeddings,target_embeddings,edge_features,raw_weights,weights,edge_up,edge_messages;
+        Kokkos::View<Precision**,Kokkos::LayoutRight> convolution_contributions,density_contributions;
+        Kokkos::View<Precision**,Kokkos::LayoutRight> density_matrix,layer_adjoint,
             interaction_output_adj,skip_adj,gated_adj,pre_gate_adj,linear_adj,
             message_adj,residual_up_adj,up_adj,edge_message_adj,edge_up_adj,
             edge_harmonic_adj,weight_adj,raw_weight_adj,edge_feature_adj,
             density_raw_adj,density_feature_adj,up_input_adj,skip_input_adj;
-        Kokkos::View<double*> density_raw,density_base,densities,density_adj;
+        Kokkos::View<Precision*> density_raw,density_base,densities,density_adj;
         Kokkos::View<int*> agnostic_elements;
 
-        Kokkos::View<double**,Kokkos::LayoutRight> up_storage,residual_storage,
+        Kokkos::View<Precision**,Kokkos::LayoutRight> up_storage,residual_storage,
             skip_storage,messages_storage,linear_1_output_storage,pre_gate_storage,
             gated_storage,interaction_output_storage,output_storage,
             source_embeddings_storage,target_embeddings_storage,
@@ -103,35 +105,42 @@ private:
             weight_adj_storage,raw_weight_adj_storage,edge_feature_adj_storage,
             density_raw_adj_storage,density_feature_adj_storage,
             up_input_adj_storage,skip_input_adj_storage;
-        Kokkos::View<double*> density_raw_storage,density_base_storage,
+        Kokkos::View<Precision*> density_raw_storage,density_base_storage,
             densities_storage,density_adj_storage;
         Kokkos::View<int*> agnostic_elements_storage;
     };
     int l_max=0,num_lm=0,model_num_elements=0,cutoff_power=0,num_bessel=0;
     bool apply_cutoff=false,has_agnesi=false,has_zbl=false,mh1_fast_path=false;
     MACEStreamedEdgesMode streamed_edges=MACEStreamedEdgesMode::legacy;
+#ifdef KOKKOS_ENABLE_CUDA
+    static constexpr int streamed_edge_block_size=16384;
+#else
     static constexpr int streamed_edge_block_size=1024;
+#endif
     bool streams_layer(int layer) const;
     void release_layer_edge_workspace(int layer);
     double radial_prefactor=0.0,agnesi_a=0.0,agnesi_q=0.0,agnesi_p=0.0,scale=1.0,shift=0.0;
     Kokkos::View<int*> model_indices,model_atomic_numbers;
-    Kokkos::View<double*> bessel_weights,covalent_radii,cutoffs,Y,Y_grad,xyz_shuffled,Y_grad_shuffled;
-    Kokkos::View<double**,Kokkos::LayoutRight> attrs,radial,edge_harmonics,features;
+    Kokkos::View<Precision*> bessel_weights,covalent_radii,cutoffs,Y,Y_grad,xyz_shuffled,Y_grad_shuffled;
+    Kokkos::View<Precision**,Kokkos::LayoutRight> attrs,radial,edge_harmonics,features;
     Kokkos::View<int*> targets,product_elements,offsets;
-    Kokkos::View<double*> cutoffs_storage,Y_storage,Y_grad_storage,
-        xyz_shuffled_storage,Y_grad_shuffled_storage,node_energies_storage,
-        node_forces_storage,readout_contribution,readout_contribution_storage,
-        cutoff_adjoints,cutoff_adjoints_storage,zbl_energies,zbl_energies_storage,
-        zbl_forces,zbl_forces_storage;
-    Kokkos::View<double**,Kokkos::LayoutRight> attrs_storage,radial_storage,
+    Kokkos::View<Precision*> cutoffs_storage,Y_storage,Y_grad_storage,
+        xyz_shuffled_storage,Y_grad_shuffled_storage,readout_contribution,
+        readout_contribution_storage,cutoff_adjoints,cutoff_adjoints_storage;
+    Kokkos::View<double*> node_energies_storage,node_forces_storage,
+        zbl_energies,zbl_energies_storage,zbl_forces,zbl_forces_storage;
+    Kokkos::View<Precision**,Kokkos::LayoutRight> attrs_storage,radial_storage,
         edge_harmonics_storage,features_storage,radial_adjoints,
         radial_adjoints_storage,harmonic_adjoints,harmonic_adjoints_storage;
     Kokkos::View<int*> targets_storage,product_elements_storage,offsets_storage;
-    E3LinearKokkos node_embedding;
+    E3LinearKokkosT<Precision> node_embedding;
     std::vector<Interaction> interactions;
-    std::vector<E3ProductBasisKokkos> products;
+    std::vector<E3ProductBasisKokkosT<Precision>> products;
     std::vector<Readout> readouts;
     std::vector<LayerState> states;
     ZBLKokkos zbl;
     std::unique_ptr<SphericalHarmonicsState> spherical_harmonics_state;
 };
+
+using MaceNonlinearKokkos = MaceNonlinearKokkosT<double>;
+using MaceNonlinearFloatKokkos = MaceNonlinearKokkosT<float>;

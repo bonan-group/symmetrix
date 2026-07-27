@@ -143,15 +143,25 @@ class Symmetrix(Calculator):
     @staticmethod
     def _native_evaluator_class(model_type, dtype, use_kokkos):
         if model_type == "MACE_Nonlinear":
-            if dtype != "float64":
-                raise ValueError("MACE_Nonlinear models currently require dtype 'float64'.")
             if use_kokkos:
-                if not hasattr(symmetrix, "MACENonlinearKokkos"):
+                evaluator_name = (
+                    "MACENonlinearKokkos"
+                    if dtype == "float64"
+                    else "MACENonlinearKokkosFloat"
+                )
+                if not hasattr(symmetrix, evaluator_name):
                     raise RuntimeError(
-                        "This Symmetrix build does not provide the native MACE_Nonlinear Kokkos evaluator.")
+                        "This Symmetrix build does not provide the requested "
+                        "native MACE_Nonlinear Kokkos evaluator."
+                    )
                 if not symmetrix._kokkos_is_initialized():
                     symmetrix._init_kokkos()
-                return symmetrix.MACENonlinearKokkos
+                return getattr(symmetrix, evaluator_name)
+            if dtype != "float64":
+                raise ValueError(
+                    "Native serial MACE_Nonlinear models currently require "
+                    "dtype 'float64'."
+                )
             return symmetrix.MACENonlinear
         if model_type not in ("MACE", "MACEField"):
             raise ValueError(f"Unsupported Symmetrix model_type '{model_type}'.")

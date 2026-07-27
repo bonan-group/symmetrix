@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <type_traits>
 #include <utility>
 
 #include "affine_mlp.hpp"
@@ -11,7 +12,8 @@
 #include "tools_kokkos.hpp"
 
 namespace {
-std::vector<double> tensor_values(const nlohmann::json& value){return value.at("values").get<std::vector<double>>();}
+template<typename Value>
+std::vector<Value> tensor_values(const nlohmann::json& value){return value.at("values").get<std::vector<Value>>();}
 nlohmann::json load_model_json(const std::string& filename){std::ifstream stream(filename);if(!stream)throw std::runtime_error("Could not open MACE_Nonlinear Kokkos model file: "+filename);return nlohmann::json::parse(stream);}
 const nlohmann::json& checked_interaction(const nlohmann::json& data){if(data.at("class").get<std::string>()!="RealAgnosticResidualNonLinearInteractionBlock")throw std::invalid_argument("MACE_Nonlinear Kokkos interaction class is unsupported.");return data;}
 const nlohmann::json& readout_component(const nlohmann::json& data,int component){const auto readout_class=data.at("class").get<std::string>();if(readout_class=="LinearReadoutBlock")return data.at("linear");if(readout_class=="NonLinearReadoutBlock")return data.at(component==2?"linear_2":"linear_1");throw std::invalid_argument("MACE_Nonlinear Kokkos readout class is unsupported: "+readout_class);}
@@ -34,49 +36,56 @@ void ensure_view(View& view,View& storage,int first,int second)
 }
 }
 
-struct MaceNonlinearKokkos::SphericalHarmonicsState {
+template<typename Precision>
+struct MaceNonlinearKokkosT<Precision>::SphericalHarmonicsState {
 #ifdef SYMMETRIX_SPHERICART_CUDA
     explicit SphericalHarmonicsState(int l_max) : calculator(l_max) {}
-    sphericart::cuda::SphericalHarmonics<double> calculator;
+    sphericart::cuda::SphericalHarmonics<Precision> calculator;
 #else
     explicit SphericalHarmonicsState(int l_max) : calculator(l_max) {}
-    sphericart::SphericalHarmonics<double> calculator;
+    sphericart::SphericalHarmonics<Precision> calculator;
 #endif
 };
 
-MaceNonlinearKokkos::~MaceNonlinearKokkos() = default;
+template<typename Precision>
+MaceNonlinearKokkosT<Precision>::~MaceNonlinearKokkosT() = default;
 
-MaceNonlinearKokkos::Gate::Gate(const nlohmann::json& data)
+template<typename Precision>
+MaceNonlinearKokkosT<Precision>::Gate::Gate(const nlohmann::json& data)
 {
     if(data.at("scalar_activation").get<std::string>()!="silu"||data.at("gate_activation").get<std::string>()!="sigmoid")throw std::invalid_argument("MACE_Nonlinear Kokkos gate has unsupported activations.");
     Irreps scalars(data.at("irreps_scalars").get<std::string>()),gates(data.at("irreps_gates").get<std::string>()),gated(data.at("irreps_gated").get<std::string>()),output(data.at("irreps_out").get<std::string>());
     scalar_size=scalars.dimension(); gate_size=gates.dimension(); gated_size=gated.dimension(); output_size=output.dimension(); scalar_blocks=scalars.blocks; gated_blocks=gated.blocks;
-    scalar_constants=data.at("scalar_activation_constants").get<std::vector<double>>(); gate_constants=data.at("gate_activation_constants").get<std::vector<double>>();
+    scalar_constants=data.at("scalar_activation_constants").get<std::vector<Precision>>(); gate_constants=data.at("gate_activation_constants").get<std::vector<Precision>>();
     if(scalar_constants.size()!=scalar_blocks.size()||gate_constants.size()!=gated_blocks.size())throw std::invalid_argument("MACE_Nonlinear Kokkos gate activation counts are inconsistent.");
 }
 
-void MaceNonlinearKokkos::Gate::evaluate(Kokkos::View<const double**,Kokkos::LayoutRight> input,Kokkos::View<double**,Kokkos::LayoutRight> output) const
+template<typename Precision>
+void MaceNonlinearKokkosT<Precision>::Gate::evaluate(Kokkos::View<const Precision**,Kokkos::LayoutRight> input,Kokkos::View<Precision**,Kokkos::LayoutRight> output) const
 {
-    for(int block_index=0;block_index<static_cast<int>(scalar_blocks.size());++block_index){const auto block=scalar_blocks[block_index];const double constant=scalar_constants[block_index];Kokkos::parallel_for("nonlinear gate scalars",Kokkos::MDRangePolicy<Kokkos::Rank<2>>({0,0},{static_cast<int>(input.extent(0)),block.dimension()}),KOKKOS_LAMBDA(int sample,int index){const int offset=block.offset+index;const double x=input(sample,offset);output(sample,offset)=constant*x/(1.0+Kokkos::exp(-x));});}
+    for(int block_index=0;block_index<static_cast<int>(scalar_blocks.size());++block_index){const auto block=scalar_blocks[block_index];const Precision constant=scalar_constants[block_index];Kokkos::parallel_for("nonlinear gate scalars",Kokkos::MDRangePolicy<Kokkos::Rank<2>>({0,0},{static_cast<int>(input.extent(0)),block.dimension()}),KOKKOS_LAMBDA(int sample,int index){const int offset=block.offset+index;const Precision x=input(sample,offset);output(sample,offset)=constant*x/(Precision(1)+Kokkos::exp(-x));});}
     int gate_offset=scalar_size,gated_offset=scalar_size+gate_size,output_offset=scalar_size;
-    for(int block_index=0;block_index<static_cast<int>(gated_blocks.size());++block_index){const auto block=gated_blocks[block_index];const int width=2*block.l+1;const int go=gate_offset,gio=gated_offset,oo=output_offset;const double constant=gate_constants[block_index];
-        Kokkos::parallel_for("nonlinear gate tensors",Kokkos::MDRangePolicy<Kokkos::Rank<3>>({0,0,0},{static_cast<int>(input.extent(0)),block.multiplicity,width}),KOKKOS_LAMBDA(int sample,int feature,int component){const double probability=1.0/(1.0+Kokkos::exp(-input(sample,go+feature)));output(sample,oo+feature*width+component)=constant*probability*input(sample,gio+feature*width+component);});
+    for(int block_index=0;block_index<static_cast<int>(gated_blocks.size());++block_index){const auto block=gated_blocks[block_index];const int width=2*block.l+1;const int go=gate_offset,gio=gated_offset,oo=output_offset;const Precision constant=gate_constants[block_index];
+        Kokkos::parallel_for("nonlinear gate tensors",Kokkos::MDRangePolicy<Kokkos::Rank<3>>({0,0,0},{static_cast<int>(input.extent(0)),block.multiplicity,width}),KOKKOS_LAMBDA(int sample,int feature,int component){const Precision probability=Precision(1)/(Precision(1)+Kokkos::exp(-input(sample,go+feature)));output(sample,oo+feature*width+component)=constant*probability*input(sample,gio+feature*width+component);});
         gate_offset+=block.multiplicity;gated_offset+=block.dimension();output_offset+=block.dimension();}
 }
 
-void MaceNonlinearKokkos::Gate::reverse(Kokkos::View<const double**,Kokkos::LayoutRight> input,Kokkos::View<const double**,Kokkos::LayoutRight> output_adjoint,Kokkos::View<double**,Kokkos::LayoutRight> input_adjoint) const
+template<typename Precision>
+void MaceNonlinearKokkosT<Precision>::Gate::reverse(Kokkos::View<const Precision**,Kokkos::LayoutRight> input,Kokkos::View<const Precision**,Kokkos::LayoutRight> output_adjoint,Kokkos::View<Precision**,Kokkos::LayoutRight> input_adjoint) const
 {
-    Kokkos::deep_copy(input_adjoint,0.0);for(int block_index=0;block_index<static_cast<int>(scalar_blocks.size());++block_index){const auto block=scalar_blocks[block_index];const double constant=scalar_constants[block_index];Kokkos::parallel_for("reverse gate scalars",Kokkos::MDRangePolicy<Kokkos::Rank<2>>({0,0},{static_cast<int>(input.extent(0)),block.dimension()}),KOKKOS_LAMBDA(int sample,int index){const int offset=block.offset+index;const double x=input(sample,offset),probability=1.0/(1.0+Kokkos::exp(-x));input_adjoint(sample,offset)=output_adjoint(sample,offset)*constant*(probability+x*probability*(1.0-probability));});}
+    Kokkos::deep_copy(input_adjoint,Precision(0));for(int block_index=0;block_index<static_cast<int>(scalar_blocks.size());++block_index){const auto block=scalar_blocks[block_index];const Precision constant=scalar_constants[block_index];Kokkos::parallel_for("reverse gate scalars",Kokkos::MDRangePolicy<Kokkos::Rank<2>>({0,0},{static_cast<int>(input.extent(0)),block.dimension()}),KOKKOS_LAMBDA(int sample,int index){const int offset=block.offset+index;const Precision x=input(sample,offset),probability=Precision(1)/(Precision(1)+Kokkos::exp(-x));input_adjoint(sample,offset)=output_adjoint(sample,offset)*constant*(probability+x*probability*(Precision(1)-probability));});}
     int gate_offset=scalar_size,gated_offset=scalar_size+gate_size,output_offset=scalar_size;
-    for(int block_index=0;block_index<static_cast<int>(gated_blocks.size());++block_index){const auto block=gated_blocks[block_index];const int width=2*block.l+1,go=gate_offset,gio=gated_offset,oo=output_offset;const double constant=gate_constants[block_index];
-        Kokkos::parallel_for("reverse gate tensors",Kokkos::MDRangePolicy<Kokkos::Rank<2>>({0,0},{static_cast<int>(input.extent(0)),block.multiplicity}),KOKKOS_LAMBDA(int sample,int feature){const double probability=1.0/(1.0+Kokkos::exp(-input(sample,go+feature))),gate=constant*probability;double gate_adjoint=0.0;for(int component=0;component<width;++component){input_adjoint(sample,gio+feature*width+component)=gate*output_adjoint(sample,oo+feature*width+component);gate_adjoint+=input(sample,gio+feature*width+component)*output_adjoint(sample,oo+feature*width+component);}input_adjoint(sample,go+feature)=gate_adjoint*constant*probability*(1.0-probability);});
+    for(int block_index=0;block_index<static_cast<int>(gated_blocks.size());++block_index){const auto block=gated_blocks[block_index];const int width=2*block.l+1,go=gate_offset,gio=gated_offset,oo=output_offset;const Precision constant=gate_constants[block_index];
+        Kokkos::parallel_for("reverse gate tensors",Kokkos::MDRangePolicy<Kokkos::Rank<2>>({0,0},{static_cast<int>(input.extent(0)),block.multiplicity}),KOKKOS_LAMBDA(int sample,int feature){const Precision probability=Precision(1)/(Precision(1)+Kokkos::exp(-input(sample,go+feature))),gate=constant*probability;Precision gate_adjoint=Precision(0);for(int component=0;component<width;++component){input_adjoint(sample,gio+feature*width+component)=gate*output_adjoint(sample,oo+feature*width+component);gate_adjoint+=input(sample,gio+feature*width+component)*output_adjoint(sample,oo+feature*width+component);}input_adjoint(sample,go+feature)=gate_adjoint*constant*probability*(Precision(1)-probability);});
         gate_offset+=block.multiplicity;gated_offset+=block.dimension();output_offset+=block.dimension();}
 }
 
-MaceNonlinearKokkos::Interaction::Interaction(const nlohmann::json& data)
-    :source_embedding(checked_interaction(data).at("source_embedding")),target_embedding(data.at("target_embedding")),linear_up(data.at("linear_up")),skip(data.at("skip_tp")),linear_res(data.at("linear_res")),linear_1(data.at("linear_1")),linear_2(data.at("linear_2")),convolution(data.at("conv_tp")),convolution_weights(data.at("conv_tp_weights")),density(data.at("density_fn")),gate(data.at("gate")),alpha(data.at("alpha").get<double>()),beta(data.at("beta").get<double>()){}
+template<typename Precision>
+MaceNonlinearKokkosT<Precision>::Interaction::Interaction(const nlohmann::json& data)
+    :source_embedding(checked_interaction(data).at("source_embedding")),target_embedding(data.at("target_embedding")),linear_up(data.at("linear_up")),skip(data.at("skip_tp")),linear_res(data.at("linear_res")),linear_1(data.at("linear_1")),linear_2(data.at("linear_2")),convolution(data.at("conv_tp")),convolution_weights(data.at("conv_tp_weights")),density(data.at("density_fn")),gate(data.at("gate")),alpha(data.at("alpha").get<Precision>()),beta(data.at("beta").get<Precision>()){}
 
-bool MaceNonlinearKokkos::Interaction::prepare_pair_conditioning(
+template<typename Precision>
+bool MaceNonlinearKokkosT<Precision>::Interaction::prepare_pair_conditioning(
     const nlohmann::json& data,int radial_size,int model_element_count,
     const std::vector<int>& selected_model_indices)
 {
@@ -92,14 +101,14 @@ bool MaceNonlinearKokkos::Interaction::prepare_pair_conditioning(
         .at("weight").at("shape").at(0).get<int>();
     const int density_width=data.at("density_fn").at("layers").at(0)
         .at("weight").at("shape").at(0).get<int>();
-    std::vector<double> convolution_source(types*convolution_width);
-    std::vector<double> convolution_target(types*convolution_width);
-    std::vector<double> density_source(types*density_width);
-    std::vector<double> density_target(types*density_width);
+    std::vector<Precision> convolution_source(types*convolution_width);
+    std::vector<Precision> convolution_target(types*convolution_width);
+    std::vector<Precision> density_source(types*density_width);
+    std::vector<Precision> density_target(types*density_width);
     const int target_offset=radial_size+source_linear.output_dimension();
     for(int type=0;type<types;++type) {
-        std::vector<double> attrs(model_element_count,0.0);
-        attrs.at(selected_model_indices.at(type))=1.0;
+        std::vector<double> attrs(model_element_count,Precision(0));
+        attrs.at(selected_model_indices.at(type))=Precision(1);
         const auto source=source_linear.evaluate(attrs);
         const auto target=target_linear.evaluate(attrs);
         const auto convolution_source_row=
@@ -128,21 +137,24 @@ bool MaceNonlinearKokkos::Interaction::prepare_pair_conditioning(
     return true;
 }
 
-MaceNonlinearKokkos::Readout::Readout(const nlohmann::json& data)
+template<typename Precision>
+MaceNonlinearKokkosT<Precision>::Readout::Readout(const nlohmann::json& data)
     :nonlinear(data.at("class").get<std::string>()=="NonLinearReadoutBlock"),linear(readout_component(data,0)),linear_1(readout_component(data,1)),linear_2(readout_component(data,2))
-{if(nonlinear){if(data.at("activation").get<std::string>()!="silu")throw std::invalid_argument("MACE_Nonlinear Kokkos readout activation is unsupported.");activation_constant=data.at("activation_constants").at(0).get<double>();}}
+{if(nonlinear){if(data.at("activation").get<std::string>()!="silu")throw std::invalid_argument("MACE_Nonlinear Kokkos readout activation is unsupported.");activation_constant=data.at("activation_constants").at(0).get<Precision>();}}
 
-void MaceNonlinearKokkos::Readout::evaluate(Kokkos::View<const double**,Kokkos::LayoutRight> input,Kokkos::View<double*> output)
+template<typename Precision>
+void MaceNonlinearKokkosT<Precision>::Readout::evaluate(Kokkos::View<const Precision**,Kokkos::LayoutRight> input,Kokkos::View<Precision*> output)
 {
     ensure_view(result,result_storage,input.extent(0),1);
     if(!nonlinear){linear.evaluate(input,result);Kokkos::deep_copy(output,Kokkos::subview(result,Kokkos::ALL,0));return;}
     ensure_view(hidden,hidden_storage,input.extent(0),linear_1.output_dimension());
     ensure_view(activated,activated_storage,input.extent(0),linear_1.output_dimension());
     auto local_hidden=hidden;auto local_activated=activated;
-    linear_1.evaluate(input,hidden);const double constant=activation_constant;Kokkos::parallel_for("readout silu",hidden.size(),KOKKOS_LAMBDA(int flat){const int i=flat/local_hidden.extent(1),j=flat%local_hidden.extent(1);const double x=local_hidden(i,j);local_activated(i,j)=constant*x/(1.0+Kokkos::exp(-x));});linear_2.evaluate(activated,result);Kokkos::deep_copy(output,Kokkos::subview(result,Kokkos::ALL,0));
+    linear_1.evaluate(input,hidden);const Precision constant=activation_constant;Kokkos::parallel_for("readout silu",hidden.size(),KOKKOS_LAMBDA(int flat){const int i=flat/local_hidden.extent(1),j=flat%local_hidden.extent(1);const Precision x=local_hidden(i,j);local_activated(i,j)=constant*x/(Precision(1)+Kokkos::exp(-x));});linear_2.evaluate(activated,result);Kokkos::deep_copy(output,Kokkos::subview(result,Kokkos::ALL,0));
 }
 
-void MaceNonlinearKokkos::Readout::reverse(Kokkos::View<const double**,Kokkos::LayoutRight> input,double scale_value,Kokkos::View<double**,Kokkos::LayoutRight> input_adjoint)
+template<typename Precision>
+void MaceNonlinearKokkosT<Precision>::Readout::reverse(Kokkos::View<const Precision**,Kokkos::LayoutRight> input,Precision scale_value,Kokkos::View<Precision**,Kokkos::LayoutRight> input_adjoint)
 {
     ensure_view(seed,seed_storage,input.extent(0),1);Kokkos::deep_copy(seed,scale_value);
     if(!nonlinear){linear.reverse(seed,input_adjoint);return;}
@@ -150,19 +162,22 @@ void MaceNonlinearKokkos::Readout::reverse(Kokkos::View<const double**,Kokkos::L
     ensure_view(activated_adj,activated_adj_storage,input.extent(0),linear_1.output_dimension());
     ensure_view(hidden_adj,hidden_adj_storage,input.extent(0),linear_1.output_dimension());
     auto local_hidden=hidden;auto local_activated_adj=activated_adj;auto local_hidden_adj=hidden_adj;
-    linear_1.evaluate(input,hidden);linear_2.reverse(seed,activated_adj);const double constant=activation_constant;Kokkos::parallel_for("reverse readout silu",hidden.size(),KOKKOS_LAMBDA(int flat){const int i=flat/local_hidden.extent(1),j=flat%local_hidden.extent(1);const double x=local_hidden(i,j),probability=1.0/(1.0+Kokkos::exp(-x));local_hidden_adj(i,j)=local_activated_adj(i,j)*constant*(probability+x*probability*(1.0-probability));});linear_1.reverse(hidden_adj,input_adjoint);
+    linear_1.evaluate(input,hidden);linear_2.reverse(seed,activated_adj);const Precision constant=activation_constant;Kokkos::parallel_for("reverse readout silu",hidden.size(),KOKKOS_LAMBDA(int flat){const int i=flat/local_hidden.extent(1),j=flat%local_hidden.extent(1);const Precision x=local_hidden(i,j),probability=Precision(1)/(Precision(1)+Kokkos::exp(-x));local_hidden_adj(i,j)=local_activated_adj(i,j)*constant*(probability+x*probability*(Precision(1)-probability));});linear_1.reverse(hidden_adj,input_adjoint);
 }
 
-MaceNonlinearKokkos::MaceNonlinearKokkos(const std::string& filename)
-    :MaceNonlinearKokkos(load_model_json(filename))
+template<typename Precision>
+MaceNonlinearKokkosT<Precision>::MaceNonlinearKokkosT(const std::string& filename)
+    :MaceNonlinearKokkosT(load_model_json(filename))
 {}
 
-std::string MaceNonlinearKokkos::streamed_edges_mode() const
+template<typename Precision>
+std::string MaceNonlinearKokkosT<Precision>::streamed_edges_mode() const
 {
     return mace_streamed_edges_mode_name(streamed_edges);
 }
 
-void MaceNonlinearKokkos::set_streamed_edges(std::string mode)
+template<typename Precision>
+void MaceNonlinearKokkosT<Precision>::set_streamed_edges(std::string mode)
 {
     const auto requested=parse_mace_streamed_edges_mode(mode);
     if(requested!=MACEStreamedEdgesMode::legacy&&!supports_streamed_edges())
@@ -176,13 +191,15 @@ void MaceNonlinearKokkos::set_streamed_edges(std::string mode)
             release_layer_edge_workspace(layer);
 }
 
-bool MaceNonlinearKokkos::streams_layer(int layer) const
+template<typename Precision>
+bool MaceNonlinearKokkosT<Precision>::streams_layer(int layer) const
 {
     return streamed_edges==MACEStreamedEdgesMode::all
         ||(streamed_edges==MACEStreamedEdgesMode::r1&&layer==1);
 }
 
-void MaceNonlinearKokkos::release_layer_edge_workspace(int layer)
+template<typename Precision>
+void MaceNonlinearKokkosT<Precision>::release_layer_edge_workspace(int layer)
 {
     if(layer<0||layer>=static_cast<int>(states.size()))return;
     auto& state=states[layer];
@@ -210,7 +227,8 @@ void MaceNonlinearKokkos::release_layer_edge_workspace(int layer)
     interactions[layer].density.clear_workspace();
 }
 
-int MaceNonlinearKokkos::edge_workspace_rows() const
+template<typename Precision>
+int MaceNonlinearKokkosT<Precision>::edge_workspace_rows() const
 {
     int rows=0;
     for(int layer=0;layer<static_cast<int>(states.size());++layer) {
@@ -241,12 +259,13 @@ int MaceNonlinearKokkos::edge_workspace_rows() const
     return rows;
 }
 
-std::size_t MaceNonlinearKokkos::edge_workspace_bytes() const
+template<typename Precision>
+std::size_t MaceNonlinearKokkosT<Precision>::edge_workspace_bytes() const
 {
     std::size_t bytes=0;
     for(int layer=0;layer<static_cast<int>(states.size());++layer) {
         const auto& state=states[layer];
-#define SYMMETRIX_ADD_EDGE_BYTES(name) bytes+=sizeof(double)*state.name##_storage.size()
+#define SYMMETRIX_ADD_EDGE_BYTES(name) bytes+=sizeof(Precision)*state.name##_storage.size()
         SYMMETRIX_ADD_EDGE_BYTES(edge_features);
         SYMMETRIX_ADD_EDGE_BYTES(raw_weights);
         SYMMETRIX_ADD_EDGE_BYTES(weights);
@@ -272,19 +291,17 @@ std::size_t MaceNonlinearKokkos::edge_workspace_bytes() const
     return bytes;
 }
 
-MaceNonlinearKokkos::MaceNonlinearKokkos(const nlohmann::json& data)
+template<typename Precision>
+MaceNonlinearKokkosT<Precision>::MaceNonlinearKokkosT(const nlohmann::json& data)
     :node_embedding(data.at("node_embedding"))
 {
     validate_mace_nonlinear_schema(data);
     atomic_numbers_host=data.at("atomic_numbers").get<std::vector<int>>();atomic_numbers=toKokkosView("atomic numbers",atomic_numbers_host);model_indices=toKokkosView("model indices",data.at("model_indices").get<std::vector<int>>());model_atomic_numbers=toKokkosView("model atomic numbers",data.at("model_atomic_numbers").get<std::vector<int>>());model_num_elements=model_atomic_numbers.size();r_cut=data.at("r_cut").get<double>();l_max=data.at("l_max").get<int>();num_lm=(l_max+1)*(l_max+1);
-    const auto& radial_data=data.at("radial_embedding");apply_cutoff=radial_data.at("apply_cutoff").get<bool>();bessel_weights=toKokkosView("bessel weights",tensor_values(radial_data.at("basis").at("weights")));num_bessel=bessel_weights.size();radial_prefactor=radial_data.at("basis").at("prefactor").get<double>();cutoff_power=radial_data.at("cutoff").at("p").get<int>();const auto& transform=radial_data.at("distance_transform");has_agnesi=transform.at("type").get<std::string>()=="agnesi";if(has_agnesi){agnesi_a=transform.at("a").get<double>();agnesi_q=transform.at("q").get<double>();agnesi_p=transform.at("p").get<double>();covalent_radii=toKokkosView("covalent radii",transform.at("covalent_radii").get<std::vector<double>>());}
-    scale=tensor_values(data.at("scale_shift").at("scale")).at(0);shift=tensor_values(data.at("scale_shift").at("shift")).at(0);const auto all_e0=tensor_values(data.at("atomic_energies"));std::vector<double> e0(atomic_numbers_host.size());auto indices=data.at("model_indices").get<std::vector<int>>();for(int i=0;i<e0.size();++i)e0[i]=all_e0.at(indices[i]);atomic_energies=toKokkosView("atomic energies",e0);
+    const auto& radial_data=data.at("radial_embedding");apply_cutoff=radial_data.at("apply_cutoff").get<bool>();bessel_weights=toKokkosView("bessel weights",tensor_values<Precision>(radial_data.at("basis").at("weights")));num_bessel=bessel_weights.size();radial_prefactor=radial_data.at("basis").at("prefactor").get<double>();cutoff_power=radial_data.at("cutoff").at("p").get<int>();const auto& transform=radial_data.at("distance_transform");has_agnesi=transform.at("type").get<std::string>()=="agnesi";if(has_agnesi){agnesi_a=transform.at("a").get<double>();agnesi_q=transform.at("q").get<double>();agnesi_p=transform.at("p").get<double>();covalent_radii=toKokkosView("covalent radii",transform.at("covalent_radii").get<std::vector<Precision>>());}
+    scale=tensor_values<double>(data.at("scale_shift").at("scale")).at(0);shift=tensor_values<double>(data.at("scale_shift").at("shift")).at(0);const auto all_e0=tensor_values<double>(data.at("atomic_energies"));std::vector<double> e0(atomic_numbers_host.size());auto indices=data.at("model_indices").get<std::vector<int>>();for(int i=0;i<e0.size();++i)e0[i]=all_e0.at(indices[i]);atomic_energies=toKokkosView("atomic energies",e0);
     for(const auto& value:data.at("interactions"))interactions.emplace_back(value);for(const auto& value:data.at("products"))products.emplace_back(value);for(const auto& value:data.at("readouts"))readouts.emplace_back(value);
     if(interactions.size()!=products.size()||interactions.size()!=readouts.size())
         throw std::invalid_argument("MACE_Nonlinear Kokkos layer counts are inconsistent.");
-#ifdef KOKKOS_ENABLE_CUDA
-    mh1_fast_path=false;
-#else
     mh1_fast_path=is_published_mh1_architecture(data)
         &&std::all_of(products.begin(),products.end(),[](const auto& product) {
             return product.uses_compiled_plan();
@@ -297,13 +314,17 @@ MaceNonlinearKokkos::MaceNonlinearKokkos(const nlohmann::json& data)
             mh1_fast_path=interactions[layer].prepare_pair_conditioning(
                 data.at("interactions").at(layer),num_bessel,model_num_elements,indices)
                 &&mh1_fast_path;
-#endif
-    states.resize(interactions.size());has_zbl=data.at("has_zbl").get<bool>();if(has_zbl){const auto& value=data.at("zbl");zbl=ZBLKokkos(value.at("a_exp").get<double>(),value.at("a_prefactor").get<double>(),tensor_values(value.at("c")),tensor_values(value.at("covalent_radii")),static_cast<int>(tensor_values(value.at("p")).at(0)));}
+    if constexpr(std::is_same_v<Precision,float>)
+        if(!mh1_fast_path)
+            throw std::invalid_argument(
+                "Float32 MACE_Nonlinear requires the published MACE-MH-1 fast-path architecture.");
+    states.resize(interactions.size());has_zbl=data.at("has_zbl").get<bool>();if(has_zbl){const auto& value=data.at("zbl");zbl=ZBLKokkos(value.at("a_exp").get<double>(),value.at("a_prefactor").get<double>(),tensor_values<double>(value.at("c")),tensor_values<double>(value.at("covalent_radii")),static_cast<int>(tensor_values<double>(value.at("p")).at(0)));}
     if(supports_streamed_edges())streamed_edges=MACEStreamedEdgesMode::all;
     spherical_harmonics_state=std::make_unique<SphericalHarmonicsState>(l_max);
 }
 
-void MaceNonlinearKokkos::compute_Y(Kokkos::View<const double*> xyz)
+template<typename Precision>
+void MaceNonlinearKokkosT<Precision>::compute_Y(Kokkos::View<const double*> xyz)
 {
     const int edges=xyz.size()/3;
     ensure_view(Y,Y_storage,edges*num_lm);
@@ -316,10 +337,11 @@ void MaceNonlinearKokkos::compute_Y(Kokkos::View<const double*> xyz)
 #else
     spherical_harmonics_state->calculator.compute_with_gradients(xyz_shuffled.data(),edges,Y.data(),Y_grad.data());
 #endif
-    Kokkos::deep_copy(Y_grad_shuffled,Y_grad);auto y=Y;auto grad=Y_grad;auto old=Y_grad_shuffled;const int nlm=num_lm;const double factor=2.0*Kokkos::sqrt(M_PI);Kokkos::parallel_for("nonlinear normalize harmonics",edges,KOKKOS_LAMBDA(int edge){for(int lm=0;lm<nlm;++lm){y(edge*nlm+lm)*=factor;grad((3*edge+0)*nlm+lm)=factor*old((3*edge+1)*nlm+lm);grad((3*edge+1)*nlm+lm)=factor*old((3*edge+2)*nlm+lm);grad((3*edge+2)*nlm+lm)=factor*old((3*edge+0)*nlm+lm);}});
+    Kokkos::deep_copy(Y_grad_shuffled,Y_grad);auto y=Y;auto grad=Y_grad;auto old=Y_grad_shuffled;const int nlm=num_lm;const Precision factor=Precision(2)*Kokkos::sqrt(Precision(M_PI));Kokkos::parallel_for("nonlinear normalize harmonics",edges,KOKKOS_LAMBDA(int edge){for(int lm=0;lm<nlm;++lm){y(edge*nlm+lm)*=factor;grad((3*edge+0)*nlm+lm)=factor*old((3*edge+1)*nlm+lm);grad((3*edge+1)*nlm+lm)=factor*old((3*edge+2)*nlm+lm);grad((3*edge+2)*nlm+lm)=factor*old((3*edge+0)*nlm+lm);}});
 }
 
-void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::View<const int*> node_types,Kokkos::View<const int*> num_neigh,Kokkos::View<const int*> neigh_indices,Kokkos::View<const int*> neigh_types,Kokkos::View<const double*> xyz,Kokkos::View<const double*> distances)
+template<typename Precision>
+void MaceNonlinearKokkosT<Precision>::compute_node_energies_forces(int num_nodes,Kokkos::View<const int*> node_types,Kokkos::View<const int*> num_neigh,Kokkos::View<const int*> neigh_indices,Kokkos::View<const int*> neigh_types,Kokkos::View<const double*> xyz,Kokkos::View<const double*> distances)
 {
     if(num_nodes<0||node_types.extent(0)!=static_cast<std::size_t>(num_nodes)||num_neigh.extent(0)!=static_cast<std::size_t>(num_nodes)||neigh_indices.extent(0)!=distances.extent(0)||neigh_types.extent(0)!=distances.extent(0)||xyz.extent(0)!=3*distances.extent(0))throw std::invalid_argument("MACE_Nonlinear Kokkos graph input sizes are inconsistent.");
     const int edges=distances.size();
@@ -331,7 +353,7 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
     Kokkos::parallel_reduce("validate nonlinear neighbor total",num_nodes,KOKKOS_LAMBDA(int node,long long& total){total+=num_neigh(node);},edge_total);
     if(edge_total!=edges)throw std::invalid_argument("MACE_Nonlinear Kokkos neighbor counts do not match the edge arrays.");
     int invalid_edges=0;
-    Kokkos::parallel_reduce("validate nonlinear edges",edges,KOKKOS_LAMBDA(int edge,int& invalid){if(neigh_indices(edge)<0||neigh_indices(edge)>=num_nodes||neigh_types(edge)<0||neigh_types(edge)>=local_types||neigh_types(edge)!=node_types(neigh_indices(edge))||!Kokkos::isfinite(distances(edge))||!(distances(edge)>0.0)||!Kokkos::isfinite(xyz(3*edge))||!Kokkos::isfinite(xyz(3*edge+1))||!Kokkos::isfinite(xyz(3*edge+2)))++invalid;},invalid_edges);
+    Kokkos::parallel_reduce("validate nonlinear edges",edges,KOKKOS_LAMBDA(int edge,int& invalid){if(neigh_indices(edge)<0||neigh_indices(edge)>=num_nodes||neigh_types(edge)<0||neigh_types(edge)>=local_types||neigh_types(edge)!=node_types(neigh_indices(edge))||!Kokkos::isfinite(distances(edge))||!(distances(edge)>Precision(0))||!Kokkos::isfinite(xyz(3*edge))||!Kokkos::isfinite(xyz(3*edge+1))||!Kokkos::isfinite(xyz(3*edge+2)))++invalid;},invalid_edges);
     if(invalid_edges)throw std::invalid_argument("MACE_Nonlinear Kokkos graph has an invalid edge index, type, distance, or vector.");
     compute_Y(xyz);
 
@@ -355,14 +377,14 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
     });
 
     ensure_view(attrs,attrs_storage,num_nodes,model_num_elements);
-    Kokkos::deep_copy(attrs,0.0);
+    Kokkos::deep_copy(attrs,Precision(0));
     ensure_view(product_elements,product_elements_storage,num_nodes);
     auto local_attrs=attrs;
     auto indices=model_indices;
     auto elements=product_elements;
     Kokkos::parallel_for("nonlinear attrs",num_nodes,KOKKOS_LAMBDA(int node) {
         const int element=indices(node_types(node));
-        local_attrs(node,element)=1.0;
+        local_attrs(node,element)=Precision(1);
         elements(node)=element;
     });
     ensure_view(features,features_storage,num_nodes,node_embedding.output_dimension());
@@ -378,30 +400,30 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
     auto radii=covalent_radii;
     auto model_z=model_atomic_numbers;
     auto flat_y=Y;
-    const double rc=r_cut,prefactor=radial_prefactor,a=agnesi_a,q=agnesi_q,p=agnesi_p;
+    const Precision rc=r_cut,prefactor=radial_prefactor,a=agnesi_a,q=agnesi_q,p=agnesi_p;
     const int cp=cutoff_power,nb=num_bessel,nlm=num_lm;
     const bool agnesi=has_agnesi,embed_cutoff=apply_cutoff;
     Kokkos::parallel_for("nonlinear radial",edges,KOKKOS_LAMBDA(int edge) {
-        const double distance=distances(edge);
-        const double x=distance/rc;
-        const double envelope=distance<rc
-            ?1.0-0.5*(cp+1.0)*(cp+2.0)*Kokkos::pow(x,cp)
-                +cp*(cp+2.0)*Kokkos::pow(x,cp+1)
-                -0.5*cp*(cp+1.0)*Kokkos::pow(x,cp+2)
-            :0.0;
+        const Precision distance=distances(edge);
+        const Precision x=distance/rc;
+        const Precision envelope=distance<rc
+            ?Precision(1)-Precision(0.5)*(cp+Precision(1))*(cp+Precision(2))*Kokkos::pow(x,cp)
+                +cp*(cp+Precision(2))*Kokkos::pow(x,cp+1)
+                -Precision(0.5)*cp*(cp+Precision(1))*Kokkos::pow(x,cp+2)
+            :Precision(0);
         local_cutoffs(edge)=envelope;
-        double transformed=distance;
+        Precision transformed=distance;
         if(agnesi) {
             const int source_z=model_z(indices(neigh_types(edge)));
             const int target_z=model_z(indices(node_types(local_targets(edge))));
-            const double r0=.5*(radii(source_z)+radii(target_z));
-            const double ratio=distance/r0;
-            transformed=1.0/(1.0+a*Kokkos::pow(ratio,q)
-                /(1.0+Kokkos::pow(ratio,q-p)));
+            const Precision r0=Precision(0.5)*(radii(source_z)+radii(target_z));
+            const Precision ratio=distance/r0;
+            transformed=Precision(1)/(Precision(1)+a*Kokkos::pow(ratio,q)
+                /(Precision(1)+Kokkos::pow(ratio,q-p)));
         }
         for(int k=0;k<nb;++k)
             local_radial(edge,k)=prefactor*Kokkos::sin(bw(k)*transformed)
-                /transformed*(embed_cutoff?envelope:1.0);
+                /transformed*(embed_cutoff?envelope:Precision(1));
         for(int lm=0;lm<nlm;++lm)
             local_harmonics(edge,lm)=flat_y(edge*nlm+lm);
     });
@@ -428,8 +450,8 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
         auto densities=state.densities;
         const bool stream_layer=streams_layer(layer);
         if(stream_layer) {
-            Kokkos::deep_copy(messages,0.0);
-            Kokkos::deep_copy(densities,0.0);
+            Kokkos::deep_copy(messages,Precision(0));
+            Kokkos::deep_copy(densities,Precision(0));
             const int convolution_width=
                 interaction.convolution_source_contributions.extent(1);
             const int density_width=interaction.density_source_contributions.extent(1);
@@ -505,7 +527,7 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
                         const int block_end=first_edge+samples;
                         const int end=local_offsets(node+1)<block_end
                             ?local_offsets(node+1):block_end;
-                        double value=0.0;
+                        Precision value=Precision(0);
                         for(int edge=begin;edge<end;++edge)
                             value+=edge_messages(edge-first_edge,k);
                         messages(node,k)+=value;
@@ -522,11 +544,11 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
                         const int block_end=first_edge+samples;
                         const int end=local_offsets(node+1)<block_end
                             ?local_offsets(node+1):block_end;
-                        double value=0.0;
+                        Precision value=Precision(0);
                         for(int edge=begin;edge<end;++edge) {
-                            const double raw=density_matrix(edge-first_edge,0);
+                            const Precision raw=density_matrix(edge-first_edge,0);
                             value+=Kokkos::tanh(raw*raw)
-                                *(embed_cutoff?1.0:local_cutoffs(edge));
+                                *(embed_cutoff?Precision(1):local_cutoffs(edge));
                         }
                         densities(node)+=value;
                     });
@@ -613,7 +635,7 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
         Kokkos::parallel_for("nonlinear gather messages",
             Kokkos::MDRangePolicy<Kokkos::Rank<2>>({0,0},{num_nodes,message_width}),
             KOKKOS_LAMBDA(int node,int k) {
-                double value=0.0;
+                Precision value=Precision(0);
                 for(int edge=local_offsets(node);edge<local_offsets(node+1);++edge)
                     value+=edge_messages(edge,k);
                 messages(node,k)=value;
@@ -630,15 +652,15 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
         auto density_base=state.density_base;
         auto density_matrix=state.density_matrix;
         Kokkos::parallel_for("nonlinear density",edges,KOKKOS_LAMBDA(int edge) {
-            const double raw=density_matrix(edge,0);
-            const double base=Kokkos::tanh(raw*raw);
+            const Precision raw=density_matrix(edge,0);
+            const Precision base=Kokkos::tanh(raw*raw);
             density_raw(edge)=raw;
             density_base(edge)=base;
         });
         Kokkos::parallel_for("nonlinear density gather",num_nodes,KOKKOS_LAMBDA(int node) {
-            double value=0.0;
+            Precision value=Precision(0);
             for(int edge=local_offsets(node);edge<local_offsets(node+1);++edge)
-                value+=density_base(edge)*(embed_cutoff?1.0:local_cutoffs(edge));
+                value+=density_base(edge)*(embed_cutoff?Precision(1):local_cutoffs(edge));
             densities(node)=value;
         });
         }
@@ -650,7 +672,7 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
         auto linear_value=state.linear_1_output;
         auto residual=state.residual;
         auto pre_gate=state.pre_gate;
-        const double alpha=interaction.alpha,beta=interaction.beta;
+        const Precision alpha=interaction.alpha,beta=interaction.beta;
         Kokkos::parallel_for("nonlinear normalization",pre_gate.size(),
             KOKKOS_LAMBDA(int flat) {
                 const int node=flat/pre_gate.extent(1),k=flat%pre_gate.extent(1);
@@ -676,7 +698,7 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
     }
 
     ensure_view(node_energies,node_energies_storage,num_nodes);
-    Kokkos::deep_copy(node_energies,0.0);
+    Kokkos::deep_copy(node_energies,Precision(0));
     ensure_view(readout_contribution,readout_contribution_storage,num_nodes);
     for(int layer=0;layer<static_cast<int>(readouts.size());++layer) {
         auto& state=states[layer];
@@ -692,7 +714,7 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
     }
     auto energies=node_energies;
     auto e0=atomic_energies;
-    const double energy_scale=scale,energy_shift=shift;
+    const Precision energy_scale=scale,energy_shift=shift;
     Kokkos::parallel_for("scale nonlinear energies",num_nodes,KOKKOS_LAMBDA(int node) {
         energies(node)=e0(node_types(node))+energy_scale*energies(node)+energy_shift;
     });
@@ -700,9 +722,9 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
     ensure_view(radial_adjoints,radial_adjoints_storage,edges,num_bessel);
     ensure_view(harmonic_adjoints,harmonic_adjoints_storage,edges,num_lm);
     ensure_view(cutoff_adjoints,cutoff_adjoints_storage,edges);
-    Kokkos::deep_copy(radial_adjoints,0.0);
-    Kokkos::deep_copy(harmonic_adjoints,0.0);
-    Kokkos::deep_copy(cutoff_adjoints,0.0);
+    Kokkos::deep_copy(radial_adjoints,Precision(0));
+    Kokkos::deep_copy(harmonic_adjoints,Precision(0));
+    Kokkos::deep_copy(cutoff_adjoints,Precision(0));
     auto radial_adjoint_values=radial_adjoints;
     auto harmonic_adjoint_values=harmonic_adjoints;
     auto cutoff_adjoint_values=cutoff_adjoints;
@@ -736,17 +758,17 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
 
         ensure_view(state.linear_adj,state.linear_adj_storage,num_nodes,pre_gate_width);
         ensure_view(state.density_adj,state.density_adj_storage,num_nodes);
-        Kokkos::deep_copy(state.density_adj,0.0);
+        Kokkos::deep_copy(state.density_adj,Precision(0));
         auto linear_adj=state.linear_adj;
         auto density_adj=state.density_adj;
         auto pre_gate_adj=state.pre_gate_adj;
         auto linear_forward=state.linear_1_output;
         auto layer_densities=state.densities;
-        const double alpha=interaction.alpha,beta=interaction.beta;
+        const Precision alpha=interaction.alpha,beta=interaction.beta;
         Kokkos::parallel_for("reverse nonlinear normalization",num_nodes,
             KOKKOS_LAMBDA(int node) {
-                const double normalization=alpha+beta*layer_densities(node);
-                double density_value=0.0;
+                const Precision normalization=alpha+beta*layer_densities(node);
+                Precision density_value=Precision(0);
                 for(int k=0;k<pre_gate_width;++k) {
                     linear_adj(node,k)=pre_gate_adj(node,k)/normalization;
                     density_value-=pre_gate_adj(node,k)*linear_forward(node,k)*beta
@@ -873,7 +895,7 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
                         "stream reverse convolution cutoff",samples,
                         KOKKOS_LAMBDA(int local_edge) {
                             const int edge=first_edge+local_edge;
-                            double cutoff_value=0.0;
+                            Precision cutoff_value=Precision(0);
                             for(int k=0;k<weight_width;++k) {
                                 cutoff_value+=weight_adj(local_edge,k)
                                     *raw_weights(local_edge,k);
@@ -898,10 +920,10 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
                     "stream reverse density envelope",samples,
                     KOKKOS_LAMBDA(int local_edge) {
                         const int edge=first_edge+local_edge;
-                        const double raw=density_matrix(local_edge,0);
-                        const double base=Kokkos::tanh(raw*raw);
-                        double value=density_adj(local_targets(edge))
-                            *(1.0-base*base)*2.0*raw;
+                        const Precision raw=density_matrix(local_edge,0);
+                        const Precision base=Kokkos::tanh(raw*raw);
+                        Precision value=density_adj(local_targets(edge))
+                            *(Precision(1)-base*base)*Precision(2)*raw;
                         if(!embed_cutoff) {
                             cutoff_adjoint_values(edge)+=
                                 density_adj(local_targets(edge))*base;
@@ -964,7 +986,7 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
         if(!apply_cutoff) {
             Kokkos::parallel_for("reverse convolution cutoff",edges,
                 KOKKOS_LAMBDA(int edge) {
-                    double cutoff_value=0.0;
+                    Precision cutoff_value=Precision(0);
                     for(int k=0;k<weight_adj.extent(1);++k) {
                         cutoff_value+=weight_adj(edge,k)*raw_weights(edge,k);
                         raw_weight_adj(edge,k)=weight_adj(edge,k)*local_cutoffs(edge);
@@ -986,8 +1008,8 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
         auto density_raw=state.density_raw;
         auto density_base=state.density_base;
         Kokkos::parallel_for("reverse density envelope",edges,KOKKOS_LAMBDA(int edge) {
-            double value=density_adj(local_targets(edge))
-                *(1.0-density_base(edge)*density_base(edge))*2.0*density_raw(edge);
+            Precision value=density_adj(local_targets(edge))
+                *(Precision(1)-density_base(edge)*density_base(edge))*Precision(2)*density_raw(edge);
             if(!embed_cutoff) {
                 cutoff_adjoint_values(edge)+=density_adj(local_targets(edge))*density_base(edge);
                 value*=local_cutoffs(edge);
@@ -1031,43 +1053,43 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
     auto forces=node_forces;
     auto flat_grad=Y_grad;
     Kokkos::parallel_for("nonlinear edge forces",edges,KOKKOS_LAMBDA(int edge) {
-        const double distance=distances(edge);
-        const double x=distance/rc;
-        double envelope_derivative=0.0;
+        const Precision distance=distances(edge);
+        const Precision x=distance/rc;
+        Precision envelope_derivative=Precision(0);
         if(distance<rc)
-            envelope_derivative=(-0.5*cp*(cp+1.0)*(cp+2.0)*Kokkos::pow(x,cp-1)
-                +cp*(cp+1.0)*(cp+2.0)*Kokkos::pow(x,cp)
-                -0.5*cp*(cp+1.0)*(cp+2.0)*Kokkos::pow(x,cp+1))/rc;
-        double transformed=distance,transform_derivative=1.0;
+            envelope_derivative=(-Precision(0.5)*cp*(cp+Precision(1))*(cp+Precision(2))*Kokkos::pow(x,cp-1)
+                +cp*(cp+Precision(1))*(cp+Precision(2))*Kokkos::pow(x,cp)
+                -Precision(0.5)*cp*(cp+Precision(1))*(cp+Precision(2))*Kokkos::pow(x,cp+1))/rc;
+        Precision transformed=distance,transform_derivative=Precision(1);
         if(agnesi) {
             const int source_z=model_z(indices(neigh_types(edge)));
             const int target_z=model_z(indices(node_types(local_targets(edge))));
-            const double r0=.5*(radii(source_z)+radii(target_z));
-            const double ratio=distance/r0;
-            const double ratio_power=Kokkos::pow(ratio,q-p);
-            const double denominator=1.0+ratio_power;
-            const double g=a*Kokkos::pow(ratio,q)/denominator;
-            const double dgdx=a*(q*Kokkos::pow(ratio,q-1.0)*denominator
-                -(q-p)*Kokkos::pow(ratio,2.0*q-p-1.0))
+            const Precision r0=Precision(0.5)*(radii(source_z)+radii(target_z));
+            const Precision ratio=distance/r0;
+            const Precision ratio_power=Kokkos::pow(ratio,q-p);
+            const Precision denominator=Precision(1)+ratio_power;
+            const Precision g=a*Kokkos::pow(ratio,q)/denominator;
+            const Precision dgdx=a*(q*Kokkos::pow(ratio,q-Precision(1))*denominator
+                -(q-p)*Kokkos::pow(ratio,Precision(2)*q-p-Precision(1)))
                 /(denominator*denominator);
-            transformed=1.0/(1.0+g);
-            transform_derivative=-dgdx/(r0*(1.0+g)*(1.0+g));
+            transformed=Precision(1)/(Precision(1)+g);
+            transform_derivative=-dgdx/(r0*(Precision(1)+g)*(Precision(1)+g));
         }
-        double distance_adjoint=cutoff_adjoint_values(edge)*envelope_derivative;
+        Precision distance_adjoint=cutoff_adjoint_values(edge)*envelope_derivative;
         for(int k=0;k<nb;++k) {
-            const double weight=bw(k);
-            const double base=prefactor*Kokkos::sin(weight*transformed)/transformed;
-            const double base_derivative=prefactor
+            const Precision weight=bw(k);
+            const Precision base=prefactor*Kokkos::sin(weight*transformed)/transformed;
+            const Precision base_derivative=prefactor
                 *(weight*Kokkos::cos(weight*transformed)*transformed
                     -Kokkos::sin(weight*transformed))
                 /(transformed*transformed)*transform_derivative;
-            const double derivative=embed_cutoff
+            const Precision derivative=embed_cutoff
                 ?base_derivative*local_cutoffs(edge)+base*envelope_derivative
                 :base_derivative;
             distance_adjoint+=radial_adjoint_values(edge,k)*derivative;
         }
         for(int component=0;component<3;++component) {
-            double vector_adjoint=distance_adjoint*xyz(3*edge+component)/distance;
+            Precision vector_adjoint=distance_adjoint*xyz(3*edge+component)/distance;
             for(int lm=0;lm<nlm;++lm)
                 vector_adjoint+=harmonic_adjoint_values(edge,lm)
                     *flat_grad((3*edge+component)*nlm+lm);
@@ -1078,8 +1100,8 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
     if(has_zbl) {
         ensure_view(zbl_energies,zbl_energies_storage,num_nodes);
         ensure_view(zbl_forces,zbl_forces_storage,xyz.size());
-        Kokkos::deep_copy(zbl_energies,0.0);
-        Kokkos::deep_copy(zbl_forces,0.0);
+        Kokkos::deep_copy(zbl_energies,Precision(0));
+        Kokkos::deep_copy(zbl_forces,Precision(0));
         zbl.compute_ZBL(num_nodes,node_types,num_neigh,neigh_types,atomic_numbers,
             distances,xyz,zbl_energies,zbl_forces);
         auto zbl_e=zbl_energies;
@@ -1092,3 +1114,6 @@ void MaceNonlinearKokkos::compute_node_energies_forces(int num_nodes,Kokkos::Vie
         });
     }
 }
+
+template class MaceNonlinearKokkosT<float>;
+template class MaceNonlinearKokkosT<double>;

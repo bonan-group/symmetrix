@@ -23,6 +23,25 @@ def _sha256(path):
     return digest.hexdigest()
 
 
+def _git_metadata():
+    revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    dirty = subprocess.run(
+        ["git", "status", "--short"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return {
+        "revision": revision.stdout.strip() if revision.returncode == 0 else None,
+        "dirty": bool(dirty.stdout.strip()) if dirty.returncode == 0 else None,
+    }
+
+
 def _gpu_process_memory_mib():
     try:
         result = subprocess.run(
@@ -78,9 +97,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("model", type=pathlib.Path)
     parser.add_argument("--backend", choices=("e3nn", "cueq"), required=True)
+    parser.add_argument("--head", help="Optional multi-head model head")
     parser.add_argument("--repeat", type=int, required=True)
     parser.add_argument("--warmups", type=int, default=10)
     parser.add_argument("--repeats", type=int, default=10)
+    parser.add_argument("--output", type=pathlib.Path)
     args = parser.parse_args()
     if args.repeat < 1:
         parser.error("--repeat must be positive")
@@ -91,12 +112,15 @@ def main():
 
     model_path = args.model.resolve()
     memory_before_mib = _gpu_process_memory_mib()
-    calculator = MACECalculator(
+    calculator_options = dict(
         model_paths=model_path,
         device="cuda",
         default_dtype="float32",
         enable_cueq=args.backend == "cueq",
     )
+    if args.head is not None:
+        calculator_options["head"] = args.head
+    calculator = MACECalculator(**calculator_options)
     model = calculator.models[0]
     model.eval()
 
@@ -140,12 +164,14 @@ def main():
     forces = output["forces"].detach().cpu().numpy()
     per_atom_ms = [sample / len(atoms) for sample in samples_ms]
     report = {
+        "symmetrix_git": _git_metadata(),
         "model": {
             "path": str(model_path),
             "size_bytes": model_path.stat().st_size,
             "sha256": _sha256(model_path),
         },
         "backend": args.backend,
+        "head": calculator.head,
         "dtype": str(model_dtype),
         "supercell_repeat": args.repeat,
         "atoms": len(atoms),
@@ -169,7 +195,10 @@ def main():
         "torch_version": torch.__version__,
         "torch_cuda_version": torch.version.cuda,
     }
-    print(json.dumps(report, indent=2))
+    rendered = json.dumps(report, indent=2)
+    print(rendered)
+    if args.output is not None:
+        args.output.write_text(rendered + "\n")
 
 
 if __name__ == "__main__":

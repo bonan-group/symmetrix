@@ -37,6 +37,15 @@ MH1_HEADS = (
 )
 
 
+def _mh1_streamed_edge_block_size(use_kokkos):
+    if (
+        use_kokkos
+        and native_symmetrix._kokkos_default_execution_space() == "Cuda"
+    ):
+        return 16384
+    return 1024
+
+
 def _mh1_model_path():
     if mace_import_error is not None:
         pytest.skip(f"mace-torch is not available: {mace_import_error}")
@@ -186,7 +195,9 @@ def test_mh1_streamed_edge_modes_agree(mh1_si_artifact, use_kokkos):
             assert np.allclose(results[mode][name], results["legacy"][name], atol=2e-12)
     assert workspace_rows["legacy"] == edge_count
     assert workspace_rows["r1"] == edge_count
-    assert workspace_rows["all"] <= min(edge_count, 1024)
+    assert workspace_rows["all"] <= min(
+        edge_count, _mh1_streamed_edge_block_size(use_kokkos)
+    )
     if workspace_bytes:
         assert workspace_bytes["all"] < workspace_bytes["legacy"]
 
@@ -194,15 +205,21 @@ def test_mh1_streamed_edge_modes_agree(mh1_si_artifact, use_kokkos):
     assert automatic.streamed_edges == "all"
 
 
-def test_mh1_kokkos_mode_switch_releases_full_edge_workspaces(mh1_si_artifact):
-    if not hasattr(native_symmetrix, "MACENonlinearKokkos"):
+@pytest.mark.parametrize("dtype", ["float64", "float32"])
+def test_mh1_kokkos_mode_switch_releases_full_edge_workspaces(
+    mh1_si_artifact, dtype
+):
+    evaluator_name = (
+        "MACENonlinearKokkos" if dtype == "float64" else "MACENonlinearKokkosFloat"
+    )
+    if not hasattr(native_symmetrix, evaluator_name):
         pytest.skip("Symmetrix was built without Kokkos support")
     _, model_path = mh1_si_artifact
     atoms = bulk("Si", "diamond", a=5.43).repeat((3, 3, 3))
     calculator = Symmetrix(
         model_path,
         use_kokkos=True,
-        dtype="float64",
+        dtype=dtype,
         streamed_edges="legacy",
     )
     calculator.calculate(atoms, properties=["energy", "forces"])
@@ -212,11 +229,13 @@ def test_mh1_kokkos_mode_switch_releases_full_edge_workspaces(mh1_si_artifact):
 
     calculator.evaluator.set_streamed_edges("all")
     calculator.calculate(atoms, properties=["energy", "forces"])
-    assert calculator.evaluator.edge_workspace_rows <= min(edge_count, 1024)
+    assert calculator.evaluator.edge_workspace_rows <= min(
+        edge_count, _mh1_streamed_edge_block_size(True)
+    )
     assert calculator.evaluator.edge_workspace_bytes < legacy_bytes
 
 
-def test_mh1_cuda_generic_fallback_matches_native(mh1_si_artifact):
+def test_mh1_cuda_streamed_fast_path_matches_native(mh1_si_artifact):
     if not hasattr(native_symmetrix, "MACENonlinearKokkos"):
         pytest.skip("Symmetrix was built without Kokkos support")
     if native_symmetrix._kokkos_default_execution_space() != "Cuda":
@@ -236,9 +255,9 @@ def test_mh1_cuda_generic_fallback_matches_native(mh1_si_artifact):
         streamed_edges="legacy",
     )
     cuda = Symmetrix(model_path, use_kokkos=True, dtype="float64")
-    assert not cuda.evaluator.uses_mh1_fast_path
-    assert not cuda.evaluator.supports_streamed_edges
-    assert cuda.streamed_edges == "legacy"
+    assert cuda.evaluator.uses_mh1_fast_path
+    assert cuda.evaluator.supports_streamed_edges
+    assert cuda.streamed_edges == "all"
     reference.calculate(atoms, properties=properties)
     cuda.calculate(atoms, properties=properties)
     for name in properties:
@@ -375,6 +394,9 @@ def test_mh1_fast_path_requires_exact_architecture(
     assert evaluator.streamed_edges_mode == "legacy"
     with pytest.raises(ValueError, match="published MACE-MH-1"):
         evaluator.set_streamed_edges("all")
+    if use_kokkos and hasattr(native_symmetrix, "MACENonlinearKokkosFloat"):
+        with pytest.raises(ValueError, match="Float32.*published MACE-MH-1"):
+            native_symmetrix.MACENonlinearKokkosFloat(str(path))
     atoms = Atoms(
         "Si2",
         positions=[[0.0, 0.0, 0.0], [2.2, 0.1, 0.0]],
@@ -441,6 +463,9 @@ def test_mh1_fast_path_requires_conditionable_edge_mlp(
     )
     evaluator = evaluator_type(str(path))
     assert not evaluator.uses_mh1_fast_path
+    if use_kokkos and hasattr(native_symmetrix, "MACENonlinearKokkosFloat"):
+        with pytest.raises(ValueError, match="Float32.*published MACE-MH-1"):
+            native_symmetrix.MACENonlinearKokkosFloat(str(path))
 
 
 def test_mh1_extraction_rejects_unsupported_architecture_features():
@@ -532,10 +557,12 @@ def test_mh1_native_serial_and_kokkos_match_upstream(mh1_si_artifact):
         assert np.allclose(native_results[False][name], native_results[True][name], atol=2e-12)
 
 
-def test_mh1_kokkos_repeated_calculations(mh1_si_artifact):
+@pytest.mark.parametrize("dtype", ["float64", "float32"])
+def test_mh1_kokkos_repeated_calculations(mh1_si_artifact, dtype):
     _, model_path = mh1_si_artifact
     serial = Symmetrix(model_path, use_kokkos=False, dtype="float64")
-    kokkos = Symmetrix(model_path, use_kokkos=True, dtype="float64")
+    kokkos = Symmetrix(model_path, use_kokkos=True, dtype=dtype)
+    tolerance = 2e-12 if dtype == "float64" else 2e-5
     atoms = Atoms(
         "Si2",
         positions=[[0.0, 0.0, 0.0], [2.2, 0.1, 0.0]],
@@ -548,19 +575,26 @@ def test_mh1_kokkos_repeated_calculations(mh1_si_artifact):
         moved.positions[1] += [displacement, -0.5 * displacement, 0.25 * displacement]
         serial.calculate(moved, properties=["energy", "forces", "stress"])
         kokkos.calculate(moved, properties=["energy", "forces", "stress"])
-        assert kokkos.results["energy"] == pytest.approx(serial.results["energy"], abs=2e-12)
-        assert np.allclose(kokkos.results["forces"], serial.results["forces"], atol=2e-12)
-        assert np.allclose(kokkos.results["stress"], serial.results["stress"], atol=2e-12)
+        assert kokkos.results["energy"] == pytest.approx(
+            serial.results["energy"], abs=tolerance
+        )
+        assert np.allclose(
+            kokkos.results["forces"], serial.results["forces"], atol=tolerance
+        )
+        assert np.allclose(
+            kokkos.results["stress"], serial.results["stress"], atol=tolerance
+        )
         if first_energy is None:
             first_energy = kokkos.results["energy"]
         elif displacement != 0.0:
             assert kokkos.results["energy"] != pytest.approx(first_energy, abs=1e-8)
 
 
-def test_mh1_kokkos_reuses_workspaces_across_graph_sizes(mh1_si_artifact):
+@pytest.mark.parametrize("dtype", ["float64", "float32"])
+def test_mh1_kokkos_reuses_workspaces_across_graph_sizes(mh1_si_artifact, dtype):
     _, model_path = mh1_si_artifact
     serial = Symmetrix(model_path, use_kokkos=False, dtype="float64")
-    kokkos = Symmetrix(model_path, use_kokkos=True, dtype="float64")
+    kokkos = Symmetrix(model_path, use_kokkos=True, dtype=dtype)
     primitive = bulk("Si", "diamond", a=5.43)
     systems = (primitive, primitive.repeat((2, 2, 2)), primitive.repeat((3, 3, 3)))
 
@@ -568,17 +602,24 @@ def test_mh1_kokkos_reuses_workspaces_across_graph_sizes(mh1_si_artifact):
         serial.calculate(atoms, properties=["energy", "energies", "forces", "stress"])
         kokkos.calculate(atoms, properties=["energy", "energies", "forces", "stress"])
         for property_name in ("energy", "energies", "forces", "stress"):
+            tolerance = 2e-12
+            if dtype == "float32":
+                tolerance = 2e-4 * len(atoms) if property_name == "energy" else 2e-4
             assert np.allclose(
                 kokkos.results[property_name],
                 serial.results[property_name],
-                atol=2e-12,
+                atol=tolerance,
             )
 
 
-def test_mh1_kokkos_handles_changes_in_supported_species(mh1_h_si_artifact):
+@pytest.mark.parametrize("dtype", ["float64", "float32"])
+def test_mh1_kokkos_handles_changes_in_supported_species(
+    mh1_h_si_artifact, dtype
+):
     _, model_path = mh1_h_si_artifact
     serial = Symmetrix(model_path, use_kokkos=False, dtype="float64")
-    kokkos = Symmetrix(model_path, use_kokkos=True, dtype="float64")
+    kokkos = Symmetrix(model_path, use_kokkos=True, dtype=dtype)
+    kokkos_tolerance = 2e-12 if dtype == "float64" else 2e-4
     upstream = MACECalculator(
         model_paths=str(_mh1_model_path()),
         device="cpu",
@@ -600,9 +641,15 @@ def test_mh1_kokkos_handles_changes_in_supported_species(mh1_h_si_artifact):
         assert serial.results["energy"] == pytest.approx(upstream.results["energy"], abs=2e-5)
         assert np.allclose(serial.results["forces"], upstream.results["forces"], atol=2e-5)
         assert np.allclose(serial.results["stress"], upstream.results["stress"], atol=2e-5)
-        assert kokkos.results["energy"] == pytest.approx(serial.results["energy"], abs=2e-12)
-        assert np.allclose(kokkos.results["forces"], serial.results["forces"], atol=2e-12)
-        assert np.allclose(kokkos.results["stress"], serial.results["stress"], atol=2e-12)
+        assert kokkos.results["energy"] == pytest.approx(
+            serial.results["energy"], abs=kokkos_tolerance
+        )
+        assert np.allclose(
+            kokkos.results["forces"], serial.results["forces"], atol=kokkos_tolerance
+        )
+        assert np.allclose(
+            kokkos.results["stress"], serial.results["stress"], atol=kokkos_tolerance
+        )
 
 
 def test_mh1_serial_matches_upstream_for_isolated_atom(mh1_si_artifact):
@@ -624,8 +671,13 @@ def test_mh1_serial_matches_upstream_for_isolated_atom(mh1_si_artifact):
     assert np.allclose(actual.results["forces"], expected.results["forces"], atol=2e-9)
 
 
-@pytest.mark.parametrize("use_kokkos", [False, True])
-def test_mh1_native_force_matches_finite_difference(mh1_si_artifact, use_kokkos):
+@pytest.mark.parametrize(
+    ("use_kokkos", "dtype"),
+    [(False, "float64"), (True, "float64"), (True, "float32")],
+)
+def test_mh1_native_force_matches_finite_difference(
+    mh1_si_artifact, use_kokkos, dtype
+):
     _, model_path = mh1_si_artifact
     atoms = Atoms(
         "Si2",
@@ -633,16 +685,19 @@ def test_mh1_native_force_matches_finite_difference(mh1_si_artifact, use_kokkos)
         cell=[10.0, 10.0, 10.0],
         pbc=False,
     )
-    atoms.calc = Symmetrix(model_path, use_kokkos=use_kokkos, dtype="float64")
+    atoms.calc = Symmetrix(model_path, use_kokkos=use_kokkos, dtype=dtype)
     force = atoms.get_forces()[1, 0]
-    step = 1e-4
+    step = 1e-4 if dtype == "float64" else 2e-3
     displaced = atoms.copy()
     displaced.calc = atoms.calc
     displaced.positions[1, 0] += step
     energy_plus = displaced.get_potential_energy()
     displaced.positions[1, 0] -= 2 * step
     energy_minus = displaced.get_potential_energy()
-    assert force == pytest.approx(-(energy_plus - energy_minus) / (2 * step), abs=2e-4)
+    tolerance = 2e-4 if dtype == "float64" else 3e-3
+    assert force == pytest.approx(
+        -(energy_plus - energy_minus) / (2 * step), abs=tolerance
+    )
 
 
 @pytest.mark.parametrize("module_name", ["conv_tp_weights", "density_fn"])
@@ -1191,10 +1246,72 @@ def test_mh1_native_rejects_neighbor_source_type_mismatch(
         )
 
 
-def test_mh1_float32_is_rejected(mh1_si_artifact):
+def test_mh1_native_serial_float32_is_rejected(mh1_si_artifact):
     _, model_path = mh1_si_artifact
-    with pytest.raises(ValueError, match="require dtype 'float64'"):
-        Symmetrix(model_path, dtype="float32")
+    with pytest.raises(ValueError, match="Native serial.*require dtype 'float64'"):
+        Symmetrix(model_path, use_kokkos=False, dtype="float32")
+
+
+def test_mh1_kokkos_float32_streamed_modes_match_float64(mh1_si_artifact):
+    if not hasattr(native_symmetrix, "MACENonlinearKokkosFloat"):
+        pytest.skip("Symmetrix was built without Float32 Kokkos nonlinear support")
+    _, model_path = mh1_si_artifact
+    atoms = bulk("Si", "diamond", a=5.43, cubic=True).repeat((2, 1, 1))
+    properties = ["energy", "energies", "forces", "stress"]
+
+    reference = Symmetrix(
+        model_path,
+        use_kokkos=True,
+        dtype="float64",
+        streamed_edges="all",
+    )
+    reference.calculate(atoms.copy(), properties=properties)
+    reference_results = {
+        name: np.array(reference.results[name], copy=True) for name in properties
+    }
+    reference_workspace_bytes = reference.evaluator.edge_workspace_bytes
+
+    float_results = {}
+    float_workspace_bytes = None
+    for mode in ("legacy", "all"):
+        calculator = Symmetrix(
+            model_path,
+            use_kokkos=True,
+            dtype="float32",
+            streamed_edges=mode,
+        )
+        assert type(calculator.evaluator).__name__ == "MACENonlinearKokkosFloat"
+        assert calculator.evaluator.scalar_size_bytes == 4
+        assert calculator.evaluator.uses_mh1_fast_path
+        assert calculator.evaluator.supports_streamed_edges
+        assert calculator.evaluator.streamed_edges_mode == mode
+        calculator.calculate(atoms.copy(), properties=properties)
+        float_results[mode] = {
+            name: np.array(calculator.results[name], copy=True)
+            for name in properties
+        }
+        if mode == "all":
+            float_workspace_bytes = calculator.evaluator.edge_workspace_bytes
+
+    for mode in ("legacy", "all"):
+        for name in properties:
+            np.testing.assert_allclose(
+                float_results[mode][name],
+                reference_results[name],
+                rtol=0.0,
+                atol=2e-5,
+            )
+    for name in properties:
+        np.testing.assert_allclose(
+            float_results["all"][name],
+            float_results["legacy"][name],
+            rtol=0.0,
+            atol=2e-5,
+        )
+    assert float_workspace_bytes <= reference_workspace_bytes * 0.51
+
+    automatic = Symmetrix(model_path, use_kokkos=True, dtype="float32")
+    assert automatic.streamed_edges == "all"
 
 
 def test_legacy_evaluator_rejects_nonlinear_schema(mh1_si_artifact):
