@@ -17,6 +17,26 @@ void bind_mace_nonlinear_kokkos_evaluator(
         .def(py::init<std::string>())
         .def_readonly("r_cut",&Evaluator::r_cut)
         .def_readonly("has_field_coupling",&Evaluator::has_field_coupling)
+        .def_property_readonly("is_mh1_family",&Evaluator::is_mh1_family)
+        .def_property_readonly("mh1_node_channels",&Evaluator::mh1_node_channels)
+        .def_property_readonly("mh1_edge_channels",&Evaluator::mh1_edge_channels)
+        .def_property_readonly("mh1_radial_size",&Evaluator::mh1_radial_size)
+        .def_property_readonly("mh1_l_max",&Evaluator::mh1_l_max)
+        .def_property_readonly(
+            "mh1_family_rejection_reason",
+            &Evaluator::mh1_family_rejection_reason)
+        .def_property_readonly(
+            "mh1_uses_compiled_products",
+            &Evaluator::mh1_uses_compiled_products)
+        .def_property_readonly(
+            "mh1_uses_pair_conditioning",
+            &Evaluator::mh1_uses_pair_conditioning)
+        .def_property_readonly(
+            "mh1_uses_external_uvu_tensors",
+            &Evaluator::mh1_uses_external_uvu_tensors)
+        .def_property_readonly(
+            "mh1_fast_path_rejection_reason",
+            &Evaluator::mh1_fast_path_rejection_reason)
         .def_property_readonly("scalar_size_bytes",[](const Evaluator&) {
             return sizeof(typename Evaluator::precision_type);
         })
@@ -34,6 +54,12 @@ void bind_mace_nonlinear_kokkos_evaluator(
         .def_property_readonly(
             "tensor_product_execution_backend",
             &Evaluator::tensor_product_execution_backend)
+        .def_property_readonly(
+            "tensor_product_channel_team_size",
+            &Evaluator::tensor_product_channel_team_size)
+        .def_property_readonly(
+            "tensor_product_harmonic_team_size",
+            &Evaluator::tensor_product_harmonic_team_size)
         .def_property_readonly("linear_workspace_bytes",&Evaluator::linear_workspace_bytes)
         .def_property_readonly("tensor_workspace_bytes",&Evaluator::tensor_workspace_bytes)
         .def_property_readonly("precision_workspace_bytes",&Evaluator::precision_workspace_bytes)

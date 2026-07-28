@@ -130,22 +130,22 @@ int E3ProductBasis::compiled_term_count() const
 bool E3ProductBasis::has_mh1_product_layout(const nlohmann::json& data) const
 {
     if (!use_sc || !data.value("use_agnostic_product", false)
-        || num_features != 512 || angular_dimension != 16
-        || input.blocks.size() != 4)
+        || num_features <= 0
+        || (input.blocks.size() != 3 && input.blocks.size() != 4))
         return false;
-    for (int index=0; index<4; ++index) {
+    for (int index=0; index<static_cast<int>(input.blocks.size()); ++index) {
         const auto& block = input.blocks[index];
-        if (block.multiplicity != 512 || block.l != index
+        if (block.multiplicity != num_features || block.l != index
             || block.parity != (index%2 == 0 ? 1 : -1))
             return false;
     }
     const bool first_product = output.blocks.size() == 2
-        && output.blocks[0].multiplicity == 512 && output.blocks[0].l == 0
+        && output.blocks[0].multiplicity == num_features && output.blocks[0].l == 0
         && output.blocks[0].parity == 1
-        && output.blocks[1].multiplicity == 512 && output.blocks[1].l == 1
+        && output.blocks[1].multiplicity == num_features && output.blocks[1].l == 1
         && output.blocks[1].parity == -1;
     const bool second_product = output.blocks.size() == 1
-        && output.blocks[0].multiplicity == 512 && output.blocks[0].l == 0
+        && output.blocks[0].multiplicity == num_features && output.blocks[0].l == 0
         && output.blocks[0].parity == 1;
     if (!first_product && !second_product) return false;
     for (const auto& contraction : contractions)

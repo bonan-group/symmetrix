@@ -92,8 +92,8 @@ MACEField evaluators support both `dtype="float64"` and `dtype="float32"` with
 fields enter through the existing float64 interface; learned tensors and
 evaluator workspaces use the selected precision, and ASE results are promoted
 to NumPy float64 during assembly. Format-version-1 pair splines are available
-only for standard MACE. Strict published MACE-MH-1 format-version-3 models also
-support float32 through Kokkos; generic nonlinear format-version-3 models and
+only for standard MACE. Compatible two-layer MACE-MH-1-family format-version-3
+models also support float32 through Kokkos; generic nonlinear format-version-3 models and
 the native serial nonlinear evaluator remain float64-only. The native LAMMPS
 pair style also remains float64-only; its Kokkos styles retain their existing
 precision selection.
@@ -180,18 +180,33 @@ are recorded in [the MH-1 benchmark report](../benchmarks/mh1_streamed_edges_864
 Related nonlinear layouts continue to use the generic float64 evaluator and
 accept only `legacy`.
 
-| Nonlinear format-v3 backend | Strict MH-1 float64 | Strict MH-1 float32 | Related/generic architecture |
+| Nonlinear format-v3 model | Native serial CPU | Kokkos Serial/OpenMP | Kokkos CUDA |
 |---|---|---|---|
-| Native serial CPU | `legacy`, `r1`, `all` | Not supported | float64 `legacy` |
-| Kokkos Serial/OpenMP | `legacy`, `r1`, `all` | `legacy`, `r1`, `all` | float64 `legacy` |
-| Kokkos CUDA | `legacy`, `r1`, `all` | `legacy`, `r1`, `all` | float64 `legacy` |
+| Published MH-1 (512/128/10, `l_max=3`) | float64: `legacy`, `r1`, `all` | float64/float32: `legacy`, `r1`, `all` | float64/float32: `legacy`, `r1`, `all`; Float32 team schedule qualified |
+| Generalized MH-1 family | float64: `legacy`, `r1`, `all` | float64/float32: `legacy`, `r1`, `all` | float64/float32: `legacy`, `r1`, `all`; runtime-sized team schedule |
+| Related/generic architecture | float64: `legacy` | float64: `legacy` | float64: `legacy` |
+
+The generalized family retains exactly two nonlinear residual interactions,
+correlation-three element-agnostic products with skip connections, external
+weighted `uvu` convolution tensor products, SiLU/sigmoid gates, and linear then
+SiLU nonlinear readouts. Node and edge multiplicities, Bessel count, radial MLP
+widths, species count, and readout widths are runtime values. `l_max=2` and
+`l_max=3` are supported; other depths, correlations, product modes, tensor
+connection modes, and angular cutoffs stay on the generic Float64 path or fail
+schema validation.
 
 The Kokkos CPU path is selected by the default `use_kokkos=True`. It shares the
 serial model-load compiler for sparse product coefficients, then executes
 native Kokkos kernels for sparse products and tensor products, compact
 species-conditioned affine networks, packed equivariant linears, and analytic
-reverse propagation. `calculator.evaluator.uses_mh1_fast_path` reports whether
-the strict published topology selected the specialization. Configure CPU
+reverse propagation. `calculator.evaluator.is_mh1_family` reports the relational
+model contract, while `uses_mh1_fast_path` additionally requires every compiled
+product, conditioned MLP, and tensor primitive. The `mh1_node_channels`,
+`mh1_edge_channels`, `mh1_radial_size`, and `mh1_l_max` properties report the
+selected dimensions. On Float32 CUDA, tensor-product teams are rounded to a
+32-thread warp and capped at 128 threads; the effective channel and harmonic
+team sizes are reported by `tensor_product_channel_team_size` and
+`tensor_product_harmonic_team_size`. Configure CPU
 parallelism before Python initializes Kokkos, for example:
 
 ```
@@ -242,7 +257,7 @@ the generic native evaluator for the selected backend. An explicit
 `use_kokkos=True` request is never redirected to the serial evaluator. The
 specialized Kokkos path is available with Kokkos Serial, OpenMP, and CUDA in
 both float32 and float64. Float32 construction fails closed unless the model
-matches the complete published MACE-MH-1 fast-path predicate.
+matches the complete generalized MACE-MH-1-family fast-path predicate.
 
 Native nonlinear evaluator objects retain mutable forward tapes and grow-only
 workspaces. Calls on one evaluator instance must be serialized; use a separate
@@ -259,7 +274,7 @@ symmetrix_extract_mace --model mace-mh-1.model \
 ```
 
 Format-version-3 `MACE_Nonlinear` JSON can be used through the ASE calculator
-or the native `MACENonlinear`, `MACENonlinearKokkos`, and strict-only
+or the native `MACENonlinear`, `MACENonlinearKokkos`, and family-qualified
 `MACENonlinearKokkosFloat` library classes. The LAMMPS pair styles do not
 support this model family in the current release and fail at `pair_coeff` with
 an explicit unsupported-model error.

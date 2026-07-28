@@ -242,7 +242,7 @@ void MaceNonlinearKokkosT<Precision>::set_streamed_edges(std::string mode)
     const auto requested=parse_mace_streamed_edges_mode(mode);
     if(requested!=MACEStreamedEdgesMode::legacy&&!supports_streamed_edges())
         throw std::invalid_argument(
-            "Streamed edges require the published MACE-MH-1 fast-path architecture.");
+            "Streamed edges require a compatible MACE-MH-1 family fast path.");
     Kokkos::fence("MACE_Nonlinear streamed-mode transition");
     streamed_edges=requested;
     if(streamed_edges==MACEStreamedEdgesMode::r1)
@@ -400,6 +400,28 @@ std::string MaceNonlinearKokkosT<Precision>::tensor_product_execution_backend() 
 }
 
 template<typename Precision>
+int MaceNonlinearKokkosT<Precision>::tensor_product_channel_team_size() const
+{
+    if(interactions.empty()) return 0;
+    const int selected=interactions.front().convolution.channel_team_size();
+    return std::all_of(
+        interactions.begin(),interactions.end(),[selected](const auto& interaction) {
+            return interaction.convolution.channel_team_size()==selected;
+        }) ? selected : -1;
+}
+
+template<typename Precision>
+int MaceNonlinearKokkosT<Precision>::tensor_product_harmonic_team_size() const
+{
+    if(interactions.empty()) return 0;
+    const int selected=interactions.front().convolution.harmonic_team_size();
+    return std::all_of(
+        interactions.begin(),interactions.end(),[selected](const auto& interaction) {
+            return interaction.convolution.harmonic_team_size()==selected;
+        }) ? selected : -1;
+}
+
+template<typename Precision>
 std::size_t MaceNonlinearKokkosT<Precision>::linear_workspace_bytes() const
 {
     return e3_linear_workspace ? e3_linear_workspace->bytes() : 0;
@@ -438,22 +460,38 @@ MaceNonlinearKokkosT<Precision>::MaceNonlinearKokkosT(const nlohmann::json& data
         readout.set_e3_linear_workspace(e3_linear_workspace);
     if(interactions.size()!=products.size()||interactions.size()!=readouts.size())
         throw std::invalid_argument("MACE_Nonlinear Kokkos layer counts are inconsistent.");
-    mh1_fast_path=is_published_mh1_architecture(data)
-        &&std::all_of(products.begin(),products.end(),[](const auto& product) {
+    mh1_family=analyze_mh1_family_architecture(data);
+    mh1_compiled_products=std::all_of(
+        products.begin(),products.end(),[](const auto& product) {
             return product.uses_compiled_plan();
-        })
-        &&std::all_of(interactions.begin(),interactions.end(),[](const auto& interaction) {
+        });
+    mh1_external_uvu_tensors=std::all_of(
+        interactions.begin(),interactions.end(),[](const auto& interaction) {
             return interaction.convolution.uses_mh1_fast_path();
         });
-    if(mh1_fast_path)
+    const bool primitive_candidate=mh1_family.compatible
+        &&mh1_compiled_products&&mh1_external_uvu_tensors;
+    mh1_pair_conditioning=primitive_candidate;
+    if(primitive_candidate)
         for(int layer=0;layer<static_cast<int>(interactions.size());++layer)
-            mh1_fast_path=interactions[layer].prepare_pair_conditioning(
+            mh1_pair_conditioning=interactions[layer].prepare_pair_conditioning(
                 data.at("interactions").at(layer),num_bessel,model_num_elements,indices)
-                &&mh1_fast_path;
+                &&mh1_pair_conditioning;
+    mh1_fast_path=primitive_candidate&&mh1_pair_conditioning;
+    if(!mh1_fast_path) {
+        if(!mh1_family.compatible)
+            mh1_fast_path_rejection=mh1_family.rejection_reason;
+        else if(!mh1_compiled_products)
+            mh1_fast_path_rejection="Compiled correlation-three product plan is unavailable.";
+        else if(!mh1_external_uvu_tensors)
+            mh1_fast_path_rejection="External weighted uvu tensor plan is unavailable.";
+        else
+            mh1_fast_path_rejection="Conditioned edge MLP plan is unavailable.";
+    }
     if constexpr(std::is_same_v<Precision,float>)
         if(!mh1_fast_path)
             throw std::invalid_argument(
-                "Float32 MACE_Nonlinear requires the published MACE-MH-1 fast-path architecture.");
+                "Float32 MACE_Nonlinear requires a compatible MACE-MH-1 family fast path.");
     set_e3_linear_backend("auto");
     states.resize(interactions.size());has_zbl=data.at("has_zbl").get<bool>();if(has_zbl){const auto& value=data.at("zbl");zbl=ZBLKokkos(value.at("a_exp").get<double>(),value.at("a_prefactor").get<double>(),tensor_values<double>(value.at("c")),tensor_values<double>(value.at("covalent_radii")),static_cast<int>(tensor_values<double>(value.at("p")).at(0)));}
     if(supports_streamed_edges())streamed_edges=MACEStreamedEdgesMode::all;

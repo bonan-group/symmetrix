@@ -31,7 +31,7 @@ E3ProductBasisKokkosT<Precision>::E3ProductBasisKokkosT(const nlohmann::json& da
     use_sc=data.at("use_sc").get<bool>(); agnostic=data.value("use_agnostic_product",false);
     if(validated.uses_compiled_plan()) {
         const auto& plan=validated.compiled_plan();
-        if(angular_dimension!=16||plan.empty())
+        if(plan.empty())
             throw std::invalid_argument("Kokkos compiled product plan has an invalid angular layout.");
         int num_elements=plan.front().num_elements;
         for(const auto& block:plan) {
@@ -182,6 +182,7 @@ void E3ProductBasisKokkosT<Precision>::reverse(Kokkos::View<const Precision**,Ko
             throw std::out_of_range("MACE_Nonlinear product element index is out of range.");
         auto terms=compiled_term_data;
         auto coefficients=compiled_coefficients;
+        const int angular_count=angular_dimension;
         for(const auto& block:compiled_blocks) {
             auto component_offsets=block.component_offsets;
             const int term_offset=block.term_offset;
@@ -194,7 +195,7 @@ void E3ProductBasisKokkosT<Precision>::reverse(Kokkos::View<const Precision**,Ko
                     {0,0},{static_cast<int>(source.extent(0)),feature_count}),
                 KOKKOS_LAMBDA(int sample,int feature) {
                     Precision local[16];
-                    for(int angular=0;angular<16;++angular)
+                    for(int angular=0;angular<angular_count;++angular)
                         local[angular]=features_adj(sample,feature,angular);
                     const int element=elements(sample);
                     if(element>=0&&element<element_count) {
@@ -227,7 +228,7 @@ void E3ProductBasisKokkosT<Precision>::reverse(Kokkos::View<const Precision**,Ko
                             }
                         }
                     }
-                    for(int angular=0;angular<16;++angular)
+                    for(int angular=0;angular<angular_count;++angular)
                         features_adj(sample,feature,angular)=local[angular];
                 });
         }

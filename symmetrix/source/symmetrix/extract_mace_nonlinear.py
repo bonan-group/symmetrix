@@ -229,7 +229,7 @@ def extract_mace_nonlinear_data(model, atomic_numbers: list[int]) -> dict[str, A
         raise RuntimeError("Native nonlinear-MACE extraction currently requires PolynomialCutoff.")
 
     distance_transform = {"type": "none"}
-    if radial.distance_transform is not None:
+    if getattr(radial, "distance_transform", None) is not None:
         transform = radial.distance_transform
         if type(transform).__name__ != "AgnesiTransform":
             raise RuntimeError("Native nonlinear-MACE extraction currently requires AgnesiTransform or no transform.")

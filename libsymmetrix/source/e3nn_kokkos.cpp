@@ -15,6 +15,16 @@ template<typename Precision>
 std::vector<Precision> tensor_values(const nlohmann::json& value) { return value.at("values").get<std::vector<Precision>>(); }
 int shape_product(const std::vector<int>& shape) { return std::accumulate(shape.begin(),shape.end(),1,std::multiplies<int>()); }
 
+int mh1_cuda_team_size(int multiplicity)
+{
+    if(multiplicity<=0) return 0;
+    constexpr int warp_size=32;
+    constexpr int maximum_team_size=128;
+    const int capped=std::min(multiplicity,maximum_team_size);
+    return std::max(
+        warp_size,((capped+warp_size-1)/warp_size)*warp_size);
+}
+
 class ProfileRegion {
 public:
     explicit ProfileRegion(const char* name) { Kokkos::Profiling::pushRegion(name); }
@@ -287,11 +297,15 @@ E3TensorProductKokkosT<Precision>::E3TensorProductKokkosT(const nlohmann::json& 
         if (mode!="uvu"&&mode!="uuu") throw std::invalid_argument("Unsupported Kokkos tensor-product mode: "+mode);
         Instruction instruction{a.offset,b.offset,c.offset,a.multiplicity,b.multiplicity,c.multiplicity,2*a.l+1,2*b.l+1,2*c.l+1,offset,has,mode=="uuu",value.at("path_weight").get<Precision>(),toKokkosView("e3 wigner",tensor_values<Precision>(value.at("wigner_3j")))};
         const auto path_shape=value.at("path_shape").get<std::vector<int>>();
+        const int instruction_multiplicity=a.multiplicity;
         official_layout=official_layout&&mode=="uvu"&&has
-            &&a.multiplicity==128&&b.multiplicity==1&&c.multiplicity==128
+            &&instruction_multiplicity>0&&b.multiplicity==1
+            &&c.multiplicity==instruction_multiplicity
+            &&(mh1_multiplicity_==0||mh1_multiplicity_==instruction_multiplicity)
             &&instruction.width_1<=3
-            &&path_shape==std::vector<int>({128,1});
+            &&path_shape==std::vector<int>({instruction_multiplicity,1});
         if(official_layout) {
+            mh1_multiplicity_=instruction_multiplicity;
             const auto& entries=validated.instructions.at(instruction_index).nonzero_wigner;
             std::vector<int> component_offsets(instruction.output_width+1,0);
             std::vector<int> indices;
@@ -342,6 +356,8 @@ E3TensorProductKokkosT<Precision>::E3TensorProductKokkosT(const nlohmann::json& 
     weight_size_=offset; internal_weights=toKokkosView("e3 tensor weights",tensor_values<Precision>(data.at("weight"))); output_mask=toKokkosView("e3 tensor mask",tensor_values<Precision>(data.at("output_mask")));
     mh1_fast_path=official_layout&&internal_weights.empty();
     if(mh1_fast_path) {
+        mh1_cuda_channel_team_size_=mh1_cuda_team_size(mh1_multiplicity_);
+        mh1_cuda_harmonic_team_size_=mh1_cuda_team_size(mh1_multiplicity_);
         mh1_instruction_count_=instructions.size();
         set_kokkos_view(
             mh1_instruction_data,mh1_instruction_data_host,
@@ -382,9 +398,33 @@ std::string E3TensorProductKokkosT<Precision>::execution_backend() const
 {
     if(!mh1_fast_path) return "generic_kokkos";
 #ifdef KOKKOS_ENABLE_CUDA
-    if constexpr(std::is_same_v<Precision,float>) return "official_cuda_team";
+    if constexpr(std::is_same_v<Precision,float>
+        &&std::is_same_v<Kokkos::DefaultExecutionSpace,Kokkos::Cuda>)
+        return "official_cuda_team";
 #endif
     return "official_kokkos_mdrange";
+}
+
+template<typename Precision>
+int E3TensorProductKokkosT<Precision>::channel_team_size() const
+{
+#ifdef KOKKOS_ENABLE_CUDA
+    if constexpr(std::is_same_v<Precision,float>
+        &&std::is_same_v<Kokkos::DefaultExecutionSpace,Kokkos::Cuda>)
+        return mh1_fast_path ? mh1_cuda_channel_team_size_ : 0;
+#endif
+    return 0;
+}
+
+template<typename Precision>
+int E3TensorProductKokkosT<Precision>::harmonic_team_size() const
+{
+#ifdef KOKKOS_ENABLE_CUDA
+    if constexpr(std::is_same_v<Precision,float>
+        &&std::is_same_v<Kokkos::DefaultExecutionSpace,Kokkos::Cuda>)
+        return mh1_fast_path ? mh1_cuda_harmonic_team_size_ : 0;
+#endif
+    return 0;
 }
 
 template<typename Precision>
@@ -401,16 +441,19 @@ void E3TensorProductKokkosT<Precision>::evaluate(Kokkos::View<const Precision**,
         auto values=mh1_sparse_values;
         auto component_offsets=mh1_component_offsets;
         const int instruction_count=mh1_instruction_count_;
+        const int multiplicity=mh1_multiplicity_;
 #ifdef KOKKOS_ENABLE_CUDA
-        if constexpr(std::is_same_v<Precision,float>) {
+        if constexpr(std::is_same_v<Precision,float>
+            &&std::is_same_v<Kokkos::DefaultExecutionSpace,Kokkos::Cuda>) {
+        const int channel_team_size=mh1_cuda_channel_team_size_;
         using channel_policy=Kokkos::TeamPolicy<>;
         Kokkos::parallel_for(
             "e3 tensor product mh1 team channels",
-            channel_policy(input_1.extent(0),128),
+            channel_policy(input_1.extent(0),channel_team_size),
             KOKKOS_LAMBDA(const typename channel_policy::member_type& team) {
                 const int sample=team.league_rank();
                 Kokkos::parallel_for(
-                    Kokkos::TeamThreadRange(team,128),
+                    Kokkos::TeamThreadRange(team,multiplicity),
                     [&](const int channel) {
                 for(int instruction=0;instruction<instruction_count;
                     ++instruction) {
@@ -446,7 +489,7 @@ void E3TensorProductKokkosT<Precision>::evaluate(Kokkos::View<const Precision**,
         Kokkos::parallel_for(
             "e3 tensor product mh1 fused",
             Kokkos::MDRangePolicy<Kokkos::Rank<2>>(
-                {0,0},{static_cast<int>(input_1.extent(0)),128}),
+                {0,0},{static_cast<int>(input_1.extent(0)),multiplicity}),
             KOKKOS_LAMBDA(int sample,int channel) {
                 for(int instruction=0;instruction<instruction_count;
                     ++instruction) {
@@ -506,16 +549,20 @@ void E3TensorProductKokkosT<Precision>::reverse(Kokkos::View<const Precision**,K
         auto harmonic_terms=mh1_harmonic_terms;
         auto harmonic_values=mh1_harmonic_values;
         const int instruction_count=mh1_instruction_count_;
+        const int multiplicity=mh1_multiplicity_;
 #ifdef KOKKOS_ENABLE_CUDA
-        if constexpr(std::is_same_v<Precision,float>) {
+        if constexpr(std::is_same_v<Precision,float>
+            &&std::is_same_v<Kokkos::DefaultExecutionSpace,Kokkos::Cuda>) {
+        const int channel_team_size=mh1_cuda_channel_team_size_;
+        const int harmonic_team_size=mh1_cuda_harmonic_team_size_;
         using channel_policy=Kokkos::TeamPolicy<>;
         Kokkos::parallel_for(
             "e3 tensor reverse mh1 team channels",
-            channel_policy(input_1.extent(0),128),
+            channel_policy(input_1.extent(0),channel_team_size),
             KOKKOS_LAMBDA(const typename channel_policy::member_type& team) {
                 const int sample=team.league_rank();
                 Kokkos::parallel_for(
-                    Kokkos::TeamThreadRange(team,128),
+                    Kokkos::TeamThreadRange(team,multiplicity),
                     [&](const int channel) {
                 for(int instruction=0;instruction<instruction_count;
                     ++instruction) {
@@ -556,13 +603,13 @@ void E3TensorProductKokkosT<Precision>::reverse(Kokkos::View<const Precision**,K
         Kokkos::parallel_for(
             "e3 tensor reverse mh1 team harmonics",
             harmonic_policy(
-                input_1.extent(0)*harmonic_dimension,128),
+                input_1.extent(0)*harmonic_dimension,harmonic_team_size),
             KOKKOS_LAMBDA(const typename harmonic_policy::member_type& team) {
                 const int sample=team.league_rank()/harmonic_dimension;
                 const int component=team.league_rank()%harmonic_dimension;
                 Precision result=Precision(0);
                 Kokkos::parallel_reduce(
-                    Kokkos::TeamThreadRange(team,128),
+                    Kokkos::TeamThreadRange(team,multiplicity),
                     [&](const int channel,Precision& channel_result) {
                     for(int term=harmonic_offsets(component);
                         term<harmonic_offsets(component+1);++term) {
@@ -594,7 +641,7 @@ void E3TensorProductKokkosT<Precision>::reverse(Kokkos::View<const Precision**,K
         Kokkos::parallel_for(
             "e3 tensor reverse mh1 fused channels",
             Kokkos::MDRangePolicy<Kokkos::Rank<2>>(
-                {0,0},{static_cast<int>(input_1.extent(0)),128}),
+                {0,0},{static_cast<int>(input_1.extent(0)),multiplicity}),
             KOKKOS_LAMBDA(int sample,int channel) {
                 for(int instruction=0;instruction<instruction_count;
                     ++instruction) {
@@ -635,7 +682,7 @@ void E3TensorProductKokkosT<Precision>::reverse(Kokkos::View<const Precision**,K
                 {0,0},{static_cast<int>(input_1.extent(0)),input_2_dimension_}),
             KOKKOS_LAMBDA(int sample,int component) {
                 Precision result=Precision(0);
-                for(int channel=0;channel<128;++channel)
+                for(int channel=0;channel<multiplicity;++channel)
                     for(int term=harmonic_offsets(component);
                         term<harmonic_offsets(component+1);++term) {
                         const int instruction=harmonic_terms(term,0);

@@ -6,6 +6,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "e3nn.hpp"
@@ -43,15 +44,58 @@ void require_finite(double value, const char* name)
         throw std::invalid_argument(std::string("MACE_Nonlinear ") + name + " must be finite.");
 }
 
-bool irreps_equal(const std::string& actual, const std::string& expected)
+bool blocks_equal(
+    const Irreps& actual,
+    const std::vector<std::tuple<int, int, int>>& expected)
 {
-    const Irreps left(actual);
-    const Irreps right(expected);
-    if (left.blocks.size() != right.blocks.size()) return false;
-    for (int index=0; index<static_cast<int>(left.blocks.size()); ++index) {
-        const auto& a = left.blocks[index];
-        const auto& b = right.blocks[index];
-        if (a.multiplicity != b.multiplicity || a.l != b.l || a.parity != b.parity)
+    if (actual.blocks.size() != expected.size()) return false;
+    for (int index=0; index<static_cast<int>(actual.blocks.size()); ++index) {
+        const auto& block = actual.blocks[index];
+        const auto& [multiplicity, l, parity] = expected[index];
+        if (block.multiplicity != multiplicity || block.l != l
+            || block.parity != parity)
+            return false;
+    }
+    return true;
+}
+
+std::vector<std::tuple<int, int, int>> spherical_blocks(
+    int multiplicity, int l_max, int scalar_copies=1)
+{
+    std::vector<std::tuple<int, int, int>> result;
+    result.emplace_back(scalar_copies*multiplicity, 0, 1);
+    for (int l=1; l<=l_max; ++l)
+        result.emplace_back(multiplicity, l, l%2 == 0 ? 1 : -1);
+    return result;
+}
+
+bool has_external_uvu_tensor_layout(
+    const nlohmann::json& interaction, int multiplicity)
+{
+    const auto& tensor_product = interaction.at("conv_tp");
+    const Irreps input_1(tensor_product.at("irreps_in1").get<std::string>());
+    const Irreps input_2(tensor_product.at("irreps_in2").get<std::string>());
+    const Irreps output(tensor_product.at("irreps_out").get<std::string>());
+    if (!tensor_product.at("weight").at("values").empty()
+        || tensor_product.at("instructions").empty())
+        return false;
+    for (const auto& instruction : tensor_product.at("instructions")) {
+        const int i1 = instruction.at("i_in1").get<int>();
+        const int i2 = instruction.at("i_in2").get<int>();
+        const int io = instruction.at("i_out").get<int>();
+        if (i1 < 0 || i1 >= static_cast<int>(input_1.blocks.size())
+            || i2 < 0 || i2 >= static_cast<int>(input_2.blocks.size())
+            || io < 0 || io >= static_cast<int>(output.blocks.size()))
+            return false;
+        const auto& a = input_1.blocks[i1];
+        const auto& b = input_2.blocks[i2];
+        const auto& c = output.blocks[io];
+        if (instruction.at("connection_mode").get<std::string>() != "uvu"
+            || !instruction.at("has_weight").get<bool>()
+            || a.multiplicity != multiplicity || b.multiplicity != 1
+            || c.multiplicity != multiplicity
+            || instruction.at("path_shape").get<std::vector<int>>()
+                != std::vector<int>{multiplicity, 1})
             return false;
     }
     return true;
@@ -59,44 +103,109 @@ bool irreps_equal(const std::string& actual, const std::string& expected)
 
 } // namespace
 
-bool is_published_mh1_architecture(const nlohmann::json& data)
+MaceMH1FamilyDescriptor analyze_mh1_family_architecture(
+    const nlohmann::json& data)
 {
+    MaceMH1FamilyDescriptor result;
+    auto reject = [&](const char* reason) {
+        result.rejection_reason = reason;
+        return result;
+    };
     if (data.at("num_interactions").get<int>() != 2
-        || data.at("l_max").get<int>() != 3
-        || data.at("radial_embedding").at("basis").at("weights").at("values").size() != 10
         || data.at("interactions").size() != 2
         || data.at("products").size() != 2
         || data.at("readouts").size() != 2)
-        return false;
+        return reject("MH-1 family execution requires exactly two interactions.");
+    result.l_max = data.at("l_max").get<int>();
+    if (result.l_max != 2 && result.l_max != 3)
+        return reject("MH-1 family execution supports l_max=2 or l_max=3.");
+    result.radial_size = static_cast<int>(
+        data.at("radial_embedding").at("basis").at("weights").at("values").size());
+    if (result.radial_size <= 0)
+        return reject("MH-1 family execution requires a non-empty radial basis.");
+
     const auto& first = data.at("interactions").at(0);
     const auto& second = data.at("interactions").at(1);
     if (first.at("class").get<std::string>()
             != "RealAgnosticResidualNonLinearInteractionBlock"
         || second.at("class").get<std::string>()
-            != "RealAgnosticResidualNonLinearInteractionBlock"
-        || !irreps_equal(first.at("node_feats_irreps").get<std::string>(), "512x0e")
-        || !irreps_equal(second.at("node_feats_irreps").get<std::string>(), "512x0e+512x1o")
-        || !irreps_equal(first.at("edge_irreps").get<std::string>(), "128x0e")
-        || !irreps_equal(second.at("edge_irreps").get<std::string>(), "128x0e+128x1o")
-        || !irreps_equal(first.at("target_irreps").get<std::string>(),
-                         "512x0e+512x1o+512x2e+512x3o")
-        || !irreps_equal(second.at("target_irreps").get<std::string>(),
-                         "512x0e+512x1o+512x2e+512x3o")
-        || !irreps_equal(first.at("hidden_irreps").get<std::string>(), "512x0e+512x1o")
-        || !irreps_equal(second.at("hidden_irreps").get<std::string>(), "512x0e"))
-        return false;
-    const std::string gate_input = "2048x0e+512x1o+512x2e+512x3o";
-    const std::string gate_output = "512x0e+512x1o+512x2e+512x3o";
-    for (const auto* interaction : {&first, &second})
-        if (!irreps_equal(
-                interaction->at("gate").at("irreps_in").get<std::string>(), gate_input)
-            || !irreps_equal(
-                interaction->at("gate").at("irreps_out").get<std::string>(), gate_output))
-            return false;
-    return data.at("readouts").at(0).at("class").get<std::string>()
-            == "LinearReadoutBlock"
-        && data.at("readouts").at(1).at("class").get<std::string>()
-            == "NonLinearReadoutBlock";
+            != "RealAgnosticResidualNonLinearInteractionBlock")
+        return reject("MH-1 family execution requires nonlinear residual interactions.");
+
+    const Irreps first_nodes(first.at("node_feats_irreps").get<std::string>());
+    const Irreps first_edges(first.at("edge_irreps").get<std::string>());
+    if (first_nodes.blocks.size() != 1 || first_nodes.blocks[0].l != 0
+        || first_nodes.blocks[0].parity != 1)
+        return reject("The first MH-1 node representation must be scalar.");
+    if (first_edges.blocks.size() != 1 || first_edges.blocks[0].l != 0
+        || first_edges.blocks[0].parity != 1)
+        return reject("The first MH-1 edge representation must be scalar.");
+    result.node_channels = first_nodes.blocks[0].multiplicity;
+    result.edge_channels = first_edges.blocks[0].multiplicity;
+    const auto full = spherical_blocks(result.node_channels, result.l_max);
+    const auto gate_input = spherical_blocks(
+        result.node_channels, result.l_max, result.l_max+1);
+    const std::vector<std::tuple<int, int, int>> node_hidden = {
+        {result.node_channels, 0, 1}, {result.node_channels, 1, -1}};
+    const std::vector<std::tuple<int, int, int>> scalar_hidden = {
+        {result.node_channels, 0, 1}};
+    const std::vector<std::tuple<int, int, int>> second_edges = {
+        {result.edge_channels, 0, 1}, {result.edge_channels, 1, -1}};
+
+    if (!blocks_equal(
+            Irreps(second.at("node_feats_irreps").get<std::string>()), node_hidden)
+        || !blocks_equal(
+            Irreps(second.at("edge_irreps").get<std::string>()), second_edges)
+        || !blocks_equal(
+            Irreps(first.at("hidden_irreps").get<std::string>()), node_hidden)
+        || !blocks_equal(
+            Irreps(second.at("hidden_irreps").get<std::string>()), scalar_hidden))
+        return reject("MH-1 node, edge, and hidden irreps are inconsistent.");
+    for (const auto* interaction : {&first, &second}) {
+        if (!blocks_equal(
+                Irreps(interaction->at("target_irreps").get<std::string>()), full)
+            || !blocks_equal(
+                Irreps(interaction->at("gate").at("irreps_in").get<std::string>()),
+                gate_input)
+            || !blocks_equal(
+                Irreps(interaction->at("gate").at("irreps_out").get<std::string>()),
+                full))
+            return reject("MH-1 target or gate irreps are inconsistent.");
+    }
+    const std::vector<std::vector<std::tuple<int, int, int>>> product_outputs = {
+        node_hidden, scalar_hidden};
+    for (int layer=0; layer<2; ++layer) {
+        const auto& product = data.at("products").at(layer);
+        const auto& contractions =
+            product.at("symmetric_contractions").at("contractions");
+        if (!product.at("use_sc").get<bool>()
+            || !product.value("use_agnostic_product", false)
+            || !blocks_equal(
+                Irreps(product.at("symmetric_contractions")
+                    .at("irreps_in").get<std::string>()), full)
+            || !blocks_equal(
+                Irreps(product.at("symmetric_contractions")
+                    .at("irreps_out").get<std::string>()), product_outputs[layer])
+            || contractions.size() != product_outputs[layer].size())
+            return reject("MH-1 family execution requires agnostic products with skip connections.");
+        for (const auto& contraction : contractions) {
+            const auto shape = contraction.at("weights_max").at("shape")
+                .get<std::vector<int>>();
+            if (contraction.at("correlation").get<int>() != 3
+                || shape.empty() || shape.front() != 1)
+                return reject("MH-1 family execution requires agnostic correlation-three products.");
+        }
+    }
+    if (!has_external_uvu_tensor_layout(first, result.edge_channels)
+        || !has_external_uvu_tensor_layout(second, result.edge_channels))
+        return reject("MH-1 family execution requires external weighted uvu tensor products.");
+    if (data.at("readouts").at(0).at("class").get<std::string>()
+            != "LinearReadoutBlock"
+        || data.at("readouts").at(1).at("class").get<std::string>()
+            != "NonLinearReadoutBlock")
+        return reject("MH-1 family execution requires linear then nonlinear readouts.");
+    result.compatible = true;
+    return result;
 }
 
 void validate_mace_nonlinear_schema(const nlohmann::json& data)

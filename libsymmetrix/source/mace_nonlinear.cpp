@@ -201,7 +201,7 @@ bool MaceNonlinear::Interaction::supports_pair_conditioning(
     const int conditioned_input_size = radial_size+source_width+target_width;
     return source_embedding.input_dimension() == model_element_count
         && target_embedding.input_dimension() == model_element_count
-        && source_width == 512 && target_width == 512
+        && source_width > 0 && target_width > 0
         && convolution_weights.input_size() == conditioned_input_size
         && density.input_size() == conditioned_input_size
         && convolution_weights.supports_conditioned_input(radial_size)
@@ -274,7 +274,7 @@ void MaceNonlinear::set_streamed_edges(std::string mode)
     const auto requested = parse_mace_streamed_edges_mode(mode);
     if (requested != MACEStreamedEdgesMode::legacy && !supports_streamed_edges())
         throw std::invalid_argument(
-            "Streamed edges require the published MACE-MH-1 fast-path architecture.");
+            "Streamed edges require a compatible MACE-MH-1 family fast path.");
     streamed_edges = requested;
 }
 
@@ -324,15 +324,24 @@ MaceNonlinear::MaceNonlinear(const nlohmann::json& data)
     for (const auto& value : data.at("readouts")) readouts.emplace_back(value);
     if (interactions.size() != products.size() || interactions.size() != readouts.size())
         throw std::invalid_argument("MACE_Nonlinear layer counts are inconsistent.");
-    mh1_fast_path = is_published_mh1_architecture(data)
-        && interactions.size() == 2 && products.size() == 2
-        && products[0].uses_compiled_plan() && products[1].uses_compiled_plan()
-        && bessel_weights.size() == 10
-        && std::all_of(
+    mh1_family = analyze_mh1_family_architecture(data);
+    mh1_compiled_products = interactions.size() == 2 && products.size() == 2
+        && products[0].uses_compiled_plan() && products[1].uses_compiled_plan();
+    mh1_pair_conditioning = std::all_of(
             interactions.begin(), interactions.end(), [&](const auto& interaction) {
                 return interaction.supports_pair_conditioning(
                     bessel_weights.size(), model_num_elements);
             });
+    mh1_fast_path = mh1_family.compatible
+        && mh1_compiled_products && mh1_pair_conditioning;
+    if (!mh1_fast_path) {
+        if (!mh1_family.compatible)
+            mh1_fast_path_rejection = mh1_family.rejection_reason;
+        else if (!mh1_compiled_products)
+            mh1_fast_path_rejection = "Compiled correlation-three product plan is unavailable.";
+        else
+            mh1_fast_path_rejection = "Conditioned edge MLP plan is unavailable.";
+    }
     if (mh1_fast_path)
         for (auto& interaction : interactions)
             interaction.prepare_pair_conditioning(

@@ -7,6 +7,7 @@
 #include "affine_mlp.hpp"
 #include "e3nn.hpp"
 #include "e3nn_product.hpp"
+#include "mace_nonlinear_schema.hpp"
 #include "mace_streamed_edges.hpp"
 #include "zbl.hpp"
 
@@ -20,6 +21,19 @@ public:
     std::vector<double> node_forces;
     double r_cut = 0.0;
     bool has_field_coupling = false;
+    bool is_mh1_family() const { return mh1_family.compatible; }
+    int mh1_node_channels() const { return mh1_family.node_channels; }
+    int mh1_edge_channels() const { return mh1_family.edge_channels; }
+    int mh1_radial_size() const { return mh1_family.radial_size; }
+    int mh1_l_max() const { return mh1_family.l_max; }
+    const std::string& mh1_family_rejection_reason() const {
+        return mh1_family.rejection_reason;
+    }
+    bool mh1_uses_compiled_products() const { return mh1_compiled_products; }
+    bool mh1_uses_pair_conditioning() const { return mh1_pair_conditioning; }
+    const std::string& mh1_fast_path_rejection_reason() const {
+        return mh1_fast_path_rejection;
+    }
     bool uses_mh1_fast_path() const { return mh1_fast_path; }
     bool supports_streamed_edges() const { return mh1_fast_path; }
     std::string streamed_edges_mode() const;
@@ -127,6 +141,10 @@ private:
     E3ProductBasisBatchWorkspace product_batch_workspace;
     AffineMLPBatchWorkspace affine_batch_workspace;
     bool mh1_fast_path = false;
+    bool mh1_compiled_products = false;
+    bool mh1_pair_conditioning = false;
+    MaceMH1FamilyDescriptor mh1_family;
+    std::string mh1_fast_path_rejection;
     int last_edge_workspace_rows = 0;
     MACEStreamedEdgesMode streamed_edges = MACEStreamedEdgesMode::legacy;
     static constexpr int streamed_edge_block_size = 1024;

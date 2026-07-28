@@ -7,6 +7,7 @@
 #include "affine_mlp_kokkos.hpp"
 #include "e3nn_kokkos.hpp"
 #include "e3nn_product_kokkos.hpp"
+#include "mace_nonlinear_schema.hpp"
 #include "mace_streamed_edges.hpp"
 #include "zbl_kokkos.hpp"
 
@@ -18,6 +19,20 @@ public:
     ~MaceNonlinearKokkosT();
     double r_cut=0.0;
     bool has_field_coupling=false;
+    bool is_mh1_family() const { return mh1_family.compatible; }
+    int mh1_node_channels() const { return mh1_family.node_channels; }
+    int mh1_edge_channels() const { return mh1_family.edge_channels; }
+    int mh1_radial_size() const { return mh1_family.radial_size; }
+    int mh1_l_max() const { return mh1_family.l_max; }
+    const std::string& mh1_family_rejection_reason() const {
+        return mh1_family.rejection_reason;
+    }
+    bool mh1_uses_compiled_products() const { return mh1_compiled_products; }
+    bool mh1_uses_pair_conditioning() const { return mh1_pair_conditioning; }
+    bool mh1_uses_external_uvu_tensors() const { return mh1_external_uvu_tensors; }
+    const std::string& mh1_fast_path_rejection_reason() const {
+        return mh1_fast_path_rejection;
+    }
     bool uses_mh1_fast_path() const { return mh1_fast_path; }
     bool supports_streamed_edges() const { return mh1_fast_path; }
     std::string streamed_edges_mode() const;
@@ -30,6 +45,8 @@ public:
     std::string selected_e3_linear_backend(std::size_t samples) const;
     std::string tensor_product_backend() const;
     std::string tensor_product_execution_backend() const;
+    int tensor_product_channel_team_size() const;
+    int tensor_product_harmonic_team_size() const;
     std::size_t linear_workspace_bytes() const;
     std::size_t tensor_workspace_bytes() const;
     std::size_t precision_workspace_bytes() const;
@@ -128,6 +145,10 @@ private:
     };
     int l_max=0,num_lm=0,model_num_elements=0,cutoff_power=0,num_bessel=0;
     bool apply_cutoff=false,has_agnesi=false,has_zbl=false,mh1_fast_path=false;
+    bool mh1_compiled_products=false,mh1_pair_conditioning=false,
+        mh1_external_uvu_tensors=false;
+    MaceMH1FamilyDescriptor mh1_family;
+    std::string mh1_fast_path_rejection;
     MACEStreamedEdgesMode streamed_edges=MACEStreamedEdgesMode::legacy;
 #ifdef KOKKOS_ENABLE_CUDA
     static constexpr int streamed_edge_block_size=16384;

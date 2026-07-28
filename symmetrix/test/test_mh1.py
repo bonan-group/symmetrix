@@ -82,6 +82,286 @@ def mh1_h_si_artifact(tmp_path_factory):
     return data, path
 
 
+def _make_generalized_mh1(parameters):
+    if mace_import_error is not None:
+        pytest.skip(f"mace-torch is not available: {mace_import_error}")
+    from e3nn import o3
+    from mace.modules.blocks import RealAgnosticResidualNonLinearInteractionBlock
+    from mace.modules.models import ScaleShiftMACE
+    from symmetrix.extract_mace_nonlinear import extract_mace_nonlinear_data
+
+    node_channels, edge_channels, num_bessel, l_max, radial_mlp = parameters
+    previous_dtype = torch.get_default_dtype()
+    try:
+        torch.set_default_dtype(torch.float64)
+        torch.manual_seed(1701 + node_channels + edge_channels + num_bessel + l_max)
+        model = ScaleShiftMACE(
+            atomic_inter_scale=1.0,
+            atomic_inter_shift=0.0,
+            r_max=4.0,
+            num_bessel=num_bessel,
+            num_polynomial_cutoff=5,
+            max_ell=l_max,
+            interaction_cls=RealAgnosticResidualNonLinearInteractionBlock,
+            interaction_cls_first=RealAgnosticResidualNonLinearInteractionBlock,
+            num_interactions=2,
+            num_elements=2,
+            hidden_irreps=o3.Irreps(
+                f"{node_channels}x0e+{node_channels}x1o"
+            ),
+            MLP_irreps=o3.Irreps(f"{max(4, node_channels // 2)}x0e"),
+            atomic_energies=np.zeros((1, 2)),
+            avg_num_neighbors=4.0,
+            atomic_numbers=[1, 14],
+            correlation=3,
+            gate=torch.nn.functional.silu,
+            use_agnostic_product=True,
+            edge_irreps=o3.Irreps(
+                f"{edge_channels}x0e+{edge_channels}x1o"
+            ),
+            use_edge_irreps_first=True,
+            radial_MLP=radial_mlp,
+            heads=["test"],
+        )
+    finally:
+        torch.set_default_dtype(previous_dtype)
+    return model, extract_mace_nonlinear_data(model, [1, 14])
+
+
+@pytest.fixture(
+    scope="module",
+    params=[
+        pytest.param((8, 4, 8, 2, [7, 9]), id="c8-e4-b8-l2"),
+        pytest.param((12, 6, 16, 3, [9, 11, 7]), id="c12-e6-b16-l3"),
+    ],
+)
+def generalized_mh1_artifact(request, tmp_path_factory):
+    model, data = _make_generalized_mh1(request.param)
+    node_channels, edge_channels, _, l_max, _ = request.param
+    path = tmp_path_factory.mktemp(
+        f"mh1-general-c{node_channels}-e{edge_channels}-l{l_max}"
+    ) / "model.json"
+    path.write_text(json.dumps(data, separators=(",", ":")))
+    return model, data, path
+
+
+@pytest.fixture(scope="module")
+def mh1_256_64_artifact(tmp_path_factory):
+    if not hasattr(native_symmetrix, "MACENonlinearKokkosFloat"):
+        pytest.skip("Symmetrix was built without Float32 Kokkos support")
+    if native_symmetrix._kokkos_default_execution_space() != "Cuda":
+        pytest.skip("The 256/64 launch-policy qualification requires Kokkos CUDA")
+    model, data = _make_generalized_mh1((256, 64, 8, 2, [7, 9]))
+    path = tmp_path_factory.mktemp("mh1-general-c256-e64-l2") / "model.json"
+    path.write_text(json.dumps(data, separators=(",", ":")))
+    return model, data, path
+
+
+def _generalized_mh1_atoms():
+    return Atoms(
+        numbers=[14, 1, 14],
+        positions=[[0.0, 0.0, 0.0], [1.7, 0.2, 0.1], [0.3, 1.8, 0.4]],
+        cell=[7.0, 7.0, 7.0],
+        pbc=True,
+    )
+
+
+@pytest.mark.parametrize("use_kokkos", [False, True])
+def test_generalized_mh1_matches_upstream_and_streamed_modes(
+    generalized_mh1_artifact, use_kokkos
+):
+    if use_kokkos and not hasattr(native_symmetrix, "MACENonlinearKokkos"):
+        pytest.skip("Symmetrix was built without Kokkos support")
+    model, data, model_path = generalized_mh1_artifact
+    atoms = _generalized_mh1_atoms()
+    properties = ["energy", "energies", "forces", "stress"]
+    upstream = MACECalculator(
+        models=model,
+        device="cpu",
+        default_dtype="float64",
+    )
+    upstream.calculate(atoms.copy(), properties=properties)
+    mode_results = {}
+    for mode in ("legacy", "r1", "all"):
+        calculator = Symmetrix(
+            model_path,
+            use_kokkos=use_kokkos,
+            dtype="float64",
+            streamed_edges=mode,
+        )
+        evaluator = calculator.evaluator
+        assert evaluator.is_mh1_family
+        assert evaluator.uses_mh1_fast_path
+        assert evaluator.supports_streamed_edges
+        assert evaluator.mh1_uses_compiled_products
+        assert evaluator.mh1_uses_pair_conditioning
+        if use_kokkos:
+            assert evaluator.mh1_uses_external_uvu_tensors
+        assert evaluator.mh1_fast_path_rejection_reason == ""
+        assert evaluator.mh1_node_channels == int(
+            data["interactions"][0]["node_feats_irreps"].split("x", 1)[0]
+        )
+        assert evaluator.mh1_edge_channels == int(
+            data["interactions"][0]["edge_irreps"].split("x", 1)[0]
+        )
+        assert evaluator.mh1_radial_size == len(
+            data["radial_embedding"]["basis"]["weights"]["values"]
+        )
+        assert evaluator.mh1_l_max == data["l_max"]
+        assert evaluator.streamed_edges_mode == mode
+        calculator.calculate(atoms.copy(), properties=properties)
+        mode_results[mode] = {
+            name: np.array(calculator.results[name], copy=True)
+            for name in properties
+        }
+    for name in properties:
+        np.testing.assert_allclose(
+            mode_results["legacy"][name], upstream.results[name],
+            rtol=0.0, atol=2e-8,
+        )
+        np.testing.assert_allclose(
+            mode_results["r1"][name], mode_results["legacy"][name],
+            rtol=0.0, atol=2e-12,
+        )
+        np.testing.assert_allclose(
+            mode_results["all"][name], mode_results["legacy"][name],
+            rtol=0.0, atol=2e-12,
+        )
+
+
+def test_generalized_mh1_kokkos_float32_matches_float64(
+    generalized_mh1_artifact
+):
+    if not hasattr(native_symmetrix, "MACENonlinearKokkosFloat"):
+        pytest.skip("Symmetrix was built without Kokkos Float32 support")
+    _, _, model_path = generalized_mh1_artifact
+    atoms = _generalized_mh1_atoms()
+    properties = ["energy", "energies", "forces", "stress"]
+    reference = Symmetrix(
+        model_path, use_kokkos=True, dtype="float64", streamed_edges="all"
+    )
+    actual = Symmetrix(
+        model_path, use_kokkos=True, dtype="float32", streamed_edges="all"
+    )
+    reference.calculate(atoms.copy(), properties=properties)
+    actual.calculate(atoms.copy(), properties=properties)
+    assert actual.evaluator.is_mh1_family
+    assert actual.evaluator.uses_mh1_fast_path
+    for name in properties:
+        np.testing.assert_allclose(
+            actual.results[name], reference.results[name],
+            rtol=0.0, atol=5e-4,
+        )
+
+
+def test_mh1_256_node_64_edge_float32_cuda_end_to_end(
+    mh1_256_64_artifact
+):
+    model, _, model_path = mh1_256_64_artifact
+    atoms = _generalized_mh1_atoms()
+    properties = ["energy", "energies", "forces", "stress"]
+    upstream = MACECalculator(
+        models=model,
+        device="cpu",
+        default_dtype="float64",
+    )
+    actual = Symmetrix(
+        model_path,
+        use_kokkos=True,
+        dtype="float32",
+        streamed_edges="all",
+    )
+    upstream.calculate(atoms.copy(), properties=properties)
+    actual.calculate(atoms.copy(), properties=properties)
+    assert actual.evaluator.is_mh1_family
+    assert actual.evaluator.mh1_node_channels == 256
+    assert actual.evaluator.mh1_edge_channels == 64
+    assert actual.evaluator.tensor_product_channel_team_size == 64
+    assert actual.evaluator.tensor_product_harmonic_team_size == 64
+    for name in properties:
+        np.testing.assert_allclose(
+            actual.results[name], upstream.results[name], rtol=0.0, atol=5e-4
+        )
+
+
+@pytest.mark.parametrize(
+    ("use_kokkos", "dtype"),
+    [(False, "float64"), (True, "float64"), (True, "float32")],
+)
+def test_generalized_mh1_force_matches_finite_difference(
+    generalized_mh1_artifact, use_kokkos, dtype
+):
+    if use_kokkos and not hasattr(native_symmetrix, "MACENonlinearKokkos"):
+        pytest.skip("Symmetrix was built without Kokkos support")
+    _, _, model_path = generalized_mh1_artifact
+    atoms = Atoms(
+        numbers=[14, 1],
+        positions=[[0.0, 0.0, 0.0], [1.8, 0.3, 0.2]],
+        cell=[7.0, 7.0, 7.0],
+        pbc=False,
+    )
+    atoms.calc = Symmetrix(
+        model_path,
+        use_kokkos=use_kokkos,
+        dtype=dtype,
+        streamed_edges="all",
+    )
+    force = atoms.get_forces()[1, 0]
+    step = 1e-4 if dtype == "float64" else 2e-3
+    displaced = atoms.copy()
+    displaced.calc = atoms.calc
+    displaced.positions[1, 0] += step
+    energy_plus = displaced.get_potential_energy()
+    displaced.positions[1, 0] -= 2 * step
+    energy_minus = displaced.get_potential_energy()
+    tolerance = 2e-5 if dtype == "float64" else 3e-3
+    assert force == pytest.approx(
+        -(energy_plus - energy_minus) / (2 * step), abs=tolerance
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason", "construction_error"),
+    [
+        ("correlation", "correlation-three", "invalid correlation data"),
+        ("tensor_mode", "external weighted uvu", "uuu path"),
+        ("l_max", "l_max=2 or l_max=3", None),
+    ],
+)
+def test_generalized_mh1_family_rejects_unsupported_semantics(
+    generalized_mh1_artifact, tmp_path, mutation, reason, construction_error
+):
+    _, data, _ = generalized_mh1_artifact
+    changed = json.loads(json.dumps(data))
+    if mutation == "correlation":
+        changed["products"][0]["symmetric_contractions"]["contractions"][0][
+            "correlation"
+        ] = 2
+    elif mutation == "tensor_mode":
+        changed["interactions"][0]["conv_tp"]["instructions"][0][
+            "connection_mode"
+        ] = "uuu"
+    else:
+        changed["l_max"] = 4
+    path = tmp_path / f"unsupported-{mutation}.json"
+    path.write_text(json.dumps(changed, separators=(",", ":")))
+    if construction_error is not None:
+        with pytest.raises(ValueError, match=construction_error):
+            native_symmetrix.MACENonlinear(str(path))
+        return
+    evaluator = native_symmetrix.MACENonlinear(str(path))
+    assert not evaluator.is_mh1_family
+    assert not evaluator.uses_mh1_fast_path
+    assert not evaluator.supports_streamed_edges
+    assert reason in evaluator.mh1_family_rejection_reason
+    assert reason in evaluator.mh1_fast_path_rejection_reason
+    with pytest.raises(ValueError, match="compatible MACE-MH-1 family"):
+        evaluator.set_streamed_edges("all")
+    if hasattr(native_symmetrix, "MACENonlinearKokkosFloat"):
+        with pytest.raises(ValueError, match="Float32.*compatible MACE-MH-1 family"):
+            native_symmetrix.MACENonlinearKokkosFloat(str(path))
+
+
 def test_mh1_rejects_malformed_nonlinear_json(tmp_path):
     path = tmp_path / "malformed-nonlinear.json"
     path.write_text(json.dumps({
@@ -434,7 +714,7 @@ def test_mh1_json_dispatch_does_not_depend_on_filename_suffix(mh1_si_artifact, t
 
 
 @pytest.mark.parametrize("use_kokkos", [False, True])
-def test_mh1_fast_path_requires_exact_architecture(
+def test_mh1_fast_path_requires_compatible_family_architecture(
     mh1_si_artifact, tmp_path, use_kokkos
 ):
     data, model_path = mh1_si_artifact
@@ -453,10 +733,12 @@ def test_mh1_fast_path_requires_exact_architecture(
     assert not evaluator.uses_mh1_fast_path
     assert not evaluator.supports_streamed_edges
     assert evaluator.streamed_edges_mode == "legacy"
-    with pytest.raises(ValueError, match="published MACE-MH-1"):
+    assert not evaluator.is_mh1_family
+    assert evaluator.mh1_family_rejection_reason
+    with pytest.raises(ValueError, match="compatible MACE-MH-1 family"):
         evaluator.set_streamed_edges("all")
     if use_kokkos and hasattr(native_symmetrix, "MACENonlinearKokkosFloat"):
-        with pytest.raises(ValueError, match="Float32.*published MACE-MH-1"):
+        with pytest.raises(ValueError, match="Float32.*compatible MACE-MH-1 family"):
             native_symmetrix.MACENonlinearKokkosFloat(str(path))
     atoms = Atoms(
         "Si2",
@@ -524,8 +806,12 @@ def test_mh1_fast_path_requires_conditionable_edge_mlp(
     )
     evaluator = evaluator_type(str(path))
     assert not evaluator.uses_mh1_fast_path
+    assert evaluator.is_mh1_family
+    assert evaluator.mh1_uses_compiled_products
+    assert not evaluator.mh1_uses_pair_conditioning
+    assert "Conditioned edge MLP" in evaluator.mh1_fast_path_rejection_reason
     if use_kokkos and hasattr(native_symmetrix, "MACENonlinearKokkosFloat"):
-        with pytest.raises(ValueError, match="Float32.*published MACE-MH-1"):
+        with pytest.raises(ValueError, match="Float32.*compatible MACE-MH-1 family"):
             native_symmetrix.MACENonlinearKokkosFloat(str(path))
 
 
@@ -981,6 +1267,74 @@ def test_mh1_tensor_product_forward_and_reverse_match_autograd(
             assert np.allclose(
                 actual_component, np.concatenate(expected_component), atol=3e-6
             )
+
+
+@pytest.mark.parametrize(
+    ("multiplicity", "expected_team_size"),
+    [(1, 32), (32, 32), (33, 64), (64, 64), (96, 96), (128, 128), (256, 128)],
+)
+def test_mh1_cuda_tensor_team_size_tracks_edge_multiplicity(
+    multiplicity, expected_team_size
+):
+    if not hasattr(native_symmetrix, "E3TensorProductKokkosFloat"):
+        pytest.skip("Symmetrix was built without Float32 Kokkos E3 primitives")
+    if not native_symmetrix._kokkos_is_initialized():
+        native_symmetrix._init_kokkos()
+    definition = {
+        "irreps_in1": f"{multiplicity}x0e",
+        "irreps_in2": "1x0e",
+        "irreps_out": f"{multiplicity}x0e",
+        "instructions": [{
+            "i_in1": 0,
+            "i_in2": 0,
+            "i_out": 0,
+            "connection_mode": "uvu",
+            "has_weight": True,
+            "path_weight": 1.0,
+            "path_shape": [multiplicity, 1],
+            "wigner_3j": {"shape": [1, 1, 1], "values": [1.0]},
+        }],
+        "weight": {"shape": [0], "values": []},
+        "output_mask": {
+            "shape": [multiplicity],
+            "values": [1.0] * multiplicity,
+        },
+    }
+    module = native_symmetrix.E3TensorProductKokkosFloat(
+        json.dumps(definition)
+    )
+    assert module.uses_mh1_fast_path
+    if native_symmetrix._kokkos_default_execution_space() == "Cuda":
+        assert module.channel_team_size == expected_team_size
+        assert module.harmonic_team_size == expected_team_size
+    else:
+        assert module.channel_team_size == 0
+        assert module.harmonic_team_size == 0
+    values = np.linspace(0.2, 1.2, multiplicity, dtype=np.float32)
+    harmonic = np.array([0.7], dtype=np.float32)
+    weights = np.linspace(0.3, 0.8, multiplicity, dtype=np.float32)
+    seed = np.linspace(-0.4, 0.6, multiplicity, dtype=np.float32)
+    actual = np.asarray(module.evaluate_batch(
+        values, harmonic, weights, 1
+    ))
+    values_adj, harmonic_adj, weights_adj = module.reverse_batch(
+        values, harmonic, weights, seed, 1
+    )
+    np.testing.assert_allclose(
+        actual, values * harmonic[0] * weights, rtol=0.0, atol=2e-7
+    )
+    np.testing.assert_allclose(
+        values_adj, seed * harmonic[0] * weights, rtol=0.0, atol=2e-7
+    )
+    np.testing.assert_allclose(
+        harmonic_adj,
+        [np.sum(seed * values * weights)],
+        rtol=0.0,
+        atol=1e-5,
+    )
+    np.testing.assert_allclose(
+        weights_adj, seed * values * harmonic[0], rtol=0.0, atol=2e-7
+    )
 
 
 @pytest.mark.parametrize("use_kokkos", [False, True])
@@ -1493,6 +1847,9 @@ def test_mh1_kokkos_exposes_synchronized_linear_controls(mh1_si_artifact):
         else "official_kokkos_mdrange"
     )
     assert evaluator.tensor_product_execution_backend == expected_tensor_execution
+    expected_team_size = 128 if execution_space == "Cuda" else 0
+    assert evaluator.tensor_product_channel_team_size == expected_team_size
+    assert evaluator.tensor_product_harmonic_team_size == expected_team_size
     assert evaluator.linear_workspace_bytes == 0
     assert evaluator.tensor_workspace_bytes == 0
     assert evaluator.precision_workspace_bytes == evaluator.edge_workspace_bytes

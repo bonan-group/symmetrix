@@ -70,6 +70,8 @@ void bind_float_e3_primitives(py::module_& module)
             "uses_mh1_fast_path",&Tensor::uses_mh1_fast_path)
         .def_property_readonly("backend",&Tensor::backend)
         .def_property_readonly("execution_backend",&Tensor::execution_backend)
+        .def_property_readonly("channel_team_size",&Tensor::channel_team_size)
+        .def_property_readonly("harmonic_team_size",&Tensor::harmonic_team_size)
         .def("evaluate_batch",[](
             const Tensor& self,const std::vector<float>& input_1,
             const std::vector<float>& input_2,const std::vector<float>& weights,
@@ -361,6 +363,10 @@ void bind_e3nn(py::module_& module)
             "uses_mh1_fast_path", &E3TensorProductKokkos::uses_mh1_fast_path)
         .def_property_readonly(
             "execution_backend", &E3TensorProductKokkos::execution_backend)
+        .def_property_readonly(
+            "channel_team_size", &E3TensorProductKokkos::channel_team_size)
+        .def_property_readonly(
+            "harmonic_team_size", &E3TensorProductKokkos::harmonic_team_size)
         .def("evaluate", [](
             const E3TensorProductKokkos& self,
             const std::vector<double>& input_1,

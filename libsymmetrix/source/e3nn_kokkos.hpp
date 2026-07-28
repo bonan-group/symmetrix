@@ -72,6 +72,8 @@ public:
         return mh1_fast_path ? "official_kokkos" : "generic_kokkos";
     }
     std::string execution_backend() const;
+    int channel_team_size() const;
+    int harmonic_team_size() const;
     std::size_t workspace_bytes() const { return 0; }
     void evaluate(Kokkos::View<const Precision**,Kokkos::LayoutRight> input_1,
                   Kokkos::View<const Precision**,Kokkos::LayoutRight> input_2,
@@ -87,7 +89,8 @@ public:
 private:
     int input_1_dimension_=0,input_2_dimension_=0,output_dimension_=0,weight_size_=0;
     bool mh1_fast_path=false;
-    int mh1_instruction_count_=0;
+    int mh1_instruction_count_=0,mh1_multiplicity_=0;
+    int mh1_cuda_channel_team_size_=0,mh1_cuda_harmonic_team_size_=0;
     std::vector<Instruction> instructions;
     Kokkos::View<Precision*> internal_weights, output_mask;
     Kokkos::View<int**,Kokkos::LayoutRight> mh1_instruction_data,

@@ -16,6 +16,23 @@ void bind_mace_nonlinear(py::module_& module)
         .def_readonly("atomic_energies", &MaceNonlinear::atomic_energies)
         .def_readonly("r_cut", &MaceNonlinear::r_cut)
         .def_readonly("has_field_coupling", &MaceNonlinear::has_field_coupling)
+        .def_property_readonly("is_mh1_family", &MaceNonlinear::is_mh1_family)
+        .def_property_readonly("mh1_node_channels", &MaceNonlinear::mh1_node_channels)
+        .def_property_readonly("mh1_edge_channels", &MaceNonlinear::mh1_edge_channels)
+        .def_property_readonly("mh1_radial_size", &MaceNonlinear::mh1_radial_size)
+        .def_property_readonly("mh1_l_max", &MaceNonlinear::mh1_l_max)
+        .def_property_readonly(
+            "mh1_family_rejection_reason",
+            &MaceNonlinear::mh1_family_rejection_reason)
+        .def_property_readonly(
+            "mh1_uses_compiled_products",
+            &MaceNonlinear::mh1_uses_compiled_products)
+        .def_property_readonly(
+            "mh1_uses_pair_conditioning",
+            &MaceNonlinear::mh1_uses_pair_conditioning)
+        .def_property_readonly(
+            "mh1_fast_path_rejection_reason",
+            &MaceNonlinear::mh1_fast_path_rejection_reason)
         .def_property_readonly("uses_mh1_fast_path", &MaceNonlinear::uses_mh1_fast_path)
         .def_property_readonly("supports_streamed_edges", &MaceNonlinear::supports_streamed_edges)
         .def_property_readonly("streamed_edges_mode", &MaceNonlinear::streamed_edges_mode)

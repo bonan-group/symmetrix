@@ -258,6 +258,12 @@ def _benchmark(calculator, atoms, warmups, repeats, include_ase):
         "tensor_product_execution_backend": getattr(
             calculator.evaluator, "tensor_product_execution_backend", None
         ),
+        "tensor_product_channel_team_size": getattr(
+            calculator.evaluator, "tensor_product_channel_team_size", None
+        ),
+        "tensor_product_harmonic_team_size": getattr(
+            calculator.evaluator, "tensor_product_harmonic_team_size", None
+        ),
         "linear_workspace_bytes": getattr(
             calculator.evaluator, "linear_workspace_bytes", None
         ),
@@ -438,6 +444,34 @@ def main():
         "backend": args.backend,
         "dtype": args.dtype,
         "scalar_size_bytes": getattr(calculator.evaluator, "scalar_size_bytes", 8),
+        "is_mh1_family": bool(
+            getattr(calculator.evaluator, "is_mh1_family", False)
+        ),
+        "mh1_node_channels": getattr(
+            calculator.evaluator, "mh1_node_channels", None
+        ),
+        "mh1_edge_channels": getattr(
+            calculator.evaluator, "mh1_edge_channels", None
+        ),
+        "mh1_radial_size": getattr(
+            calculator.evaluator, "mh1_radial_size", None
+        ),
+        "mh1_l_max": getattr(calculator.evaluator, "mh1_l_max", None),
+        "mh1_family_rejection_reason": getattr(
+            calculator.evaluator, "mh1_family_rejection_reason", None
+        ),
+        "mh1_uses_compiled_products": getattr(
+            calculator.evaluator, "mh1_uses_compiled_products", None
+        ),
+        "mh1_uses_pair_conditioning": getattr(
+            calculator.evaluator, "mh1_uses_pair_conditioning", None
+        ),
+        "mh1_uses_external_uvu_tensors": getattr(
+            calculator.evaluator, "mh1_uses_external_uvu_tensors", None
+        ),
+        "mh1_fast_path_rejection_reason": getattr(
+            calculator.evaluator, "mh1_fast_path_rejection_reason", None
+        ),
         "uses_mh1_fast_path": bool(calculator.evaluator.uses_mh1_fast_path),
         "streamed_edges": calculator.streamed_edges,
         "e3_linear_backend": getattr(
@@ -445,6 +479,12 @@ def main():
         ),
         "tensor_product_execution_backend": getattr(
             calculator.evaluator, "tensor_product_execution_backend", None
+        ),
+        "tensor_product_channel_team_size": getattr(
+            calculator.evaluator, "tensor_product_channel_team_size", None
+        ),
+        "tensor_product_harmonic_team_size": getattr(
+            calculator.evaluator, "tensor_product_harmonic_team_size", None
         ),
         "warmups": args.warmups,
         "repeats": args.repeats,
