@@ -111,7 +111,11 @@ def test_streamed_modes_match_legacy_and_release_radial_storage(
         assert calculator.evaluator.supports_streamed_edges
         assert calculator.evaluator.streamed_edges_mode == mode
         atoms.calc = calculator
-        outputs[mode] = (atoms.get_potential_energy(), atoms.get_forces())
+        outputs[mode] = (
+            atoms.get_potential_energy(),
+            atoms.get_forces(),
+            atoms.get_stress(),
+        )
         storage[mode] = (
             calculator.evaluator.R0_storage_size,
             calculator.evaluator.R1_storage_size,
@@ -119,11 +123,12 @@ def test_streamed_modes_match_legacy_and_release_radial_storage(
         if mode == "legacy":
             legacy_evaluator = calculator.evaluator
 
-    reference_energy, reference_forces = outputs["legacy"]
+    reference_energy, reference_forces, reference_stress = outputs["legacy"]
     for mode in ("r1", "all"):
-        energy, forces = outputs[mode]
+        energy, forces, stress = outputs[mode]
         assert energy == pytest.approx(reference_energy, rel=0.0, abs=atol)
         np.testing.assert_allclose(forces, reference_forces, rtol=0.0, atol=atol)
+        np.testing.assert_allclose(stress, reference_stress, rtol=0.0, atol=atol)
 
     assert storage["legacy"][0] > 0
     assert storage["legacy"][1] > 0
@@ -176,7 +181,8 @@ def test_field_streamed_modes_match_legacy(
         calculator.calculate(
             atoms,
             properties=[
-                "energy", "forces", "polarization", "polarizability", "becs"
+                "energy", "forces", "stress", "polarization", "polarizability",
+                "becs",
             ],
         )
         results = calculator.results
@@ -189,6 +195,7 @@ def test_field_streamed_modes_match_legacy(
         outputs[mode] = (
             results["energy"],
             results["forces"],
+            results["stress"],
             results["polarization"],
             results["polarizability"],
             results["becs"],
@@ -204,6 +211,7 @@ def test_field_streamed_modes_match_legacy(
     (
         reference_energy,
         reference_forces,
+        reference_stress,
         reference_polarization,
         reference_polarizability,
         reference_becs,
@@ -215,6 +223,7 @@ def test_field_streamed_modes_match_legacy(
         (
             energy,
             forces,
+            stress,
             polarization,
             polarizability,
             becs,
@@ -226,6 +235,8 @@ def test_field_streamed_modes_match_legacy(
             reference_energy, rel=0.0, abs=first_order_atol)
         np.testing.assert_allclose(
             forces, reference_forces, rtol=0.0, atol=first_order_atol)
+        np.testing.assert_allclose(
+            stress, reference_stress, rtol=0.0, atol=first_order_atol)
         np.testing.assert_allclose(
             polarization, reference_polarization,
             rtol=0.0, atol=first_order_atol)

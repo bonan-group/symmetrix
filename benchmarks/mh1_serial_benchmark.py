@@ -411,6 +411,13 @@ def main():
         parser.error(
             "fused reverse controls require --backend kokkos"
         )
+    if (
+        args.direct_node_tensor_reverse == "on"
+        and args.streamed_edges != "all"
+    ):
+        parser.error(
+            "--direct-node-tensor-reverse on requires --streamed-edges all"
+        )
     if hasattr(os, "sched_getaffinity"):
         available_cpus = os.sched_getaffinity(0)
         requested_cpus = None

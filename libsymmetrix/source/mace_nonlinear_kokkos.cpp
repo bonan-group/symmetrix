@@ -273,11 +273,19 @@ bool MaceNonlinearKokkosT<Precision>::Interaction::prepare_pair_conditioning(
 {
     AffineMLP convolution_mlp(data.at("conv_tp_weights"));
     AffineMLP density_mlp(data.at("density_fn"));
-    if(!convolution_mlp.supports_conditioned_input(radial_size)
-        ||!density_mlp.supports_conditioned_input(radial_size))
-        return false;
     E3Linear source_linear(data.at("source_embedding"));
     E3Linear target_linear(data.at("target_embedding"));
+    const int source_width=source_linear.output_dimension();
+    const int target_width=target_linear.output_dimension();
+    const int conditioned_input_size=radial_size+source_width+target_width;
+    if(source_linear.input_dimension()!=model_element_count
+        ||target_linear.input_dimension()!=model_element_count
+        ||source_width<=0||target_width<=0
+        ||convolution_mlp.input_size()!=conditioned_input_size
+        ||density_mlp.input_size()!=conditioned_input_size
+        ||!convolution_mlp.supports_conditioned_input(radial_size)
+        ||!density_mlp.supports_conditioned_input(radial_size))
+        return false;
     const int types=selected_model_indices.size();
     const int convolution_width=data.at("conv_tp_weights").at("layers").at(0)
         .at("weight").at("shape").at(0).get<int>();
@@ -287,7 +295,7 @@ bool MaceNonlinearKokkosT<Precision>::Interaction::prepare_pair_conditioning(
     std::vector<Precision> convolution_target(types*convolution_width);
     std::vector<Precision> density_source(types*density_width);
     std::vector<Precision> density_target(types*density_width);
-    const int target_offset=radial_size+source_linear.output_dimension();
+    const int target_offset=radial_size+source_width;
     for(int type=0;type<types;++type) {
         std::vector<double> attrs(model_element_count,Precision(0));
         attrs.at(selected_model_indices.at(type))=Precision(1);

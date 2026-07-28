@@ -66,7 +66,7 @@ public:
     int input_2_dimension() const { return input_2_dimension_; }
     int output_dimension() const { return output_dimension_; }
     int weight_size() const { return weight_size_; }
-    bool has_internal_weights() const { return !internal_weights.empty(); }
+    bool has_internal_weights() const { return internal_weights.extent(0)!=0; }
     bool uses_mh1_fast_path() const { return mh1_fast_path; }
     std::string backend() const {
         return mh1_fast_path ? "official_kokkos" : "generic_kokkos";

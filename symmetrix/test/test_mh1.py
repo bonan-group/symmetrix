@@ -815,6 +815,45 @@ def test_mh1_fast_path_requires_conditionable_edge_mlp(
             native_symmetrix.MACENonlinearKokkosFloat(str(path))
 
 
+@pytest.mark.parametrize("use_kokkos", [False, True])
+@pytest.mark.parametrize("module_name", ["conv_tp_weights", "density_fn"])
+def test_mh1_fast_path_requires_exact_conditioned_mlp_input_width(
+    mh1_si_artifact, tmp_path, use_kokkos, module_name
+):
+    data, _ = mh1_si_artifact
+    changed = json.loads(json.dumps(data))
+    first_layer = changed["interactions"][0][module_name]["layers"][0]
+    output_width, input_width = first_layer["weight"]["shape"]
+    weights = np.asarray(first_layer["weight"]["values"]).reshape(
+        output_width, input_width
+    )
+    first_layer["weight"]["shape"][1] = input_width + 1
+    first_layer["weight"]["values"] = np.pad(
+        weights, ((0, 0), (0, 1))
+    ).ravel().tolist()
+    path = tmp_path / f"near-mh1-{module_name}-extra-conditioned-column.json"
+    path.write_text(json.dumps(changed, separators=(",", ":")))
+    if use_kokkos:
+        if not hasattr(native_symmetrix, "MACENonlinearKokkos"):
+            pytest.skip("Symmetrix was built without Kokkos support")
+        if not native_symmetrix._kokkos_is_initialized():
+            native_symmetrix._init_kokkos()
+    evaluator_type = (
+        native_symmetrix.MACENonlinearKokkos
+        if use_kokkos
+        else native_symmetrix.MACENonlinear
+    )
+    evaluator = evaluator_type(str(path))
+    assert evaluator.is_mh1_family
+    assert evaluator.mh1_uses_compiled_products
+    assert not evaluator.mh1_uses_pair_conditioning
+    assert not evaluator.uses_mh1_fast_path
+    assert "Conditioned edge MLP" in evaluator.mh1_fast_path_rejection_reason
+    if use_kokkos and hasattr(native_symmetrix, "MACENonlinearKokkosFloat"):
+        with pytest.raises(ValueError, match="Float32.*compatible MACE-MH-1 family"):
+            native_symmetrix.MACENonlinearKokkosFloat(str(path))
+
+
 def test_mh1_extraction_rejects_unsupported_architecture_features():
     from symmetrix.extract_mace_nonlinear import extract_mace_nonlinear_data
 

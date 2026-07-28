@@ -19,8 +19,13 @@ ln -sf $(pwd)/pair_symmetrix_mace_kokkos.cpp ${lammps}/src/KOKKOS/pair_symmetrix
 
 # update lammps build instructions
 echo "
-add_subdirectory($(pwd)/../libsymmetrix libsymmetrix)
+function(symmetrix_add_lammps_library)
+  # LAMMPS builds bundled Kokkos statically even when liblammps is shared.
+  # Keep Symmetrix and KokkosKernels static so only one Kokkos runtime is linked.
+  set(BUILD_SHARED_LIBS OFF)
+  add_subdirectory($(pwd)/../libsymmetrix libsymmetrix)
+endfunction()
+symmetrix_add_lammps_library()
 target_include_directories(lammps PRIVATE $(pwd)/../libsymmetrix/source)
 target_link_libraries(lammps PRIVATE symmetrix)
-install(TARGETS symmetrix EXPORT LAMMPS_Targets)
 " >> $lammps/cmake/CMakeLists.txt

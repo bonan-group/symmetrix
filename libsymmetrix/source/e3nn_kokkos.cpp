@@ -354,7 +354,7 @@ E3TensorProductKokkosT<Precision>::E3TensorProductKokkosT(const nlohmann::json& 
         ++instruction_index;
     }
     weight_size_=offset; internal_weights=toKokkosView("e3 tensor weights",tensor_values<Precision>(data.at("weight"))); output_mask=toKokkosView("e3 tensor mask",tensor_values<Precision>(data.at("output_mask")));
-    mh1_fast_path=official_layout&&internal_weights.empty();
+    mh1_fast_path=official_layout&&internal_weights.extent(0)==0;
     if(mh1_fast_path) {
         std::vector<int> input_component_data;
         mh1_direct_node_layout_=true;

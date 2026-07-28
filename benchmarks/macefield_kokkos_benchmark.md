@@ -11,11 +11,12 @@
 | Kokkos CUDA | compact MACE | yes | float32, float64 | yes | n/a | n/a | fully streamed R0/R1 |
 | Kokkos CUDA | compact MACEField | yes | float32, float64 | yes | yes | yes, analytic | first order fully streamed; response calls transiently materialize R0/R1 |
 
-Support requires the format-v2 compact, fixed-weight radial representation.
-Format-v1 pair-spline MACE models and nonlinear MH-1 models reject `r1` and
-`all`. The field-aware native and Kokkos paths support float32 and float64
-through the same analytic response implementation instantiated at both
-precisions.
+The MH-0 and MACEField rows above require the format-v2 compact, fixed-weight
+radial representation. Format-v1 pair-spline MACE models reject `r1` and
+`all`. Compatible format-v3 MH-1-family models support both streamed modes;
+generic nonlinear format-v3 models remain legacy-only. The field-aware native
+and Kokkos paths support float32 and float64 through the same analytic response
+implementation instantiated at both precisions.
 
 ## Configuration
 

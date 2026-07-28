@@ -74,7 +74,15 @@ jobs:
           cp "$HOME/.cache/symmetrix/test-models/mace-mh-1.model" "$SYMMETRIX_MH1_MODEL"
           cd symmetrix/test
           pytest -q test_mh1.py \
-            -k "cuda_streamed_fast_path or float32_streamed_modes or mode_switch_fences_pending or exposes_synchronized_linear_controls or cuda_packed_linear or repeated_calculations or reuses_workspaces"
+            -k "cuda_streamed_fast_path or float32_streamed_modes or \
+                mode_switch_fences_pending or exposes_synchronized_linear_controls or \
+                cuda_packed_linear or cuda_fused_reverse_matches_control or \
+                cuda_tensor_reverse_direct_nodes or \
+                cuda_tensor_team_size_tracks_edge_multiplicity or \
+                mh1_256_node_64_edge or \
+                generalized_mh1_matches_upstream_and_streamed_modes or \
+                generalized_mh1_kokkos_float32_matches_float64 or \
+                repeated_calculations or reuses_workspaces"
 
       - name: Run full CUDA qualification
         if: inputs.suite == 'full'

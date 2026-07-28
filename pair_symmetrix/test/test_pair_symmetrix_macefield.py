@@ -181,3 +181,47 @@ def test_lammps_kokkos_macefield_energy_forces_match_native(
 
     assert actual_energy == pytest.approx(expected_energy, abs=1e-6)
     assert np.allclose(actual_forces, expected_forces, atol=1e-5, rtol=1e-5)
+
+
+def test_lammps_kokkos_all_streaming_handles_periodic_ghost_receivers(
+    macefield_json_path,
+):
+    def evaluate(streamed_edges):
+        lmp = lammps(cmdargs=["-screen", "none", "-k", "on", "-sf", "kk"])
+        try:
+            lmp.commands_string(
+                f"""
+                clear
+                units           metal
+                boundary        p p p
+                atom_style      atomic
+                atom_modify     map yes sort 0 0
+                newton          on
+
+                region          box block 0.0 12.5 0.0 12.5 0.0 12.5
+                create_box      2 box
+                create_atoms    1 single 0.5 6.25 6.25 units box
+                create_atoms    2 single 12.0 6.25 6.25 units box
+                mass            1 24.305
+                mass            2 15.999
+
+                pair_style      symmetrix/mace electric_field 0.01 0.0 0.0 no_mpi_message_passing streamed_edges {streamed_edges}
+                pair_coeff      * * {macefield_json_path} Mg O
+
+                run 0
+                """
+            )
+            num_ghosts = lmp.extract_global("nghost")
+            energy = lmp.get_thermo("pe")
+            forces = lmp.numpy.extract_atom("f", nelem=2, dim=3).copy()
+        finally:
+            lmp.close()
+        return num_ghosts, energy, forces
+
+    legacy_ghosts, legacy_energy, legacy_forces = evaluate("legacy")
+    all_ghosts, all_energy, all_forces = evaluate("all")
+
+    assert legacy_ghosts > 0
+    assert all_ghosts > 0
+    assert all_energy == pytest.approx(legacy_energy, abs=1e-6)
+    assert np.allclose(all_forces, legacy_forces, atol=1e-5, rtol=1e-5)

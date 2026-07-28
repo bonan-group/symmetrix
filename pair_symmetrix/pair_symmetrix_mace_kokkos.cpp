@@ -1153,7 +1153,12 @@ void PairSymmetrixMACEKokkos<DeviceType, Precision>::compute_no_mpi_message_pass
       num_local_nodes, node_types, num_neigh, neigh_types,
       mace->atomic_numbers, r, xyz, mace->node_energies, mace->node_forces);
 
-  if (mace->streamed_edges != MACEStreamedEdgesMode::legacy)
+  if (mace->streamed_edges == MACEStreamedEdgesMode::all)
+    mace->prepare_streamed_edge_schedule(
+      num_local_nodes+num_ghost_nodes,
+      num_local_edges+num_ghost_edges,
+      num_neigh);
+  else if (mace->streamed_edges == MACEStreamedEdgesMode::r1)
     mace->prepare_streamed_edge_schedule(
       num_local_nodes, num_local_edges, num_neigh);
   mace->compute_Y(xyz);
