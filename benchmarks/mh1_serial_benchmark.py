@@ -73,6 +73,18 @@ def _git_dirty():
     return bool(result.stdout.strip()) if result.returncode == 0 else None
 
 
+def _git_tracked_diff_sha256():
+    result = subprocess.run(
+        ["git", "diff", "--no-ext-diff", "--binary", "HEAD"],
+        cwd=pathlib.Path(__file__).resolve().parents[1],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout:
+        return None
+    return hashlib.sha256(result.stdout).hexdigest()
+
+
 def _cpu_model():
     cpuinfo = pathlib.Path("/proc/cpuinfo")
     if cpuinfo.is_file():
@@ -354,6 +366,18 @@ def main():
         default="auto",
         help="Benchmark-only Kokkos E3-linear execution policy",
     )
+    parser.add_argument(
+        "--fused-gate-normalization-reverse",
+        choices=("auto", "on", "off"),
+        default="auto",
+        help="Benchmark-only MH-1 fused node-reverse policy",
+    )
+    parser.add_argument(
+        "--direct-node-tensor-reverse",
+        choices=("auto", "on", "off"),
+        default="auto",
+        help="Benchmark-only MH-1 direct-node tensor-reverse policy",
+    )
     parser.add_argument("--evaluator-only", action="store_true")
     parser.add_argument(
         "--allow-generic",
@@ -380,6 +404,13 @@ def main():
         parser.error("--max-reference-ratio requires --reference-model")
     if args.cpu is not None and args.cpus is not None:
         parser.error("--cpu and --cpus are mutually exclusive")
+    if args.backend != "kokkos" and (
+        args.fused_gate_normalization_reverse != "auto"
+        or args.direct_node_tensor_reverse != "auto"
+    ):
+        parser.error(
+            "fused reverse controls require --backend kokkos"
+        )
     if hasattr(os, "sched_getaffinity"):
         available_cpus = os.sched_getaffinity(0)
         requested_cpus = None
@@ -418,6 +449,25 @@ def main():
     )
     if use_kokkos:
         calculator.evaluator.set_e3_linear_backend(args.e3_linear_backend)
+        controls = (
+            (
+                args.fused_gate_normalization_reverse,
+                "set_fused_gate_normalization_reverse",
+            ),
+            (
+                args.direct_node_tensor_reverse,
+                "set_direct_node_tensor_reverse",
+            ),
+        )
+        for requested, setter_name in controls:
+            if requested == "auto":
+                continue
+            setter = getattr(calculator.evaluator, setter_name, None)
+            if setter is None:
+                raise RuntimeError(
+                    f"Native evaluator does not expose {setter_name}"
+                )
+            setter(requested == "on")
     if (
         not args.allow_generic
         and not getattr(calculator.evaluator, "uses_mh1_fast_path", False)
@@ -434,6 +484,7 @@ def main():
     metadata = {
         "git_revision": _git_revision(),
         "git_dirty": _git_dirty(),
+        "git_tracked_diff_sha256": _git_tracked_diff_sha256(),
         "python": sys.version,
         "platform": platform.platform(),
         "machine": platform.machine(),
@@ -485,6 +536,24 @@ def main():
         ),
         "tensor_product_harmonic_team_size": getattr(
             calculator.evaluator, "tensor_product_harmonic_team_size", None
+        ),
+        "fused_gate_normalization_reverse_requested": (
+            args.fused_gate_normalization_reverse
+        ),
+        "fused_gate_normalization_reverse_available": getattr(
+            calculator.evaluator,
+            "fused_gate_normalization_reverse_available",
+            None,
+        ),
+        "uses_fused_gate_normalization_reverse": getattr(
+            calculator.evaluator, "uses_fused_gate_normalization_reverse", None
+        ),
+        "direct_node_tensor_reverse_requested": args.direct_node_tensor_reverse,
+        "direct_node_tensor_reverse_available": getattr(
+            calculator.evaluator, "direct_node_tensor_reverse_available", None
+        ),
+        "uses_direct_node_tensor_reverse": getattr(
+            calculator.evaluator, "uses_direct_node_tensor_reverse", None
         ),
         "warmups": args.warmups,
         "repeats": args.repeats,

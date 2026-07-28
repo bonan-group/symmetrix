@@ -47,6 +47,12 @@ public:
     std::string tensor_product_execution_backend() const;
     int tensor_product_channel_team_size() const;
     int tensor_product_harmonic_team_size() const;
+    void set_fused_gate_normalization_reverse(bool enabled);
+    bool fused_gate_normalization_reverse_available() const;
+    bool uses_fused_gate_normalization_reverse() const;
+    void set_direct_node_tensor_reverse(bool enabled);
+    bool direct_node_tensor_reverse_available() const;
+    bool uses_direct_node_tensor_reverse() const;
     std::size_t linear_workspace_bytes() const;
     std::size_t tensor_workspace_bytes() const;
     std::size_t precision_workspace_bytes() const;
@@ -65,16 +71,27 @@ private:
 
 public:
     struct Gate {
-        int scalar_size=0,gate_size=0,gated_size=0,output_size=0;
+        int input_size=0,scalar_size=0,gate_size=0,gated_size=0,output_size=0;
         std::vector<IrrepBlock> scalar_blocks,gated_blocks;
         std::vector<Precision> scalar_constants;
         std::vector<Precision> gate_constants;
+        Kokkos::View<Precision*> fused_scalar_constants,fused_gate_constants;
+        Kokkos::View<int**,Kokkos::LayoutRight> fused_gate_plan;
         explicit Gate(const nlohmann::json& data);
+        bool supports_fused_normalized_reverse() const;
         void evaluate(Kokkos::View<const Precision**,Kokkos::LayoutRight> input,
                       Kokkos::View<Precision**,Kokkos::LayoutRight> output) const;
         void reverse(Kokkos::View<const Precision**,Kokkos::LayoutRight> input,
                      Kokkos::View<const Precision**,Kokkos::LayoutRight> output_adjoint,
                      Kokkos::View<Precision**,Kokkos::LayoutRight> input_adjoint) const;
+        void reverse_normalized(
+            Kokkos::View<const Precision**,Kokkos::LayoutRight> input,
+            Kokkos::View<const Precision**,Kokkos::LayoutRight> output_adjoint,
+            Kokkos::View<const Precision**,Kokkos::LayoutRight> linear_forward,
+            Kokkos::View<const Precision*> densities,Precision alpha,Precision beta,
+            Kokkos::View<Precision**,Kokkos::LayoutRight> input_adjoint,
+            Kokkos::View<Precision**,Kokkos::LayoutRight> linear_adjoint,
+            Kokkos::View<Precision*> density_adjoint) const;
     };
 private:
     struct Interaction {
@@ -147,6 +164,8 @@ private:
     bool apply_cutoff=false,has_agnesi=false,has_zbl=false,mh1_fast_path=false;
     bool mh1_compiled_products=false,mh1_pair_conditioning=false,
         mh1_external_uvu_tensors=false;
+    bool fused_gate_normalization_reverse_enabled=true;
+    bool direct_node_tensor_reverse_enabled=true;
     MaceMH1FamilyDescriptor mh1_family;
     std::string mh1_fast_path_rejection;
     MACEStreamedEdgesMode streamed_edges=MACEStreamedEdgesMode::legacy;

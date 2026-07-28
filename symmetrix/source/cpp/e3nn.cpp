@@ -72,6 +72,8 @@ void bind_float_e3_primitives(py::module_& module)
         .def_property_readonly("execution_backend",&Tensor::execution_backend)
         .def_property_readonly("channel_team_size",&Tensor::channel_team_size)
         .def_property_readonly("harmonic_team_size",&Tensor::harmonic_team_size)
+        .def_property_readonly(
+            "supports_direct_node_reverse",&Tensor::supports_direct_node_reverse)
         .def("evaluate_batch",[](
             const Tensor& self,const std::vector<float>& input_1,
             const std::vector<float>& input_2,const std::vector<float>& weights,
@@ -134,6 +136,75 @@ void bind_float_e3_primitives(py::module_& module)
                 second_adjoint,weight_adjoint);
             return py::make_tuple(
                 view2vector(first_adjoint),view2vector(second_adjoint),
+                view2vector(weight_adjoint));
+        })
+        .def("reverse_from_nodes",[](
+            const Tensor& self,const std::vector<float>& source_node_values,
+            const std::vector<int>& source_indices,int first_edge,
+            const std::vector<float>& edge_input_2,
+            const std::vector<float>& edge_weights,
+            const std::vector<float>& target_node_output_adjoint,
+            const std::vector<int>& target_indices,
+            const std::vector<float>& initial_source_node_input_adjoint,
+            int samples) {
+            const int input_dimension=self.input_1_dimension();
+            const int output_dimension=self.output_dimension();
+            if(samples<0||first_edge<0||input_dimension<=0||output_dimension<=0
+                ||source_node_values.size()%input_dimension!=0
+                ||target_node_output_adjoint.size()%output_dimension!=0
+                ||initial_source_node_input_adjoint.size()
+                    !=source_node_values.size()
+                ||source_indices.size()
+                    <static_cast<std::size_t>(first_edge)+samples
+                ||target_indices.size()
+                    <static_cast<std::size_t>(first_edge)+samples
+                ||edge_input_2.size()!=static_cast<std::size_t>(samples)
+                    *self.input_2_dimension()
+                ||edge_weights.size()!=static_cast<std::size_t>(samples)
+                    *self.weight_size())
+                throw std::invalid_argument(
+                    "Float Kokkos direct-node tensor-product reverse dimensions "
+                    "are inconsistent.");
+            const int source_nodes=source_node_values.size()/input_dimension;
+            const int target_nodes=
+                target_node_output_adjoint.size()/output_dimension;
+            const std::size_t edge_end=
+                static_cast<std::size_t>(first_edge)+samples;
+            for(std::size_t edge=first_edge;edge<edge_end;++edge)
+                if(source_indices[edge]<0||source_indices[edge]>=source_nodes
+                    ||target_indices[edge]<0||target_indices[edge]>=target_nodes)
+                    throw std::invalid_argument(
+                        "Float Kokkos direct-node tensor-product reverse indices "
+                        "are out of bounds.");
+            Kokkos::View<float**,Kokkos::LayoutRight> source_values;
+            Kokkos::View<float**,Kokkos::LayoutRight> second,weight,target_adjoint;
+            Kokkos::View<float**,Kokkos::LayoutRight> source_adjoint;
+            Kokkos::View<float**,Kokkos::LayoutRight> second_adjoint;
+            Kokkos::View<float**,Kokkos::LayoutRight> weight_adjoint;
+            Kokkos::View<int*> sources,targets;
+            set_kokkos_view(
+                source_values,source_node_values,source_nodes,input_dimension);
+            set_kokkos_view(sources,source_indices);
+            set_kokkos_view(
+                second,edge_input_2,samples,self.input_2_dimension());
+            set_kokkos_view(weight,edge_weights,samples,self.weight_size());
+            set_kokkos_view(
+                target_adjoint,target_node_output_adjoint,
+                target_nodes,output_dimension);
+            set_kokkos_view(targets,target_indices);
+            set_kokkos_view(
+                source_adjoint,initial_source_node_input_adjoint,
+                source_nodes,input_dimension);
+            Kokkos::realloc(
+                second_adjoint,samples,self.input_2_dimension());
+            Kokkos::realloc(weight_adjoint,samples,self.weight_size());
+            if(!self.try_reverse_from_nodes(
+                source_values,sources,first_edge,second,weight,target_adjoint,
+                targets,source_adjoint,second_adjoint,weight_adjoint))
+                throw std::invalid_argument(
+                    "Float Kokkos direct-node tensor-product reverse is unsupported.");
+            return py::make_tuple(
+                view2vector(source_adjoint),view2vector(second_adjoint),
                 view2vector(weight_adjoint));
         });
 }

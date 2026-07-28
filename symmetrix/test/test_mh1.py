@@ -1269,6 +1269,143 @@ def test_mh1_tensor_product_forward_and_reverse_match_autograd(
             )
 
 
+def test_mh1_cuda_tensor_reverse_direct_nodes_matches_edge_scatter(
+    mh1_si_artifact,
+):
+    if not hasattr(native_symmetrix, "E3TensorProductKokkosFloat"):
+        pytest.skip("Symmetrix was built without Float32 Kokkos E3 primitives")
+    if not native_symmetrix._kokkos_is_initialized():
+        native_symmetrix._init_kokkos()
+    data, _ = mh1_si_artifact
+    module = native_symmetrix.E3TensorProductKokkosFloat(
+        json.dumps(data["interactions"][1]["conv_tp"])
+    )
+    if native_symmetrix._kokkos_default_execution_space() != "Cuda":
+        assert not module.supports_direct_node_reverse
+        pytest.skip("Direct-node tensor-product reverse requires Kokkos CUDA")
+    assert module.supports_direct_node_reverse
+
+    rng = np.random.default_rng(8675309)
+    source_nodes = 3
+    target_nodes = 2
+    samples = 6
+    first_edge = 2
+    source_indices = np.array([1, 2, 0, 1, 0, 2, 0, 0], dtype=np.int32)
+    target_indices = np.array([0, 1, 1, 0, 1, 1, 0, 1], dtype=np.int32)
+    source_values = rng.normal(
+        scale=0.2, size=(source_nodes, module.input_1_dimension)
+    ).astype(np.float32)
+    edge_input_2 = rng.normal(
+        scale=0.2, size=(samples, module.input_2_dimension)
+    ).astype(np.float32)
+    edge_weights = rng.normal(
+        scale=0.2, size=(samples, module.weight_size)
+    ).astype(np.float32)
+    target_adjoint = rng.normal(
+        scale=0.2, size=(target_nodes, module.output_dimension)
+    ).astype(np.float32)
+    initial_source_adjoint = rng.normal(
+        scale=0.1, size=source_values.shape
+    ).astype(np.float32)
+
+    block_sources = source_indices[first_edge:first_edge + samples]
+    block_targets = target_indices[first_edge:first_edge + samples]
+    edge_source_adjoint, expected_input_2_adjoint, expected_weight_adjoint = (
+        module.reverse_batch(
+            source_values[block_sources].ravel(),
+            edge_input_2.ravel(),
+            edge_weights.ravel(),
+            target_adjoint[block_targets].ravel(),
+            samples,
+        )
+    )
+    expected_source_adjoint = initial_source_adjoint.copy()
+    np.add.at(
+        expected_source_adjoint,
+        block_sources,
+        np.asarray(edge_source_adjoint).reshape(source_values[block_sources].shape),
+    )
+
+    actual_source_adjoint, actual_input_2_adjoint, actual_weight_adjoint = (
+        module.reverse_from_nodes(
+            source_values.ravel(),
+            source_indices,
+            first_edge,
+            edge_input_2.ravel(),
+            edge_weights.ravel(),
+            target_adjoint.ravel(),
+            target_indices,
+            initial_source_adjoint.ravel(),
+            samples,
+        )
+    )
+    np.testing.assert_allclose(
+        np.asarray(actual_source_adjoint).reshape(source_values.shape),
+        expected_source_adjoint,
+        rtol=0.0,
+        atol=3e-5,
+    )
+    np.testing.assert_allclose(
+        actual_input_2_adjoint,
+        expected_input_2_adjoint,
+        rtol=0.0,
+        atol=3e-5,
+    )
+    np.testing.assert_allclose(
+        actual_weight_adjoint,
+        expected_weight_adjoint,
+        rtol=0.0,
+        atol=3e-5,
+    )
+
+    with pytest.raises(ValueError, match="direct-node.*dimensions"):
+        module.reverse_from_nodes(
+            source_values.ravel(),
+            source_indices,
+            first_edge,
+            edge_input_2.ravel(),
+            edge_weights.ravel(),
+            target_adjoint.ravel(),
+            target_indices,
+            initial_source_adjoint.ravel()[:-1],
+            samples,
+        )
+
+    invalid_source_negative = source_indices.copy()
+    invalid_source_negative[first_edge] = -1
+    invalid_source_large = source_indices.copy()
+    invalid_source_large[first_edge] = source_nodes
+    invalid_target_negative = target_indices.copy()
+    invalid_target_negative[first_edge] = -1
+    invalid_target_large = target_indices.copy()
+    invalid_target_large[first_edge] = target_nodes
+    for invalid_sources, invalid_targets in (
+        (invalid_source_negative, target_indices),
+        (invalid_source_large, target_indices),
+        (source_indices, invalid_target_negative),
+        (source_indices, invalid_target_large),
+        (source_indices, target_indices),
+    ):
+        invalid_source_values = (
+            np.empty(0, dtype=np.float32)
+            if invalid_sources is source_indices and invalid_targets is target_indices
+            else source_values.ravel()
+        )
+        invalid_initial_adjoint = np.zeros_like(invalid_source_values)
+        with pytest.raises(ValueError, match="direct-node.*indices.*out of bounds"):
+            module.reverse_from_nodes(
+                invalid_source_values,
+                invalid_sources,
+                first_edge,
+                edge_input_2.ravel(),
+                edge_weights.ravel(),
+                target_adjoint.ravel(),
+                invalid_targets,
+                invalid_initial_adjoint,
+                samples,
+            )
+
+
 @pytest.mark.parametrize(
     ("multiplicity", "expected_team_size"),
     [(1, 32), (32, 32), (33, 64), (64, 64), (96, 96), (128, 128), (256, 128)],
@@ -1850,6 +1987,34 @@ def test_mh1_kokkos_exposes_synchronized_linear_controls(mh1_si_artifact):
     expected_team_size = 128 if execution_space == "Cuda" else 0
     assert evaluator.tensor_product_channel_team_size == expected_team_size
     assert evaluator.tensor_product_harmonic_team_size == expected_team_size
+    expected_fused_reverse = execution_space == "Cuda"
+    assert (
+        evaluator.fused_gate_normalization_reverse_available
+        is expected_fused_reverse
+    )
+    assert evaluator.uses_fused_gate_normalization_reverse is expected_fused_reverse
+    assert evaluator.direct_node_tensor_reverse_available is expected_fused_reverse
+    assert evaluator.uses_direct_node_tensor_reverse is expected_fused_reverse
+    for mode in ("legacy", "r1", "all"):
+        evaluator.set_streamed_edges(mode)
+        assert evaluator.uses_fused_gate_normalization_reverse is expected_fused_reverse
+        assert evaluator.uses_direct_node_tensor_reverse is (
+            expected_fused_reverse and mode == "all"
+        )
+    evaluator.set_fused_gate_normalization_reverse(False)
+    evaluator.set_direct_node_tensor_reverse(False)
+    assert not evaluator.uses_fused_gate_normalization_reverse
+    assert not evaluator.uses_direct_node_tensor_reverse
+    if expected_fused_reverse:
+        evaluator.set_fused_gate_normalization_reverse(True)
+        evaluator.set_direct_node_tensor_reverse(True)
+        assert evaluator.uses_fused_gate_normalization_reverse
+        assert evaluator.uses_direct_node_tensor_reverse
+    else:
+        with pytest.raises(ValueError, match="Float32 CUDA"):
+            evaluator.set_fused_gate_normalization_reverse(True)
+        with pytest.raises(ValueError, match="Float32 CUDA"):
+            evaluator.set_direct_node_tensor_reverse(True)
     assert evaluator.linear_workspace_bytes == 0
     assert evaluator.tensor_workspace_bytes == 0
     assert evaluator.precision_workspace_bytes == evaluator.edge_workspace_bytes
@@ -1865,6 +2030,10 @@ def test_mh1_kokkos_exposes_synchronized_linear_controls(mh1_si_artifact):
         double_evaluator.tensor_product_execution_backend
         == "official_kokkos_mdrange"
     )
+    assert not double_evaluator.fused_gate_normalization_reverse_available
+    assert not double_evaluator.uses_fused_gate_normalization_reverse
+    assert not double_evaluator.direct_node_tensor_reverse_available
+    assert not double_evaluator.uses_direct_node_tensor_reverse
     expected_double_linear = "scalar" if execution_space == "Cuda" else "packed_gemm"
     assert double_evaluator.selected_e3_linear_backend(17) == expected_double_linear
     evaluator.fence()
@@ -1899,6 +2068,58 @@ def test_mh1_cuda_packed_linear_matches_scalar(mh1_si_artifact):
             rtol=0.0,
             atol=2e-5,
         )
+
+
+def test_mh1_cuda_fused_reverse_matches_control(mh1_si_artifact):
+    if not hasattr(native_symmetrix, "MACENonlinearKokkosFloat"):
+        pytest.skip("Symmetrix was built without Float32 Kokkos nonlinear support")
+    if native_symmetrix._kokkos_default_execution_space() != "Cuda":
+        pytest.skip("Fused MH-1 reverse requires Kokkos CUDA")
+    _, model_path = mh1_si_artifact
+    atoms = bulk("Si", "diamond", a=5.43, cubic=True)
+    properties = ["energy", "energies", "forces", "stress"]
+    calculator = Symmetrix(
+        model_path,
+        use_kokkos=True,
+        dtype="float32",
+        streamed_edges="all",
+    )
+    results = {}
+    fallback_workspace_bytes = None
+    for fused_gate, direct_tensor in (
+        (False, False),
+        (True, False),
+        (False, True),
+        (True, True),
+    ):
+        calculator.evaluator.set_fused_gate_normalization_reverse(fused_gate)
+        calculator.evaluator.set_direct_node_tensor_reverse(direct_tensor)
+        assert calculator.evaluator.uses_fused_gate_normalization_reverse is fused_gate
+        assert calculator.evaluator.uses_direct_node_tensor_reverse is direct_tensor
+        if direct_tensor and fallback_workspace_bytes is not None:
+            assert (
+                calculator.evaluator.edge_workspace_bytes
+                < fallback_workspace_bytes
+            )
+        calculator.calculate(atoms.copy(), properties=properties)
+        results[(fused_gate, direct_tensor)] = {
+            name: np.array(calculator.results[name], copy=True)
+            for name in properties
+        }
+        if not direct_tensor and fallback_workspace_bytes is None:
+            fallback_workspace_bytes = calculator.evaluator.edge_workspace_bytes
+        elif direct_tensor:
+            assert calculator.evaluator.edge_workspace_bytes < fallback_workspace_bytes
+    control = results[(False, False)]
+    for configuration, actual in results.items():
+        for name in properties:
+            np.testing.assert_allclose(
+                actual[name],
+                control[name],
+                rtol=0.0,
+                atol=2e-5,
+                err_msg=f"configuration={configuration}, property={name}",
+            )
 
 
 def test_legacy_evaluator_rejects_nonlinear_schema(mh1_si_artifact):

@@ -54,10 +54,66 @@ template<typename Precision>
 MaceNonlinearKokkosT<Precision>::Gate::Gate(const nlohmann::json& data)
 {
     if(data.at("scalar_activation").get<std::string>()!="silu"||data.at("gate_activation").get<std::string>()!="sigmoid")throw std::invalid_argument("MACE_Nonlinear Kokkos gate has unsupported activations.");
-    Irreps scalars(data.at("irreps_scalars").get<std::string>()),gates(data.at("irreps_gates").get<std::string>()),gated(data.at("irreps_gated").get<std::string>()),output(data.at("irreps_out").get<std::string>());
-    scalar_size=scalars.dimension(); gate_size=gates.dimension(); gated_size=gated.dimension(); output_size=output.dimension(); scalar_blocks=scalars.blocks; gated_blocks=gated.blocks;
+    Irreps input(data.at("irreps_in").get<std::string>()),scalars(data.at("irreps_scalars").get<std::string>()),gates(data.at("irreps_gates").get<std::string>()),gated(data.at("irreps_gated").get<std::string>()),output(data.at("irreps_out").get<std::string>());
+    input_size=input.dimension();scalar_size=scalars.dimension(); gate_size=gates.dimension(); gated_size=gated.dimension(); output_size=output.dimension(); scalar_blocks=scalars.blocks; gated_blocks=gated.blocks;
     scalar_constants=data.at("scalar_activation_constants").get<std::vector<Precision>>(); gate_constants=data.at("gate_activation_constants").get<std::vector<Precision>>();
     if(scalar_constants.size()!=scalar_blocks.size()||gate_constants.size()!=gated_blocks.size())throw std::invalid_argument("MACE_Nonlinear Kokkos gate activation counts are inconsistent.");
+    int planned_gates=0,planned_gated=0;
+    for(const auto& block:gated_blocks) {
+        planned_gates+=block.multiplicity;
+        planned_gated+=block.dimension();
+    }
+    if(input_size!=scalar_size+gate_size+gated_size
+        ||output_size!=scalar_size+gated_size
+        ||planned_gates!=gate_size||planned_gated!=gated_size)
+        throw std::invalid_argument("MACE_Nonlinear Kokkos gate irreps are inconsistent.");
+
+    fused_scalar_constants=Kokkos::View<Precision*>(
+        "nonlinear fused gate scalar constants",scalar_size);
+    auto scalar_constant_host=Kokkos::create_mirror_view(fused_scalar_constants);
+    for(int block_index=0;block_index<static_cast<int>(scalar_blocks.size());++block_index) {
+        const auto block=scalar_blocks[block_index];
+        for(int index=0;index<block.dimension();++index)
+            scalar_constant_host(block.offset+index)=scalar_constants[block_index];
+    }
+    Kokkos::deep_copy(fused_scalar_constants,scalar_constant_host);
+
+    fused_gate_plan=Kokkos::View<int**,Kokkos::LayoutRight>(
+        "nonlinear fused gate reverse plan",gate_size,4);
+    fused_gate_constants=Kokkos::View<Precision*>(
+        "nonlinear fused gate constants",gate_size);
+    auto plan_host=Kokkos::create_mirror_view(fused_gate_plan);
+    auto gate_constant_host=Kokkos::create_mirror_view(fused_gate_constants);
+    int gate_offset=scalar_size,gated_offset=scalar_size+gate_size;
+    int output_offset=scalar_size,gate_feature=0;
+    for(int block_index=0;block_index<static_cast<int>(gated_blocks.size());++block_index) {
+        const auto block=gated_blocks[block_index];
+        const int width=2*block.l+1;
+        for(int feature=0;feature<block.multiplicity;++feature) {
+            plan_host(gate_feature,0)=gate_offset+feature;
+            plan_host(gate_feature,1)=gated_offset+feature*width;
+            plan_host(gate_feature,2)=output_offset+feature*width;
+            plan_host(gate_feature,3)=width;
+            gate_constant_host(gate_feature)=gate_constants[block_index];
+            ++gate_feature;
+        }
+        gate_offset+=block.multiplicity;
+        gated_offset+=block.dimension();
+        output_offset+=block.dimension();
+    }
+    Kokkos::deep_copy(fused_gate_plan,plan_host);
+    Kokkos::deep_copy(fused_gate_constants,gate_constant_host);
+}
+
+template<typename Precision>
+bool MaceNonlinearKokkosT<Precision>::Gate::supports_fused_normalized_reverse() const
+{
+    return input_size>0&&input_size==scalar_size+gate_size+gated_size
+        &&output_size==scalar_size+gated_size
+        &&fused_scalar_constants.extent(0)==static_cast<std::size_t>(scalar_size)
+        &&fused_gate_plan.extent(0)==static_cast<std::size_t>(gate_size)
+        &&fused_gate_plan.extent(1)==4
+        &&fused_gate_constants.extent(0)==static_cast<std::size_t>(gate_size);
 }
 
 template<typename Precision>
@@ -78,6 +134,97 @@ void MaceNonlinearKokkosT<Precision>::Gate::reverse(Kokkos::View<const Precision
     for(int block_index=0;block_index<static_cast<int>(gated_blocks.size());++block_index){const auto block=gated_blocks[block_index];const int width=2*block.l+1,go=gate_offset,gio=gated_offset,oo=output_offset;const Precision constant=gate_constants[block_index];
         Kokkos::parallel_for("reverse gate tensors",Kokkos::MDRangePolicy<Kokkos::Rank<2>>({0,0},{static_cast<int>(input.extent(0)),block.multiplicity}),KOKKOS_LAMBDA(int sample,int feature){const Precision probability=Precision(1)/(Precision(1)+Kokkos::exp(-input(sample,go+feature))),gate=constant*probability;Precision gate_adjoint=Precision(0);for(int component=0;component<width;++component){input_adjoint(sample,gio+feature*width+component)=gate*output_adjoint(sample,oo+feature*width+component);gate_adjoint+=input(sample,gio+feature*width+component)*output_adjoint(sample,oo+feature*width+component);}input_adjoint(sample,go+feature)=gate_adjoint*constant*probability*(Precision(1)-probability);});
         gate_offset+=block.multiplicity;gated_offset+=block.dimension();output_offset+=block.dimension();}
+}
+
+template<typename Precision>
+void MaceNonlinearKokkosT<Precision>::Gate::reverse_normalized(
+    Kokkos::View<const Precision**,Kokkos::LayoutRight> input,
+    Kokkos::View<const Precision**,Kokkos::LayoutRight> output_adjoint,
+    Kokkos::View<const Precision**,Kokkos::LayoutRight> linear_forward,
+    Kokkos::View<const Precision*> densities,Precision alpha,Precision beta,
+    Kokkos::View<Precision**,Kokkos::LayoutRight> input_adjoint,
+    Kokkos::View<Precision**,Kokkos::LayoutRight> linear_adjoint,
+    Kokkos::View<Precision*> density_adjoint) const
+{
+    if(!supports_fused_normalized_reverse()
+        ||input.extent(1)!=static_cast<std::size_t>(input_size)
+        ||output_adjoint.extent(0)!=input.extent(0)
+        ||output_adjoint.extent(1)!=static_cast<std::size_t>(output_size)
+        ||linear_forward.extent(0)!=input.extent(0)
+        ||linear_forward.extent(1)!=input.extent(1)
+        ||densities.extent(0)!=input.extent(0)
+        ||input_adjoint.extent(0)!=input.extent(0)
+        ||input_adjoint.extent(1)!=input.extent(1)
+        ||linear_adjoint.extent(0)!=input.extent(0)
+        ||linear_adjoint.extent(1)!=input.extent(1)
+        ||density_adjoint.extent(0)!=input.extent(0))
+        throw std::invalid_argument(
+            "MACE_Nonlinear fused gate-normalization reverse dimensions are inconsistent.");
+
+    auto scalar_activation_constants=fused_scalar_constants;
+    auto gate_plan=fused_gate_plan;
+    auto gated_activation_constants=fused_gate_constants;
+    const int scalar_count=scalar_size;
+    const int work_items=scalar_size+gate_size;
+    const int capped=std::max(1,std::min(work_items,128));
+    const int team_size=std::max(32,((capped+31)/32)*32);
+    using team_policy=Kokkos::TeamPolicy<>;
+    Kokkos::parallel_for(
+        "mh1 fused reverse gate normalization",
+        team_policy(input.extent(0),team_size),
+        KOKKOS_LAMBDA(const typename team_policy::member_type& team) {
+            const int node=team.league_rank();
+            const Precision normalization=alpha+beta*densities(node);
+            const Precision inverse=Precision(1)/normalization;
+            const Precision density_scale=-beta*inverse*inverse;
+            Precision density_value=Precision(0);
+            Kokkos::parallel_reduce(
+                Kokkos::TeamThreadRange(team,work_items),
+                [&](const int item,Precision& update) {
+                    if(item<scalar_count) {
+                        const Precision x=input(node,item);
+                        const Precision probability=Precision(1)
+                            /(Precision(1)+Kokkos::exp(-x));
+                        const Precision value=output_adjoint(node,item)
+                            *scalar_activation_constants(item)
+                            *(probability+x*probability*(Precision(1)-probability));
+                        input_adjoint(node,item)=value;
+                        linear_adjoint(node,item)=value*inverse;
+                        update+=density_scale*value*linear_forward(node,item);
+                        return;
+                    }
+
+                    const int feature=item-scalar_count;
+                    const int gate_index=gate_plan(feature,0);
+                    const int gated_index=gate_plan(feature,1);
+                    const int output_index=gate_plan(feature,2);
+                    const int width=gate_plan(feature,3);
+                    const Precision x=input(node,gate_index);
+                    const Precision probability=Precision(1)
+                        /(Precision(1)+Kokkos::exp(-x));
+                    const Precision constant=gated_activation_constants(feature);
+                    const Precision gate=constant*probability;
+                    Precision gate_adjoint=Precision(0);
+                    for(int component=0;component<width;++component) {
+                        const int local_input=gated_index+component;
+                        const Precision output_value=output_adjoint(
+                            node,output_index+component);
+                        const Precision value=gate*output_value;
+                        input_adjoint(node,local_input)=value;
+                        linear_adjoint(node,local_input)=value*inverse;
+                        update+=density_scale*value*linear_forward(node,local_input);
+                        gate_adjoint+=input(node,local_input)*output_value;
+                    }
+                    const Precision gate_value=gate_adjoint*constant*probability
+                        *(Precision(1)-probability);
+                    input_adjoint(node,gate_index)=gate_value;
+                    linear_adjoint(node,gate_index)=gate_value*inverse;
+                    update+=density_scale*gate_value*linear_forward(node,gate_index);
+                },density_value);
+            Kokkos::single(Kokkos::PerTeam(team),[&]() {
+                density_adjoint(node)=density_value;
+            });
+        });
 }
 
 template<typename Precision>
@@ -419,6 +566,75 @@ int MaceNonlinearKokkosT<Precision>::tensor_product_harmonic_team_size() const
         interactions.begin(),interactions.end(),[selected](const auto& interaction) {
             return interaction.convolution.harmonic_team_size()==selected;
         }) ? selected : -1;
+}
+
+template<typename Precision>
+bool MaceNonlinearKokkosT<Precision>::fused_gate_normalization_reverse_available() const
+{
+#ifdef KOKKOS_ENABLE_CUDA
+    if constexpr(std::is_same_v<Precision,float>
+        &&std::is_same_v<Kokkos::DefaultExecutionSpace,Kokkos::Cuda>)
+        return mh1_fast_path&&std::all_of(
+            interactions.begin(),interactions.end(),[](const auto& interaction) {
+                return interaction.gate.supports_fused_normalized_reverse();
+            });
+#endif
+    return false;
+}
+
+template<typename Precision>
+bool MaceNonlinearKokkosT<Precision>::uses_fused_gate_normalization_reverse() const
+{
+    return fused_gate_normalization_reverse_enabled
+        &&fused_gate_normalization_reverse_available();
+}
+
+template<typename Precision>
+void MaceNonlinearKokkosT<Precision>::set_fused_gate_normalization_reverse(bool enabled)
+{
+    if(enabled&&!fused_gate_normalization_reverse_available())
+        throw std::invalid_argument(
+            "Fused gate-normalization reverse requires a compatible Float32 CUDA MACE-MH-1 evaluator.");
+    fused_gate_normalization_reverse_enabled=enabled;
+}
+
+template<typename Precision>
+bool MaceNonlinearKokkosT<Precision>::direct_node_tensor_reverse_available() const
+{
+#ifdef KOKKOS_ENABLE_CUDA
+    if constexpr(std::is_same_v<Precision,float>
+        &&std::is_same_v<Kokkos::DefaultExecutionSpace,Kokkos::Cuda>)
+        return mh1_fast_path&&std::all_of(
+            interactions.begin(),interactions.end(),[](const auto& interaction) {
+                return interaction.convolution.supports_direct_node_reverse();
+            });
+#endif
+    return false;
+}
+
+template<typename Precision>
+bool MaceNonlinearKokkosT<Precision>::uses_direct_node_tensor_reverse() const
+{
+    return direct_node_tensor_reverse_enabled
+        &&streamed_edges==MACEStreamedEdgesMode::all
+        &&direct_node_tensor_reverse_available();
+}
+
+template<typename Precision>
+void MaceNonlinearKokkosT<Precision>::set_direct_node_tensor_reverse(bool enabled)
+{
+    if(enabled&&!direct_node_tensor_reverse_available())
+        throw std::invalid_argument(
+            "Direct-node tensor reverse requires a compatible Float32 CUDA MACE-MH-1 evaluator.");
+    if(enabled&&!direct_node_tensor_reverse_enabled
+        &&streamed_edges==MACEStreamedEdgesMode::all) {
+        Kokkos::fence("MACE_Nonlinear direct-node reverse transition");
+        for(auto& state:states) {
+            state.edge_up_adj={};
+            state.edge_up_adj_storage={};
+        }
+    }
+    direct_node_tensor_reverse_enabled=enabled;
 }
 
 template<typename Precision>
@@ -941,28 +1157,36 @@ void MaceNonlinearKokkosT<Precision>::compute_node_energies_forces(int num_nodes
         ensure_view(state.pre_gate_adj,state.pre_gate_adj_storage,num_nodes,
             pre_gate_width);
         interaction.linear_2.reverse(state.interaction_output_adj,state.gated_adj);
-        interaction.gate.reverse(state.pre_gate,state.gated_adj,state.pre_gate_adj);
 
         ensure_view(state.linear_adj,state.linear_adj_storage,num_nodes,pre_gate_width);
         ensure_view(state.density_adj,state.density_adj_storage,num_nodes);
-        ordered_kokkos_deep_copy(state.density_adj,Precision(0));
-        auto linear_adj=state.linear_adj;
         auto density_adj=state.density_adj;
-        auto pre_gate_adj=state.pre_gate_adj;
-        auto linear_forward=state.linear_1_output;
-        auto layer_densities=state.densities;
-        const Precision alpha=interaction.alpha,beta=interaction.beta;
-        Kokkos::parallel_for("reverse nonlinear normalization",num_nodes,
-            KOKKOS_LAMBDA(int node) {
-                const Precision normalization=alpha+beta*layer_densities(node);
-                Precision density_value=Precision(0);
-                for(int k=0;k<pre_gate_width;++k) {
-                    linear_adj(node,k)=pre_gate_adj(node,k)/normalization;
-                    density_value-=pre_gate_adj(node,k)*linear_forward(node,k)*beta
-                        /(normalization*normalization);
-                }
-                density_adj(node)=density_value;
-            });
+        if(uses_fused_gate_normalization_reverse()
+            &&interaction.gate.supports_fused_normalized_reverse())
+            interaction.gate.reverse_normalized(
+                state.pre_gate,state.gated_adj,state.linear_1_output,state.densities,
+                interaction.alpha,interaction.beta,state.pre_gate_adj,state.linear_adj,
+                state.density_adj);
+        else {
+            interaction.gate.reverse(state.pre_gate,state.gated_adj,state.pre_gate_adj);
+            ordered_kokkos_deep_copy(state.density_adj,Precision(0));
+            auto linear_adj=state.linear_adj;
+            auto pre_gate_adj=state.pre_gate_adj;
+            auto linear_forward=state.linear_1_output;
+            auto layer_densities=state.densities;
+            const Precision alpha=interaction.alpha,beta=interaction.beta;
+            Kokkos::parallel_for("reverse nonlinear normalization",num_nodes,
+                KOKKOS_LAMBDA(int node) {
+                    const Precision normalization=alpha+beta*layer_densities(node);
+                    Precision density_value=Precision(0);
+                    for(int k=0;k<pre_gate_width;++k) {
+                        linear_adj(node,k)=pre_gate_adj(node,k)/normalization;
+                        density_value-=pre_gate_adj(node,k)*linear_forward(node,k)*beta
+                            /(normalization*normalization);
+                    }
+                    density_adj(node)=density_value;
+                });
+        }
 
         ensure_view(state.message_adj,state.message_adj_storage,num_nodes,message_width);
         interaction.linear_1.reverse(state.linear_adj,state.message_adj);
@@ -1026,46 +1250,63 @@ void MaceNonlinearKokkosT<Precision>::compute_node_energies_forces(int num_nodes
                                 *=local_cutoffs(first_edge+local_edge);
                         });
                 }
-                ensure_view(state.edge_up,state.edge_up_storage,samples,up_width);
-                auto edge_up=state.edge_up;
-                Kokkos::parallel_for(
-                    "stream reverse nonlinear gather edge up",
-                    Kokkos::MDRangePolicy<Kokkos::Rank<2>>(
-                        {0,0},{samples,up_width}),
-                    KOKKOS_LAMBDA(int local_edge,int k) {
-                        edge_up(local_edge,k)=up(neigh_indices(first_edge+local_edge),k);
-                    });
-                // Forward edge messages are dead before the streamed reverse
-                // pass, so the equally shaped adjoint can reuse their capacity.
-                ensure_view(state.edge_message_adj,state.edge_messages_storage,
-                    samples,message_width);
-                auto edge_message_adj=state.edge_message_adj;
-                Kokkos::parallel_for(
-                    "stream gather edge message adjoint",
-                    Kokkos::MDRangePolicy<Kokkos::Rank<2>>(
-                        {0,0},{samples,message_width}),
-                    KOKKOS_LAMBDA(int local_edge,int k) {
-                        edge_message_adj(local_edge,k)=
-                            local_message_adj(local_targets(first_edge+local_edge),k);
-                    });
-                ensure_view(state.edge_up_adj,state.edge_up_adj_storage,samples,up_width);
                 ensure_view(state.edge_harmonic_adj,state.edge_harmonic_adj_storage,
                     samples,num_lm);
                 ensure_view(state.weight_adj,state.weight_adj_storage,samples,weight_width);
-                interaction.convolution.reverse(
-                    state.edge_up,harmonics_block,state.weights,state.edge_message_adj,
-                    state.edge_up_adj,state.edge_harmonic_adj,state.weight_adj);
-                auto edge_up_adj=state.edge_up_adj;
+                const bool direct_node_reverse=uses_direct_node_tensor_reverse()
+                    &&interaction.convolution.supports_direct_node_reverse();
+                if(direct_node_reverse) {
+                    const bool dispatched=interaction.convolution.try_reverse_from_nodes(
+                        state.up,neigh_indices,first_edge,harmonics_block,state.weights,
+                        state.message_adj,local_targets,state.up_adj,
+                        state.edge_harmonic_adj,state.weight_adj);
+                    if(!dispatched)
+                        throw std::logic_error(
+                            "Qualified direct-node tensor reverse did not dispatch.");
+                } else {
+                    ensure_view(state.edge_up,state.edge_up_storage,samples,up_width);
+                    auto edge_up=state.edge_up;
+                    Kokkos::parallel_for(
+                        "stream reverse nonlinear gather edge up",
+                        Kokkos::MDRangePolicy<Kokkos::Rank<2>>(
+                            {0,0},{samples,up_width}),
+                        KOKKOS_LAMBDA(int local_edge,int k) {
+                            edge_up(local_edge,k)=
+                                up(neigh_indices(first_edge+local_edge),k);
+                        });
+                    // Forward edge messages are dead before the streamed reverse
+                    // pass, so the equally shaped adjoint can reuse their capacity.
+                    ensure_view(state.edge_message_adj,state.edge_messages_storage,
+                        samples,message_width);
+                    auto edge_message_adj=state.edge_message_adj;
+                    Kokkos::parallel_for(
+                        "stream gather edge message adjoint",
+                        Kokkos::MDRangePolicy<Kokkos::Rank<2>>(
+                            {0,0},{samples,message_width}),
+                        KOKKOS_LAMBDA(int local_edge,int k) {
+                            edge_message_adj(local_edge,k)=
+                                local_message_adj(
+                                    local_targets(first_edge+local_edge),k);
+                        });
+                    ensure_view(state.edge_up_adj,state.edge_up_adj_storage,
+                        samples,up_width);
+                    interaction.convolution.reverse(
+                        state.edge_up,harmonics_block,state.weights,
+                        state.edge_message_adj,state.edge_up_adj,
+                        state.edge_harmonic_adj,state.weight_adj);
+                    auto edge_up_adj=state.edge_up_adj;
+                    Kokkos::parallel_for(
+                        "stream scatter edge up adjoint",
+                        Kokkos::MDRangePolicy<Kokkos::Rank<2>>(
+                            {0,0},{samples,up_width}),
+                        KOKKOS_LAMBDA(int local_edge,int k) {
+                            Kokkos::atomic_add(
+                                &local_up_adj(
+                                    neigh_indices(first_edge+local_edge),k),
+                                edge_up_adj(local_edge,k));
+                        });
+                }
                 auto edge_harmonic_adj=state.edge_harmonic_adj;
-                Kokkos::parallel_for(
-                    "stream scatter edge up adjoint",
-                    Kokkos::MDRangePolicy<Kokkos::Rank<2>>(
-                        {0,0},{samples,up_width}),
-                    KOKKOS_LAMBDA(int local_edge,int k) {
-                        Kokkos::atomic_add(
-                            &local_up_adj(neigh_indices(first_edge+local_edge),k),
-                            edge_up_adj(local_edge,k));
-                    });
                 Kokkos::parallel_for(
                     "stream sum harmonic adjoints",
                     Kokkos::MDRangePolicy<Kokkos::Rank<2>>(
@@ -1080,19 +1321,50 @@ void MaceNonlinearKokkosT<Precision>::compute_node_energies_forces(int num_nodes
                 auto weight_adj=state.weight_adj;
                 auto raw_weights=state.raw_weights;
                 if(!apply_cutoff) {
-                    Kokkos::parallel_for(
-                        "stream reverse convolution cutoff",samples,
-                        KOKKOS_LAMBDA(int local_edge) {
-                            const int edge=first_edge+local_edge;
-                            Precision cutoff_value=Precision(0);
-                            for(int k=0;k<weight_width;++k) {
-                                cutoff_value+=weight_adj(local_edge,k)
-                                    *raw_weights(local_edge,k);
-                                raw_weight_adj(local_edge,k)=
-                                    weight_adj(local_edge,k)*local_cutoffs(edge);
-                            }
-                            cutoff_adjoint_values(edge)+=cutoff_value;
-                        });
+                    if(direct_node_reverse) {
+                        using cutoff_policy=Kokkos::TeamPolicy<>;
+                        constexpr int warp_size=32;
+                        const int cutoff_team_size=std::min(
+                            128,std::max(
+                                warp_size,
+                                ((weight_width+warp_size-1)/warp_size)*warp_size));
+                        Kokkos::parallel_for(
+                            "stream reverse convolution cutoff team",
+                            cutoff_policy(samples,cutoff_team_size),
+                            KOKKOS_LAMBDA(
+                                const typename cutoff_policy::member_type& team) {
+                                const int local_edge=team.league_rank();
+                                const int edge=first_edge+local_edge;
+                                Precision cutoff_value=Precision(0);
+                                Kokkos::parallel_reduce(
+                                    Kokkos::TeamThreadRange(team,weight_width),
+                                    [&](const int k,Precision& update) {
+                                        update+=weight_adj(local_edge,k)
+                                            *raw_weights(local_edge,k);
+                                        raw_weight_adj(local_edge,k)=
+                                            weight_adj(local_edge,k)
+                                            *local_cutoffs(edge);
+                                    },cutoff_value);
+                                Kokkos::single(Kokkos::PerTeam(team),[&]() {
+                                    cutoff_adjoint_values(edge)+=cutoff_value;
+                                });
+                            });
+                    } else {
+                        Kokkos::parallel_for(
+                            "stream reverse convolution cutoff",samples,
+                            KOKKOS_LAMBDA(int local_edge) {
+                                const int edge=first_edge+local_edge;
+                                Precision cutoff_value=Precision(0);
+                                for(int k=0;k<weight_width;++k) {
+                                    cutoff_value+=weight_adj(local_edge,k)
+                                        *raw_weights(local_edge,k);
+                                    raw_weight_adj(local_edge,k)=
+                                        weight_adj(local_edge,k)
+                                        *local_cutoffs(edge);
+                                }
+                                cutoff_adjoint_values(edge)+=cutoff_value;
+                            });
+                    }
                 } else ordered_kokkos_deep_copy(raw_weight_adj,weight_adj);
                 ensure_view(state.edge_feature_adj,state.edge_feature_adj_storage,
                     samples,num_bessel);

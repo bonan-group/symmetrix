@@ -60,6 +60,24 @@ void bind_mace_nonlinear_kokkos_evaluator(
         .def_property_readonly(
             "tensor_product_harmonic_team_size",
             &Evaluator::tensor_product_harmonic_team_size)
+        .def(
+            "set_fused_gate_normalization_reverse",
+            &Evaluator::set_fused_gate_normalization_reverse)
+        .def_property_readonly(
+            "fused_gate_normalization_reverse_available",
+            &Evaluator::fused_gate_normalization_reverse_available)
+        .def_property_readonly(
+            "uses_fused_gate_normalization_reverse",
+            &Evaluator::uses_fused_gate_normalization_reverse)
+        .def(
+            "set_direct_node_tensor_reverse",
+            &Evaluator::set_direct_node_tensor_reverse)
+        .def_property_readonly(
+            "direct_node_tensor_reverse_available",
+            &Evaluator::direct_node_tensor_reverse_available)
+        .def_property_readonly(
+            "uses_direct_node_tensor_reverse",
+            &Evaluator::uses_direct_node_tensor_reverse)
         .def_property_readonly("linear_workspace_bytes",&Evaluator::linear_workspace_bytes)
         .def_property_readonly("tensor_workspace_bytes",&Evaluator::tensor_workspace_bytes)
         .def_property_readonly("precision_workspace_bytes",&Evaluator::precision_workspace_bytes)
