@@ -80,3 +80,61 @@ the force-L2 difference is `2.31e-8 eV/A`, consistent with the changed
 Float32 harmonic reduction order. Raw results are
 `/tmp/mh1-c256-e64-dynamic64.json` and
 `/tmp/mh1-c256-e64-fixed128.json`.
+
+## Fused reverse-kernel milestone
+
+The first Phase 67 reverse fusion is implemented by commit
+`f82f2074bf74074654eda3d4774b80cf5668849d`. The machine, model, 864-atom
+AlN graph, CUDA 13.3 build, CPU 0 affinity, three warmups, ten synchronized
+repeats, Float32 precision, and `streamed_edges="all"` protocol match the
+published-model gate above. The model SHA-256 is
+`8384b616054cc4391531ca95af7f9b4737ce902628701faaf8e54878b5a79f00`.
+
+Two independent runtime controls isolate the retained changes:
+`fused_gate_normalization_reverse` fuses the gate and normalization adjoints
+per node, while `direct_node_tensor_reverse` consumes source-node values and
+target-node message adjoints directly. The latter removes the reverse edge-up
+gather, edge-message-adjoint materialization, edge-up-adjoint allocation, and
+source scatter. Both controls default on only when their qualified Float32
+CUDA MH-1 predicates hold; the previous kernels remain the fallback and the
+benchmark can force either control off.
+
+| Configuration | Median time | Time per atom | GPU memory before | GPU memory after | Edge workspace | Precision workspace |
+|---|---:|---:|---:|---:|---:|---:|
+| Same-build control, both fusions off | 62.329 ms | 0.072140 ms | 506 MiB | 3,184 MiB | 1,486,880,768 bytes | 1,548,812,288 bytes |
+| Fused node reverse only | 55.649 ms | 0.064408 ms | 506 MiB | 3,184 MiB | 1,486,880,768 bytes | 1,548,812,288 bytes |
+| Direct tensor reverse only, before team cutoff adjoint | 49.075 ms | 0.056800 ms | 506 MiB | 3,140 MiB | 1,444,937,728 bytes | 1,506,869,248 bytes |
+| Both fusions plus team cutoff adjoint | 40.669 ms | 0.047070 ms | 506 MiB | 3,140 MiB | 1,444,937,728 bytes | 1,506,869,248 bytes |
+
+The retained result is 34.8% faster than the same-build control and removes
+40 MiB of evaluator workspace. Absolute post-initialization process memory
+falls by 44 MiB. It also improves the earlier committed 61.894 ms anchor by
+34.3%, but remains approximately 1.96 times the historical 20.793 ms
+cuEquivariance result. This milestone therefore clears its 42-48 ms target
+after the cutoff reduction was parallelized, without yet closing the full
+backend gap.
+
+Retained raw samples (ms):
+
+```text
+40.196233, 40.202124, 40.203567, 40.363234, 40.326736,
+42.619032, 44.245648, 44.193611, 41.968872, 40.974131
+```
+
+The reviewed result is `/tmp/mh1-phase67-f82f207.json`. Its metadata records
+implementation revision `f82f2074bf74074654eda3d4774b80cf5668849d` and
+tracked-diff SHA-256
+`dd2cebf4dc3fc14ee79df7f44be81bacdc1cbdac8280164663b82a15b4f8301d`.
+The tracked difference at measurement time contains only this pending report;
+the runtime, bindings, benchmark harness, and tests exactly match the recorded
+implementation revision. Both fusion controls report requested `on`,
+available `true`, and effective `true` in the artifact.
+
+The retained Nsight Systems trace reports approximately 0.243 ms per
+evaluation for the fused node reverse, 2.079 ms for the direct channel/weight
+tensor adjoint, 4.695 ms for its separate harmonic adjoint, and 0.826 ms for
+the parallel cutoff adjoint. It confirms that the eliminated reverse gather,
+materialization, and scatter launches are absent. Kernel count remains 882 per
+evaluation because the next dominant work is on the forward edge path,
+support transforms, affine epilogues, and product-basis contractions. Those
+operator boundaries are the Phase 68 fusion target.
