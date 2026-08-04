@@ -1,6 +1,23 @@
+import gc
+
 import pytest
 
-from model_downloads import MODEL_URLS, cached_model_path, macefield_model_path as cached_macefield_model_path
+from model_downloads import (
+    MODEL_URLS,
+    cached_model_path,
+    macefield_model_path as cached_macefield_model_path,
+)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def finalize_kokkos_after_tests():
+    yield
+
+    import symmetrix
+
+    gc.collect()
+    if symmetrix._kokkos_is_initialized():
+        symmetrix._finalize_kokkos()
 
 
 @pytest.fixture(scope="session")

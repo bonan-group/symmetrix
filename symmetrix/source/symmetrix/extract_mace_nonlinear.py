@@ -110,11 +110,17 @@ def _affine_mlp(module) -> dict[str, Any]:
 def _interaction(interaction) -> dict[str, Any]:
     scalar_activations = interaction.equivariant_nonlin.act_scalars.acts
     gate_activations = interaction.equivariant_nonlin.act_gates.acts
-    if not all(activation.f is torch.nn.functional.silu for activation in scalar_activations):
-        raise RuntimeError("Native nonlinear-MACE extraction requires SiLU scalar gate activations.")
+    if not all(
+        activation.f is torch.nn.functional.silu for activation in scalar_activations
+    ):
+        raise RuntimeError(
+            "Native nonlinear-MACE extraction requires SiLU scalar gate activations."
+        )
     supported_sigmoids = (torch.sigmoid, torch.nn.functional.sigmoid)
     if not all(activation.f in supported_sigmoids for activation in gate_activations):
-        raise RuntimeError("Native nonlinear-MACE extraction requires sigmoid tensor gate activations.")
+        raise RuntimeError(
+            "Native nonlinear-MACE extraction requires sigmoid tensor gate activations."
+        )
     return {
         "class": type(interaction).__name__,
         "node_feats_irreps": str(interaction.node_feats_irreps),
@@ -143,13 +149,11 @@ def _interaction(interaction) -> dict[str, Any]:
             "mul": _tensor_product(interaction.equivariant_nonlin.mul),
             "scalar_activation": "silu",
             "scalar_activation_constants": [
-                float(activation.cst)
-                for activation in scalar_activations
+                float(activation.cst) for activation in scalar_activations
             ],
             "gate_activation": "sigmoid",
             "gate_activation_constants": [
-                float(activation.cst)
-                for activation in gate_activations
+                float(activation.cst) for activation in gate_activations
             ],
         },
     }
@@ -196,7 +200,9 @@ def extract_mace_nonlinear_data(model, atomic_numbers: list[int]) -> dict[str, A
             "RealAgnosticResidualNonLinearInteractionBlock."
         )
     if len(model.products) != len(model.interactions):
-        raise RuntimeError("MACE_Nonlinear model has mismatched interaction and product counts.")
+        raise RuntimeError(
+            "MACE_Nonlinear model has mismatched interaction and product counts."
+        )
     if hasattr(model, "joint_embedding") or hasattr(model, "embedding_readout"):
         raise RuntimeError(
             "Native nonlinear-MACE extraction does not support joint_embedding or embedding_readout."
@@ -206,8 +212,12 @@ def extract_mace_nonlinear_data(model, atomic_numbers: list[int]) -> dict[str, A
             "Native nonlinear-MACE extraction does not support use_last_readout_only models."
         )
     if len(model.readouts) != len(model.interactions):
-        raise RuntimeError("MACE_Nonlinear model has mismatched interaction and readout counts.")
-    if getattr(model, "pair_repulsion", False) and not hasattr(model, "pair_repulsion_fn"):
+        raise RuntimeError(
+            "MACE_Nonlinear model has mismatched interaction and readout counts."
+        )
+    if getattr(model, "pair_repulsion", False) and not hasattr(
+        model, "pair_repulsion_fn"
+    ):
         raise RuntimeError("MACE_Nonlinear pair repulsion is missing its basis module.")
 
     model_atomic_numbers = [int(value) for value in model.atomic_numbers.tolist()]
@@ -224,21 +234,29 @@ def extract_mace_nonlinear_data(model, atomic_numbers: list[int]) -> dict[str, A
 
     radial = model.radial_embedding
     if type(radial.bessel_fn).__name__ != "BesselBasis":
-        raise RuntimeError("Native nonlinear-MACE extraction currently requires BesselBasis.")
+        raise RuntimeError(
+            "Native nonlinear-MACE extraction currently requires BesselBasis."
+        )
     if type(radial.cutoff_fn).__name__ != "PolynomialCutoff":
-        raise RuntimeError("Native nonlinear-MACE extraction currently requires PolynomialCutoff.")
+        raise RuntimeError(
+            "Native nonlinear-MACE extraction currently requires PolynomialCutoff."
+        )
 
     distance_transform = {"type": "none"}
     if getattr(radial, "distance_transform", None) is not None:
         transform = radial.distance_transform
         if type(transform).__name__ != "AgnesiTransform":
-            raise RuntimeError("Native nonlinear-MACE extraction currently requires AgnesiTransform or no transform.")
+            raise RuntimeError(
+                "Native nonlinear-MACE extraction currently requires AgnesiTransform or no transform."
+            )
         distance_transform = {
             "type": "agnesi",
             "a": float(transform.a),
             "q": float(transform.q),
             "p": float(transform.p),
-            "covalent_radii": [float(value) for value in transform.covalent_radii.numpy(force=True)],
+            "covalent_radii": [
+                float(value) for value in transform.covalent_radii.numpy(force=True)
+            ],
         }
 
     from mace.modules.blocks import LinearReadoutBlock, NonLinearReadoutBlock
@@ -260,7 +278,9 @@ def extract_mace_nonlinear_data(model, atomic_numbers: list[int]) -> dict[str, A
     output = {
         "symmetrix_format_version": 3,
         "model_type": "MACE_Nonlinear",
-        "head": model.heads[0] if hasattr(model, "heads") and len(model.heads) == 1 else None,
+        "head": model.heads[0]
+        if hasattr(model, "heads") and len(model.heads) == 1
+        else None,
         "atomic_numbers": atomic_numbers,
         "model_atomic_numbers": model_atomic_numbers,
         "model_indices": model_indices,
@@ -288,7 +308,9 @@ def extract_mace_nonlinear_data(model, atomic_numbers: list[int]) -> dict[str, A
             },
             "distance_transform": distance_transform,
         },
-        "interactions": [_interaction(interaction) for interaction in model.interactions],
+        "interactions": [
+            _interaction(interaction) for interaction in model.interactions
+        ],
         "products": [_product(product) for product in model.products],
         "readouts": [
             {
@@ -304,9 +326,10 @@ def extract_mace_nonlinear_data(model, atomic_numbers: list[int]) -> dict[str, A
                 else None,
                 "activation": "silu" if hasattr(readout, "non_linearity") else None,
                 "activation_constants": [
-                    float(activation.cst)
-                    for activation in readout.non_linearity.acts
-                ] if hasattr(readout, "non_linearity") else None,
+                    float(activation.cst) for activation in readout.non_linearity.acts
+                ]
+                if hasattr(readout, "non_linearity")
+                else None,
             }
             for readout in model.readouts
         ],

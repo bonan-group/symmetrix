@@ -17,7 +17,10 @@ try:
         _standalone_field_transform,
     )
 except ImportError as exc:
-    pytest.skip(f"MACEField native test dependencies are not available: {exc}", allow_module_level=True)
+    pytest.skip(
+        f"MACEField native test dependencies are not available: {exc}",
+        allow_module_level=True,
+    )
 
 
 try:
@@ -55,7 +58,9 @@ def _compact_to_native_h1(compact):
     compact = np.asarray(compact)
     native = np.zeros((compact.shape[0], 4, 128), dtype=np.float64)
     native[:, 0, :] = compact[:, :128]
-    native[:, 1:, :] = -compact[:, 128:].reshape(compact.shape[0], 128, 3).transpose(0, 2, 1)
+    native[:, 1:, :] = (
+        -compact[:, 128:].reshape(compact.shape[0], 128, 3).transpose(0, 2, 1)
+    )
     return native.reshape(-1)
 
 
@@ -80,7 +85,9 @@ def test_native_compute_field_h1_matches_standalone_transform(macefield_json_pat
     ).numpy(force=True)
 
     evaluator.H1 = _compact_to_native_h1(h1_pre.numpy(force=True)).tolist()
-    evaluator.compute_field_H1(h1_pre.shape[0], electric_field.numpy(force=True).reshape(-1))
+    evaluator.compute_field_H1(
+        h1_pre.shape[0], electric_field.numpy(force=True).reshape(-1)
+    )
 
     actual = _native_to_compact_h1(evaluator.H1, h1_pre.shape[0])
     assert np.allclose(actual, expected, atol=1e-12, rtol=1e-12)
@@ -100,15 +107,25 @@ def test_native_reverse_field_h1_matches_torch_autograd(macefield_json_path):
     torch.sum(h1_post * h1_post_adj).backward()
 
     evaluator.H1 = _compact_to_native_h1(h1_pre.detach().numpy(force=True)).tolist()
-    evaluator.compute_field_H1(h1_pre.shape[0], electric_field.detach().numpy(force=True).reshape(-1))
+    evaluator.compute_field_H1(
+        h1_pre.shape[0], electric_field.detach().numpy(force=True).reshape(-1)
+    )
     evaluator.H1_adj = _compact_to_native_h1(h1_post_adj.numpy(force=True)).tolist()
-    evaluator.reverse_field_H1(h1_pre.shape[0], electric_field.detach().numpy(force=True).reshape(-1))
+    evaluator.reverse_field_H1(
+        h1_pre.shape[0], electric_field.detach().numpy(force=True).reshape(-1)
+    )
 
     actual_h1_adj = _native_to_compact_h1(evaluator.H1_adj, h1_pre.shape[0])
-    actual_field_adj = np.asarray(evaluator.electric_field_adj, dtype=np.float64).reshape(h1_pre.shape[0], 3)
+    actual_field_adj = np.asarray(
+        evaluator.electric_field_adj, dtype=np.float64
+    ).reshape(h1_pre.shape[0], 3)
 
-    assert np.allclose(actual_h1_adj, h1_pre.grad.numpy(force=True), atol=1e-12, rtol=1e-12)
-    assert np.allclose(actual_field_adj, electric_field.grad.numpy(force=True), atol=1e-12, rtol=1e-12)
+    assert np.allclose(
+        actual_h1_adj, h1_pre.grad.numpy(force=True), atol=1e-12, rtol=1e-12
+    )
+    assert np.allclose(
+        actual_field_adj, electric_field.grad.numpy(force=True), atol=1e-12, rtol=1e-12
+    )
 
 
 def test_kokkos_compute_field_h1_matches_native_transform(macefield_json_path):
@@ -128,7 +145,9 @@ def test_kokkos_compute_field_h1_matches_native_transform(macefield_json_path):
     ).numpy(force=True)
 
     evaluator.H1 = _compact_to_native_h1(h1_pre.numpy(force=True))
-    evaluator.compute_field_H1(h1_pre.shape[0], electric_field.numpy(force=True).reshape(-1))
+    evaluator.compute_field_H1(
+        h1_pre.shape[0], electric_field.numpy(force=True).reshape(-1)
+    )
 
     actual = _native_to_compact_h1(evaluator.H1, h1_pre.shape[0])
     assert np.allclose(actual, expected, atol=1e-12, rtol=1e-12)
@@ -146,21 +165,33 @@ def test_kokkos_reverse_field_h1_matches_native_reverse(macefield_json_path):
 
     native = native_symmetrix.MACE(str(macefield_json_path))
     native.H1 = _compact_to_native_h1(h1_pre.numpy(force=True)).tolist()
-    native.compute_field_H1(h1_pre.shape[0], electric_field.numpy(force=True).reshape(-1))
+    native.compute_field_H1(
+        h1_pre.shape[0], electric_field.numpy(force=True).reshape(-1)
+    )
     native.H1_adj = _compact_to_native_h1(h1_post_adj.numpy(force=True)).tolist()
-    native.reverse_field_H1(h1_pre.shape[0], electric_field.numpy(force=True).reshape(-1))
+    native.reverse_field_H1(
+        h1_pre.shape[0], electric_field.numpy(force=True).reshape(-1)
+    )
 
     kokkos = native_symmetrix.MACEKokkos(str(macefield_json_path))
     kokkos.H1 = _compact_to_native_h1(h1_pre.numpy(force=True))
-    kokkos.compute_field_H1(h1_pre.shape[0], electric_field.numpy(force=True).reshape(-1))
+    kokkos.compute_field_H1(
+        h1_pre.shape[0], electric_field.numpy(force=True).reshape(-1)
+    )
     kokkos.H1_adj = _compact_to_native_h1(h1_post_adj.numpy(force=True))
-    kokkos.reverse_field_H1(h1_pre.shape[0], electric_field.numpy(force=True).reshape(-1))
+    kokkos.reverse_field_H1(
+        h1_pre.shape[0], electric_field.numpy(force=True).reshape(-1)
+    )
 
     assert np.allclose(kokkos.H1_adj, native.H1_adj, atol=1e-12, rtol=1e-12)
-    assert np.allclose(kokkos.electric_field_adj, native.electric_field_adj, atol=1e-12, rtol=1e-12)
+    assert np.allclose(
+        kokkos.electric_field_adj, native.electric_field_adj, atol=1e-12, rtol=1e-12
+    )
 
 
-def test_native_field_energy_forces_match_ase_macefield(macefield_full_json_path, macefield_model_path):
+def test_native_field_energy_forces_match_ase_macefield(
+    macefield_full_json_path, macefield_model_path
+):
     atoms = bulk("AlN", "wurtzite", a=3.112, c=4.982)
     electric_field = np.array([0.01, 0.0, 0.0], dtype=np.float64)
     atoms.info["electric_field"] = electric_field
@@ -181,7 +212,9 @@ def test_native_field_energy_forces_match_ase_macefield(macefield_full_json_path
     mace_atomic_numbers = evaluator.atomic_numbers
     i_list, j_list, r, xyz = neighbor_list("ijdD", atoms, evaluator.r_cut)
     num_nodes = len(atoms)
-    node_types = [mace_atomic_numbers.index(atomic_numbers[i]) for i in range(num_nodes)]
+    node_types = [
+        mace_atomic_numbers.index(atomic_numbers[i]) for i in range(num_nodes)
+    ]
     num_neigh = np.bincount(j_list, minlength=num_nodes)
     neigh_types = [mace_atomic_numbers.index(atomic_numbers[j]) for j in j_list]
     per_atom_field = np.tile(electric_field, (num_nodes, 1))
@@ -201,10 +234,9 @@ def test_native_field_energy_forces_match_ase_macefield(macefield_full_json_path
     pair_forces = np.asarray(evaluator.node_forces).reshape((-1, 3))[: len(i_list), :]
     native_forces = np.zeros((num_nodes, 3))
     for component in range(3):
-        native_forces[:, component] = (
-            np.bincount(j_list, weights=pair_forces[:, component], minlength=num_nodes)
-            - np.bincount(i_list, weights=pair_forces[:, component], minlength=num_nodes)
-        )
+        native_forces[:, component] = np.bincount(
+            j_list, weights=pair_forces[:, component], minlength=num_nodes
+        ) - np.bincount(i_list, weights=pair_forces[:, component], minlength=num_nodes)
 
     assert np.allclose(native_energy, expected_energy, atol=1e-3)
     assert np.allclose(native_forces, expected_forces, atol=2e-3)
@@ -223,9 +255,14 @@ def _field_backend_inputs(evaluator):
     mace_atomic_numbers = evaluator.atomic_numbers
     i_list, j_list, r, xyz = neighbor_list("ijdD", atoms, evaluator.r_cut)
     num_nodes = len(atoms)
-    node_types = np.asarray([mace_atomic_numbers.index(atomic_numbers[i]) for i in range(num_nodes)], dtype=np.int32)
+    node_types = np.asarray(
+        [mace_atomic_numbers.index(atomic_numbers[i]) for i in range(num_nodes)],
+        dtype=np.int32,
+    )
     num_neigh = np.asarray(np.bincount(j_list, minlength=num_nodes), dtype=np.int32)
-    neigh_types = np.asarray([mace_atomic_numbers.index(atomic_numbers[j]) for j in j_list], dtype=np.int32)
+    neigh_types = np.asarray(
+        [mace_atomic_numbers.index(atomic_numbers[j]) for j in j_list], dtype=np.int32
+    )
     neigh_indices = np.asarray(j_list, dtype=np.int32)
     return num_nodes, node_types, num_neigh, neigh_indices, neigh_types, xyz, r, i_list
 
@@ -237,7 +274,9 @@ def test_kokkos_field_energy_forces_match_native(macefield_full_json_path):
 
     native = native_symmetrix.MACE(str(macefield_full_json_path))
     kokkos = native_symmetrix.MACEKokkos(str(macefield_full_json_path))
-    num_nodes, node_types, num_neigh, neigh_indices, neigh_types, xyz, r, _ = _field_backend_inputs(native)
+    num_nodes, node_types, num_neigh, neigh_indices, neigh_types, xyz, r, _ = (
+        _field_backend_inputs(native)
+    )
 
     native.compute_node_energies_forces_field(
         num_nodes,
@@ -260,7 +299,9 @@ def test_kokkos_field_energy_forces_match_native(macefield_full_json_path):
         electric_field,
     )
 
-    assert np.sum(kokkos.node_energies) == pytest.approx(np.sum(native.node_energies), abs=1e-8)
+    assert np.sum(kokkos.node_energies) == pytest.approx(
+        np.sum(native.node_energies), abs=1e-8
+    )
     assert np.allclose(kokkos.node_forces, native.node_forces, atol=1e-8, rtol=1e-8)
 
 
@@ -283,7 +324,9 @@ def test_kokkos_electric_field_hessian_matches_native(
 
     native = native_symmetrix.MACE(str(macefield_full_json_path))
     kokkos = getattr(native_symmetrix, kokkos_class)(str(macefield_full_json_path))
-    num_nodes, node_types, num_neigh, neigh_indices, neigh_types, xyz, r, _ = _field_backend_inputs(native)
+    num_nodes, node_types, num_neigh, neigh_indices, neigh_types, xyz, r, _ = (
+        _field_backend_inputs(native)
+    )
 
     native.compute_electric_field_hessian(
         num_nodes,
@@ -333,7 +376,9 @@ def test_kokkos_electric_field_force_derivative_matches_native(
 
     native = native_symmetrix.MACE(str(macefield_full_json_path))
     kokkos = getattr(native_symmetrix, kokkos_class)(str(macefield_full_json_path))
-    num_nodes, node_types, num_neigh, neigh_indices, neigh_types, xyz, r, i_list = _field_backend_inputs(native)
+    num_nodes, node_types, num_neigh, neigh_indices, neigh_types, xyz, r, i_list = (
+        _field_backend_inputs(native)
+    )
 
     native.compute_electric_field_force_derivative(
         num_nodes,
@@ -356,8 +401,12 @@ def test_kokkos_electric_field_force_derivative_matches_native(
         electric_field,
     )
 
-    native_deriv = np.asarray(native.electric_field_force_derivative, dtype=np.float64).reshape(3, -1, 3)
-    kokkos_deriv = np.asarray(kokkos.electric_field_force_derivative, dtype=np.float64).reshape(3, -1, 3)
+    native_deriv = np.asarray(
+        native.electric_field_force_derivative, dtype=np.float64
+    ).reshape(3, -1, 3)
+    kokkos_deriv = np.asarray(
+        kokkos.electric_field_force_derivative, dtype=np.float64
+    ).reshape(3, -1, 3)
     assert np.allclose(
         kokkos_deriv[:, : len(i_list)],
         native_deriv[:, : len(i_list)],
@@ -375,7 +424,9 @@ def test_native_exposes_atomic_energies_for_node_energy(macefield_full_json_path
     assert np.all(np.isfinite(atomic_energies))
 
 
-def test_native_electric_field_hessian_matches_field_adjoint_finite_difference(macefield_full_json_path):
+def test_native_electric_field_hessian_matches_field_adjoint_finite_difference(
+    macefield_full_json_path,
+):
     atoms = bulk("AlN", "wurtzite", a=3.112, c=4.982)
     electric_field = np.array([0.01, -0.02, 0.03], dtype=np.float64)
 
@@ -384,9 +435,14 @@ def test_native_electric_field_hessian_matches_field_adjoint_finite_difference(m
     mace_atomic_numbers = evaluator.atomic_numbers
     i_list, j_list, r, xyz = neighbor_list("ijdD", atoms, evaluator.r_cut)
     num_nodes = len(atoms)
-    node_types = np.asarray([mace_atomic_numbers.index(atomic_numbers[i]) for i in range(num_nodes)], dtype=np.int32)
+    node_types = np.asarray(
+        [mace_atomic_numbers.index(atomic_numbers[i]) for i in range(num_nodes)],
+        dtype=np.int32,
+    )
     num_neigh = np.asarray(np.bincount(j_list, minlength=num_nodes), dtype=np.int32)
-    neigh_types = np.asarray([mace_atomic_numbers.index(atomic_numbers[j]) for j in j_list], dtype=np.int32)
+    neigh_types = np.asarray(
+        [mace_atomic_numbers.index(atomic_numbers[j]) for j in j_list], dtype=np.int32
+    )
     neigh_indices = np.asarray(j_list, dtype=np.int32)
 
     evaluator.compute_electric_field_hessian(
@@ -399,7 +455,9 @@ def test_native_electric_field_hessian_matches_field_adjoint_finite_difference(m
         r,
         electric_field,
     )
-    actual = np.asarray(evaluator.electric_field_hessian, dtype=np.float64).reshape(3, 3)
+    actual = np.asarray(evaluator.electric_field_hessian, dtype=np.float64).reshape(
+        3, 3
+    )
 
     step = 1e-4
     expected = np.zeros((3, 3))
@@ -430,12 +488,14 @@ def test_native_electric_field_hessian_matches_field_adjoint_finite_difference(m
             field_minus,
         )
         adj_minus = np.asarray(evaluator.electric_field_adj, dtype=np.float64)
-        expected[:, component] = (adj_plus - adj_minus) / (2.0*step)
+        expected[:, component] = (adj_plus - adj_minus) / (2.0 * step)
 
     assert np.allclose(actual, expected, atol=2e-6, rtol=2e-5)
 
 
-def test_native_electric_field_force_derivative_matches_force_finite_difference(macefield_full_json_path):
+def test_native_electric_field_force_derivative_matches_force_finite_difference(
+    macefield_full_json_path,
+):
     atoms = bulk("AlN", "wurtzite", a=3.112, c=4.982)
     electric_field = np.array([0.01, -0.02, 0.03], dtype=np.float64)
 
@@ -444,9 +504,14 @@ def test_native_electric_field_force_derivative_matches_force_finite_difference(
     mace_atomic_numbers = evaluator.atomic_numbers
     i_list, j_list, r, xyz = neighbor_list("ijdD", atoms, evaluator.r_cut)
     num_nodes = len(atoms)
-    node_types = np.asarray([mace_atomic_numbers.index(atomic_numbers[i]) for i in range(num_nodes)], dtype=np.int32)
+    node_types = np.asarray(
+        [mace_atomic_numbers.index(atomic_numbers[i]) for i in range(num_nodes)],
+        dtype=np.int32,
+    )
     num_neigh = np.asarray(np.bincount(j_list, minlength=num_nodes), dtype=np.int32)
-    neigh_types = np.asarray([mace_atomic_numbers.index(atomic_numbers[j]) for j in j_list], dtype=np.int32)
+    neigh_types = np.asarray(
+        [mace_atomic_numbers.index(atomic_numbers[j]) for j in j_list], dtype=np.int32
+    )
     neigh_indices = np.asarray(j_list, dtype=np.int32)
 
     evaluator.compute_electric_field_force_derivative(
@@ -459,7 +524,9 @@ def test_native_electric_field_force_derivative_matches_force_finite_difference(
         r,
         electric_field,
     )
-    actual = np.asarray(evaluator.electric_field_force_derivative, dtype=np.float64).reshape(3, -1, 3)
+    actual = np.asarray(
+        evaluator.electric_field_force_derivative, dtype=np.float64
+    ).reshape(3, -1, 3)
 
     step = 1e-4
     expected = np.zeros_like(actual)
@@ -478,7 +545,9 @@ def test_native_electric_field_force_derivative_matches_force_finite_difference(
             r,
             field_plus,
         )
-        forces_plus = np.asarray(evaluator.node_forces, dtype=np.float64).reshape((-1, 3))[: len(i_list)]
+        forces_plus = np.asarray(evaluator.node_forces, dtype=np.float64).reshape(
+            (-1, 3)
+        )[: len(i_list)]
         evaluator.compute_node_energies_forces_field(
             num_nodes,
             node_types,
@@ -489,10 +558,14 @@ def test_native_electric_field_force_derivative_matches_force_finite_difference(
             r,
             field_minus,
         )
-        forces_minus = np.asarray(evaluator.node_forces, dtype=np.float64).reshape((-1, 3))[: len(i_list)]
-        expected[component] = (forces_plus - forces_minus) / (2.0*step)
+        forces_minus = np.asarray(evaluator.node_forces, dtype=np.float64).reshape(
+            (-1, 3)
+        )[: len(i_list)]
+        expected[component] = (forces_plus - forces_minus) / (2.0 * step)
 
-    assert np.allclose(actual[:, : len(i_list)], expected[:, : len(i_list)], atol=2e-6, rtol=2e-5)
+    assert np.allclose(
+        actual[:, : len(i_list)], expected[:, : len(i_list)], atol=2e-6, rtol=2e-5
+    )
 
 
 def _compact_field_coupling_from_json(path):
@@ -509,8 +582,12 @@ def _compact_field_coupling_from_json(path):
     field_feats.irreps_in1 = coupling["field_feats_irreps_in1"]
     field_feats.irreps_in2 = coupling["field_feats_irreps_in2"]
     field_feats.irreps_out = coupling["field_feats_irreps_out"]
-    field_feats.output_mask = torch.tensor(coupling["field_feats_output_mask"], dtype=torch.float64)
-    field_feats.weight = torch.tensor(coupling["field_feats_weight"], dtype=torch.float64)
+    field_feats.output_mask = torch.tensor(
+        coupling["field_feats_output_mask"], dtype=torch.float64
+    )
+    field_feats.weight = torch.tensor(
+        coupling["field_feats_weight"], dtype=torch.float64
+    )
     field_feats.instructions = []
     for item in coupling["field_feats_instructions"]:
         instruction = Instruction()
@@ -525,9 +602,13 @@ def _compact_field_coupling_from_json(path):
     field_linear = Module()
     field_linear.irreps_in = coupling["field_linear_irreps_in"]
     field_linear.irreps_out = coupling["field_linear_irreps_out"]
-    field_linear.output_mask = torch.tensor(coupling["field_linear_output_mask"], dtype=torch.float64)
+    field_linear.output_mask = torch.tensor(
+        coupling["field_linear_output_mask"], dtype=torch.float64
+    )
     field_linear.bias = torch.tensor(coupling["field_linear_bias"], dtype=torch.float64)
-    field_linear.weight = torch.tensor(coupling["field_linear_weight"], dtype=torch.float64)
+    field_linear.weight = torch.tensor(
+        coupling["field_linear_weight"], dtype=torch.float64
+    )
     field_linear.instructions = []
     for item in coupling["field_linear_instructions"]:
         instruction = Instruction()

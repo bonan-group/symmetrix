@@ -39,6 +39,12 @@ wait for that optional hardware runner.
 
 ### Generating Symmetrix `.json` model files
 
+Install the Python package with the optional MACE dependencies before converting
+Torch checkpoints:
+```
+pip install ".[mace]"
+```
+
 Once the Python package is installed, use
 ```
 symmetrix_extract_mace --model my-mace.model
@@ -295,7 +301,7 @@ MACEField `.json` models can be evaluated through the native CPU backend or
 with `use_kokkos=True` when Symmetrix is built with Kokkos support. In the ASE calculator this path
 supports field-aware energies, forces, polarization, Born effective charges,
 and polarizability for graph-level electric fields with either supported dtype.
-See [the source code](source/symmetrix/symmetrix_calc.py) and [this test](test/test_symmetrix_calc.py)
+See [the source code](source/symmetrix/calculator.py) and [this test](test/test_symmetrix_calc.py)
 for additional details.
 
 ### ASE Calculator with MACEField models

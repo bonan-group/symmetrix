@@ -4,6 +4,7 @@ network library
 This file was written and publicly released by Dr. Noam Bernstein as part of his
 work for the U. S. Government, and is not subject to copyright.
 """
+
 import json
 import logging
 from tempfile import NamedTemporaryFile
@@ -11,7 +12,7 @@ import numpy as np
 
 try:
     from matscipy.neighbours import neighbour_list as neighbor_list
-except:
+except ImportError:
     logging.warning("Symmetrix using slow ase.neighborlist.neighbor_list")
     from ase.neighborlist import neighbor_list
 
@@ -27,8 +28,8 @@ from ase.stress import full_3x3_to_voigt_6_stress
 from . import symmetrix
 
 
-_FIELD_ADDITIVE_PROPERTIES = ['energy', 'free_energy', 'energies', 'forces', 'stress']
-_FIELD_RESPONSE_PROPERTIES = ['polarization', 'becs', 'polarizability']
+_FIELD_ADDITIVE_PROPERTIES = ["energy", "free_energy", "energies", "forces", "stress"]
+_FIELD_RESPONSE_PROPERTIES = ["polarization", "becs", "polarizability"]
 _FIELD_NOT_SET = object()
 
 
@@ -42,7 +43,7 @@ def _to_voigt_stress(stress):
 
 
 class Symmetrix(Calculator):
-    """ASE Calculator using symmetrix library to evaluate equivariant graph neural network 
+    """ASE Calculator using symmetrix library to evaluate equivariant graph neural network
     potential energy functions
 
     Parameters
@@ -61,10 +62,10 @@ class Symmetrix(Calculator):
     -----
     Wraps symmetrix library from https://github.com/wcwitt/symmetrix via python interface at https://pypi.org/project/symmetrix/
     """
+
     implemented_properties = list(_FIELD_ADDITIVE_PROPERTIES)
     _macefield_response_properties = list(_FIELD_RESPONSE_PROPERTIES)
     _macefield_eps0 = 8.8541878128e-12 / 1.602176634e-19 / 1e10
-
 
     def __init__(
         self,
@@ -76,7 +77,9 @@ class Symmetrix(Calculator):
     ):
         Calculator.__init__(self, **kwargs)
         if dtype not in ["float32", "float64"]:
-            raise ValueError(f"Unsupported dtype '{dtype}'. Supported dtypes are 'float64' and 'float32'.")
+            raise ValueError(
+                f"Unsupported dtype '{dtype}'. Supported dtypes are 'float64' and 'float32'."
+            )
         if streamed_edges not in ("auto", "legacy", "r1", "all"):
             raise ValueError(
                 "streamed_edges must be one of 'auto', 'legacy', 'r1', or 'all'."
@@ -84,9 +87,11 @@ class Symmetrix(Calculator):
         self._macefield_electric_field = None
         self._electric_field = kwargs.get("electric_field", None)
         json_metadata = self._json_metadata(model_file)
-        self._model_has_field_coupling = bool(
-            json_metadata.get("has_field_coupling", False)
-        ) if json_metadata is not None else False
+        self._model_has_field_coupling = (
+            bool(json_metadata.get("has_field_coupling", False))
+            if json_metadata is not None
+            else False
+        )
 
         if use_kokkos and not hasattr(symmetrix, "MACEKokkos"):
             if json_metadata is None and not str(model_file).lower().endswith(".json"):
@@ -105,21 +110,26 @@ class Symmetrix(Calculator):
         )
         try:
             self.evaluator = MACE(str(model_file))
-        except RuntimeError: # expecting json.exception.parse_error.101
+        except RuntimeError:  # expecting json.exception.parse_error.101
             if json_metadata is not None or str(model_file).lower().endswith(".json"):
                 raise
             self._raise_if_macefield_checkpoint(model_file)
 
             # import this here so that torch/mace support isn't needed if file is already symmetrix json
             from .extract_mace_data import extract_mace_data
-            kwargs_extract = {k: v for k, v in kwargs.items()
-                if k in ['species',
-                         'head',
-                         'num_spline_points',
-                         'radial_format']}
-            logging.warning(f"Converting model from pytorch model to symmetrix dict with {kwargs_extract}")
+
+            kwargs_extract = {
+                k: v
+                for k, v in kwargs.items()
+                if k in ["species", "head", "num_spline_points", "radial_format"]
+            }
+            logging.warning(
+                f"Converting model from pytorch model to symmetrix dict with {kwargs_extract}"
+            )
             data = extract_mace_data(model_file, **kwargs_extract)
-            MACE = self._native_evaluator_class(data.get("model_type", "MACE"), dtype, use_kokkos)
+            MACE = self._native_evaluator_class(
+                data.get("model_type", "MACE"), dtype, use_kokkos
+            )
             with NamedTemporaryFile("w") as fout:
                 logging.warning(f"Converting via NamedTemporaryFile {fout.name}")
                 fout.write(json.dumps(data))
@@ -140,7 +150,7 @@ class Symmetrix(Calculator):
         self.cutoff = self.evaluator.r_cut
         self.implemented_properties = list(type(self).implemented_properties)
         if self._has_native_field_coupling():
-            self.implemented_properties.append('node_energy')
+            self.implemented_properties.append("node_energy")
             self.implemented_properties.extend(self._macefield_response_properties)
 
     @staticmethod
@@ -171,7 +181,11 @@ class Symmetrix(Calculator):
         if use_kokkos:
             if not symmetrix._kokkos_is_initialized():
                 symmetrix._init_kokkos()
-            return symmetrix.MACEKokkos if dtype == "float64" else symmetrix.MACEKokkosFloat
+            return (
+                symmetrix.MACEKokkos
+                if dtype == "float64"
+                else symmetrix.MACEKokkosFloat
+            )
         return symmetrix.MACE if dtype == "float64" else symmetrix.MACEFloat
 
     @staticmethod
@@ -197,14 +211,14 @@ class Symmetrix(Calculator):
             weights_only=False,
         )
 
-        is_macefield = (
-            type(model).__name__ == "MACEField"
-            or (hasattr(model, "field_feats") and hasattr(model, "field_linear"))
+        is_macefield = type(model).__name__ == "MACEField" or (
+            hasattr(model, "field_feats") and hasattr(model, "field_linear")
         )
         if is_macefield:
             raise RuntimeError(
                 "MACEField PyTorch checkpoints cannot be used directly with Symmetrix. "
-                "Convert/extract the model to Symmetrix JSON first, then pass the JSON file.")
+                "Convert/extract the model to Symmetrix JSON first, then pass the JSON file."
+            )
 
     def check_state(self, atoms, tol=1e-15):
         state = super().check_state(atoms, tol=tol)
@@ -224,9 +238,8 @@ class Symmetrix(Calculator):
         return state
 
     def _has_native_field_coupling(self):
-        return (
-            hasattr(self, "evaluator")
-            and getattr(self.evaluator, "has_field_coupling", False)
+        return hasattr(self, "evaluator") and getattr(
+            self.evaluator, "has_field_coupling", False
         )
 
     @property
@@ -259,7 +272,8 @@ class Symmetrix(Calculator):
         if field.shape == (len(atoms), 3):
             raise ValueError(
                 "MACEField ASE electric_field must be a graph-level electric_field "
-                "with shape (3,) or (1, 3); per-atom fields are not supported.")
+                "with shape (3,) or (1, 3); per-atom fields are not supported."
+            )
         raise ValueError("electric_field must have shape (3,) or (1, 3).")
 
     def _mace_inputs(self, atoms):
@@ -271,9 +285,11 @@ class Symmetrix(Calculator):
                 f"Model does not support atomic numbers {unsupported}. "
                 f"Supported atomic numbers are {mace_atomic_numbers}."
             )
-        i_list, j_list, r, xyz = neighbor_list('ijdD', atoms, self.cutoff)
+        i_list, j_list, r, xyz = neighbor_list("ijdD", atoms, self.cutoff)
         num_nodes = len(atoms)
-        node_types = [mace_atomic_numbers.index(ase_atomic_numbers[i]) for i in range(num_nodes)]
+        node_types = [
+            mace_atomic_numbers.index(ase_atomic_numbers[i]) for i in range(num_nodes)
+        ]
         num_neigh = np.bincount(j_list, minlength=num_nodes)
         neigh_types = [mace_atomic_numbers.index(ase_atomic_numbers[j]) for j in j_list]
         return num_nodes, node_types, num_neigh, j_list, neigh_types, xyz, r, i_list
@@ -281,7 +297,9 @@ class Symmetrix(Calculator):
     def _compute_macefield(self, atoms, electric_field, mace_inputs=None):
         if mace_inputs is None:
             mace_inputs = self._mace_inputs(atoms)
-        num_nodes, node_types, num_neigh, j_list, neigh_types, xyz, r, i_list = mace_inputs
+        num_nodes, node_types, num_neigh, j_list, neigh_types, xyz, r, i_list = (
+            mace_inputs
+        )
         self.evaluator.compute_node_energies_forces_field(
             num_nodes,
             node_types,
@@ -294,14 +312,17 @@ class Symmetrix(Calculator):
         )
         return mace_inputs
 
-    def _calculate_macefield_responses(self, atoms, electric_field, properties, mace_inputs):
+    def _calculate_macefield_responses(
+        self, atoms, electric_field, properties, mace_inputs
+    ):
         volume = atoms.get_volume()
         raw_polarization = -np.asarray(self.evaluator.electric_field_adj, dtype=float)
         if raw_polarization.shape != (3,):
             raise PropertyNotImplementedError(
-                "MACEField response properties require a graph-level electric_field with shape (3,).")
+                "MACEField response properties require a graph-level electric_field with shape (3,)."
+            )
 
-        results = {'polarization': np.array(raw_polarization / volume, copy=True)}
+        results = {"polarization": np.array(raw_polarization / volume, copy=True)}
 
         field_derivatives_computed = False
         force_derivatives_computed = False
@@ -312,7 +333,9 @@ class Symmetrix(Calculator):
                 return
             if field_derivatives_computed and not include_forces:
                 return
-            num_nodes, node_types, num_neigh, j_list, neigh_types, xyz, r, _ = mace_inputs
+            num_nodes, node_types, num_neigh, j_list, neigh_types, xyz, r, _ = (
+                mace_inputs
+            )
             if include_forces:
                 self.evaluator.compute_electric_field_force_derivative(
                     num_nodes,
@@ -339,37 +362,36 @@ class Symmetrix(Calculator):
                 )
                 field_derivatives_computed = True
 
-        if 'polarizability' in properties:
-            compute_field_derivatives(include_forces='becs' in properties)
-            polarizability = -np.asarray(self.evaluator.electric_field_hessian, dtype=float).reshape(3, 3)
-            results['polarizability'] = np.array(
+        if "polarizability" in properties:
+            compute_field_derivatives(include_forces="becs" in properties)
+            polarizability = -np.asarray(
+                self.evaluator.electric_field_hessian, dtype=float
+            ).reshape(3, 3)
+            results["polarizability"] = np.array(
                 (polarizability / volume / self._macefield_eps0).reshape(9),
                 copy=True,
             )
 
-        if 'becs' in properties:
+        if "becs" in properties:
             compute_field_derivatives(include_forces=True)
             num_nodes, _, _, j_list, _, xyz, _, i_list = mace_inputs
             pair_derivatives = np.asarray(
                 self.evaluator.electric_field_force_derivative,
                 dtype=float,
-            ).reshape(3, -1, 3)[:, :len(i_list), :]
+            ).reshape(3, -1, 3)[:, : len(i_list), :]
             becs = np.zeros((len(atoms), 3, 3))
             for field_component in range(3):
                 for cartesian in range(3):
-                    becs[:, field_component, cartesian] = (
-                        np.bincount(
-                            j_list,
-                            weights=pair_derivatives[field_component, :, cartesian],
-                            minlength=num_nodes,
-                        )
-                        - np.bincount(
-                            i_list,
-                            weights=pair_derivatives[field_component, :, cartesian],
-                            minlength=num_nodes,
-                        )
+                    becs[:, field_component, cartesian] = np.bincount(
+                        j_list,
+                        weights=pair_derivatives[field_component, :, cartesian],
+                        minlength=num_nodes,
+                    ) - np.bincount(
+                        i_list,
+                        weights=pair_derivatives[field_component, :, cartesian],
+                        minlength=num_nodes,
                     )
-            results['becs'] = becs.reshape(len(atoms), 9)
+            results["becs"] = becs.reshape(len(atoms), 9)
 
         return results
 
@@ -377,40 +399,41 @@ class Symmetrix(Calculator):
         num_nodes, node_types, _, j_list, _, xyz, _, i_list = mace_inputs
         node_energies = np.array(self.evaluator.node_energies, dtype=float, copy=True)
         results = {
-            'energy': float(np.sum(node_energies)),
-            'free_energy': float(np.sum(node_energies)),
-            'energies': node_energies,
+            "energy": float(np.sum(node_energies)),
+            "free_energy": float(np.sum(node_energies)),
+            "energies": node_energies,
         }
         if self._has_native_field_coupling():
             atomic_energies = np.asarray(self.evaluator.atomic_energies, dtype=float)
-            results['node_energy'] = (
+            results["node_energy"] = (
                 node_energies - atomic_energies[np.asarray(node_types, dtype=int)]
             )
 
-        pair_forces = np.asarray(self.evaluator.node_forces, dtype=float).reshape((-1, 3))
-        pair_forces = np.array(pair_forces[:len(i_list), :], copy=True)
+        pair_forces = np.asarray(self.evaluator.node_forces, dtype=float).reshape(
+            (-1, 3)
+        )
+        pair_forces = np.array(pair_forces[: len(i_list), :], copy=True)
 
         atom_forces = np.zeros((num_nodes, 3))
         for component in range(3):
-            atom_forces[:, component] = (
-                np.bincount(
-                    j_list,
-                    weights=pair_forces[:, component],
-                    minlength=num_nodes,
-                )
-                - np.bincount(
-                    i_list,
-                    weights=pair_forces[:, component],
-                    minlength=num_nodes,
-                )
+            atom_forces[:, component] = np.bincount(
+                j_list,
+                weights=pair_forces[:, component],
+                minlength=num_nodes,
+            ) - np.bincount(
+                i_list,
+                weights=pair_forces[:, component],
+                minlength=num_nodes,
             )
-        results['forces'] = atom_forces
-        results['stress'] = full_3x3_to_voigt_6_stress(
+        results["forces"] = atom_forces
+        results["stress"] = full_3x3_to_voigt_6_stress(
             (-pair_forces.T @ xyz) / atoms.get_volume()
         )
         return results
 
-    def _calculate_macefield_results(self, atoms, electric_field, properties, mace_inputs=None):
+    def _calculate_macefield_results(
+        self, atoms, electric_field, properties, mace_inputs=None
+    ):
         if mace_inputs is None:
             mace_inputs = self._mace_inputs(atoms)
         self._compute_macefield(atoms, electric_field, mace_inputs=mace_inputs)
@@ -426,11 +449,22 @@ class Symmetrix(Calculator):
             )
         return results
 
-    def calculate(self, atoms=None, properties=['energy'], system_changes=all_changes):
+    def calculate(self, atoms=None, properties=["energy"], system_changes=all_changes):
         Calculator.calculate(self, atoms, properties, system_changes)
 
-        num_nodes, node_types, num_neigh, j_list, neigh_types, xyz, r, i_list = self._mace_inputs(self.atoms)
-        mace_inputs = (num_nodes, node_types, num_neigh, j_list, neigh_types, xyz, r, i_list)
+        num_nodes, node_types, num_neigh, j_list, neigh_types, xyz, r, i_list = (
+            self._mace_inputs(self.atoms)
+        )
+        mace_inputs = (
+            num_nodes,
+            node_types,
+            num_neigh,
+            j_list,
+            neigh_types,
+            xyz,
+            r,
+            i_list,
+        )
         if self._has_native_field_coupling():
             electric_field = self._resolve_electric_field()
             self.results = self._calculate_macefield_results(
@@ -442,7 +476,8 @@ class Symmetrix(Calculator):
             self._macefield_electric_field = np.array(electric_field, copy=True)
         else:
             self.evaluator.compute_node_energies_forces(
-                num_nodes, node_types, num_neigh, j_list, neigh_types, xyz.flatten(), r)
+                num_nodes, node_types, num_neigh, j_list, neigh_types, xyz.flatten(), r
+            )
             self.results = self._collect_mace_results(self.atoms, mace_inputs)
 
 
@@ -457,7 +492,7 @@ class FieldContributionCalculator(Calculator):
     implemented_properties = _FIELD_ADDITIVE_PROPERTIES + _FIELD_RESPONSE_PROPERTIES
 
     def __init__(self, field_calculator, **kwargs):
-        electric_field = kwargs.pop('electric_field', None)
+        electric_field = kwargs.pop("electric_field", None)
         Calculator.__init__(self, **kwargs)
         if not isinstance(field_calculator, Symmetrix):
             raise TypeError("field_calculator must be a Symmetrix calculator.")
@@ -487,28 +522,25 @@ class FieldContributionCalculator(Calculator):
 
     def check_state(self, atoms, tol=1e-15):
         state = super().check_state(atoms, tol=tol)
-        if (
-            not state
-            and (
-                self._last_electric_field is None
-                or not equal(
-                    self._last_electric_field,
-                    self._resolve_electric_field(atoms),
-                    atol=tol,
-                )
+        if not state and (
+            self._last_electric_field is None
+            or not equal(
+                self._last_electric_field,
+                self._resolve_electric_field(atoms),
+                atol=tol,
             )
         ):
-            state.append('info')
+            state.append("info")
         return state
 
     @staticmethod
     def _zero_results(atoms):
         return {
-            'energy': 0.0,
-            'free_energy': 0.0,
-            'energies': np.zeros(len(atoms)),
-            'forces': np.zeros((len(atoms), 3)),
-            'stress': np.zeros(6),
+            "energy": 0.0,
+            "free_energy": 0.0,
+            "energies": np.zeros(len(atoms)),
+            "forces": np.zeros((len(atoms), 3)),
+            "stress": np.zeros(6),
         }
 
     def _zero_reference_is_current(self, atoms):
@@ -516,7 +548,7 @@ class FieldContributionCalculator(Calculator):
             return False
         return not compare_atoms(self._zero_field_atoms, atoms)
 
-    def calculate(self, atoms=None, properties=['energy'], system_changes=all_changes):
+    def calculate(self, atoms=None, properties=["energy"], system_changes=all_changes):
         Calculator.calculate(self, atoms, properties, system_changes)
         electric_field = self._resolve_electric_field(self.atoms)
         needs_response = any(prop in properties for prop in _FIELD_RESPONSE_PROPERTIES)
@@ -540,11 +572,13 @@ class FieldContributionCalculator(Calculator):
         elif needs_additive:
             mace_inputs = self.field_calculator._mace_inputs(self.atoms)
             if not self._zero_reference_is_current(self.atoms):
-                self._zero_field_results = self.field_calculator._calculate_macefield_results(
-                    self.atoms,
-                    np.zeros(3),
-                    [],
-                    mace_inputs=mace_inputs,
+                self._zero_field_results = (
+                    self.field_calculator._calculate_macefield_results(
+                        self.atoms,
+                        np.zeros(3),
+                        [],
+                        mace_inputs=mace_inputs,
+                    )
                 )
                 self._zero_field_atoms = self.atoms.copy()
 
@@ -555,11 +589,12 @@ class FieldContributionCalculator(Calculator):
                 mace_inputs=mace_inputs,
             )
             results = {
-                prop: np.asarray(field_results[prop]) - np.asarray(self._zero_field_results[prop])
+                prop: np.asarray(field_results[prop])
+                - np.asarray(self._zero_field_results[prop])
                 for prop in _FIELD_ADDITIVE_PROPERTIES
             }
-            results['energy'] = float(results['energy'])
-            results['free_energy'] = float(results['free_energy'])
+            results["energy"] = float(results["energy"])
+            results["free_energy"] = float(results["free_energy"])
             for prop in _FIELD_RESPONSE_PROPERTIES:
                 if prop in field_results:
                     results[prop] = np.array(field_results[prop], copy=True)
@@ -586,7 +621,7 @@ class FieldAwareCalculator(Calculator):
     """Add an exact MACEField contribution to an arbitrary ASE calculator."""
 
     def __init__(self, base_calculator, field_calculator, **kwargs):
-        electric_field = kwargs.pop('electric_field', _FIELD_NOT_SET)
+        electric_field = kwargs.pop("electric_field", _FIELD_NOT_SET)
         Calculator.__init__(self, **kwargs)
         self.base_calculator = base_calculator
         if isinstance(field_calculator, FieldContributionCalculator):
@@ -630,22 +665,19 @@ class FieldAwareCalculator(Calculator):
                 for prop in self._base_properties
             )
             if base_state or base_results_missing:
-                state.append('calculator')
-        if (
-            not state
-            and (
-                self._last_electric_field is None
-                or not equal(
-                    self._last_electric_field,
-                    self.field_contribution._resolve_electric_field(atoms),
-                    atol=tol,
-                )
+                state.append("calculator")
+        if not state and (
+            self._last_electric_field is None
+            or not equal(
+                self._last_electric_field,
+                self.field_contribution._resolve_electric_field(atoms),
+                atol=tol,
             )
         ):
-            state.append('info')
+            state.append("info")
         return state
 
-    def calculate(self, atoms=None, properties=['energy'], system_changes=all_changes):
+    def calculate(self, atoms=None, properties=["energy"], system_changes=all_changes):
         Calculator.calculate(self, atoms, properties, system_changes)
         results = {}
         base_properties = set()
@@ -657,7 +689,7 @@ class FieldAwareCalculator(Calculator):
                 results[prop] = field_value
             else:
                 base_value = self.base_calculator.get_property(prop, base_atoms)
-                if prop == 'stress':
+                if prop == "stress":
                     results[prop] = _to_voigt_stress(base_value) + _to_voigt_stress(
                         field_value
                     )
@@ -666,4 +698,6 @@ class FieldAwareCalculator(Calculator):
                 base_properties.add(prop)
         self.results = results
         self._base_properties = base_properties
-        self._last_electric_field = self.field_contribution._resolve_electric_field(self.atoms).copy()
+        self._last_electric_field = self.field_contribution._resolve_electric_field(
+            self.atoms
+        ).copy()

@@ -38,10 +38,7 @@ MH1_HEADS = (
 
 
 def _mh1_streamed_edge_block_size(use_kokkos):
-    if (
-        use_kokkos
-        and native_symmetrix._kokkos_default_execution_space() == "Cuda"
-    ):
+    if use_kokkos and native_symmetrix._kokkos_default_execution_space() == "Cuda":
         return 16384
     return 1024
 
@@ -106,9 +103,7 @@ def _make_generalized_mh1(parameters):
             interaction_cls_first=RealAgnosticResidualNonLinearInteractionBlock,
             num_interactions=2,
             num_elements=2,
-            hidden_irreps=o3.Irreps(
-                f"{node_channels}x0e+{node_channels}x1o"
-            ),
+            hidden_irreps=o3.Irreps(f"{node_channels}x0e+{node_channels}x1o"),
             MLP_irreps=o3.Irreps(f"{max(4, node_channels // 2)}x0e"),
             atomic_energies=np.zeros((1, 2)),
             avg_num_neighbors=4.0,
@@ -116,9 +111,7 @@ def _make_generalized_mh1(parameters):
             correlation=3,
             gate=torch.nn.functional.silu,
             use_agnostic_product=True,
-            edge_irreps=o3.Irreps(
-                f"{edge_channels}x0e+{edge_channels}x1o"
-            ),
+            edge_irreps=o3.Irreps(f"{edge_channels}x0e+{edge_channels}x1o"),
             use_edge_irreps_first=True,
             radial_MLP=radial_mlp,
             heads=["test"],
@@ -138,9 +131,12 @@ def _make_generalized_mh1(parameters):
 def generalized_mh1_artifact(request, tmp_path_factory):
     model, data = _make_generalized_mh1(request.param)
     node_channels, edge_channels, _, l_max, _ = request.param
-    path = tmp_path_factory.mktemp(
-        f"mh1-general-c{node_channels}-e{edge_channels}-l{l_max}"
-    ) / "model.json"
+    path = (
+        tmp_path_factory.mktemp(
+            f"mh1-general-c{node_channels}-e{edge_channels}-l{l_max}"
+        )
+        / "model.json"
+    )
     path.write_text(json.dumps(data, separators=(",", ":")))
     return model, data, path
 
@@ -211,27 +207,30 @@ def test_generalized_mh1_matches_upstream_and_streamed_modes(
         assert evaluator.streamed_edges_mode == mode
         calculator.calculate(atoms.copy(), properties=properties)
         mode_results[mode] = {
-            name: np.array(calculator.results[name], copy=True)
-            for name in properties
+            name: np.array(calculator.results[name], copy=True) for name in properties
         }
     for name in properties:
         np.testing.assert_allclose(
-            mode_results["legacy"][name], upstream.results[name],
-            rtol=0.0, atol=2e-8,
+            mode_results["legacy"][name],
+            upstream.results[name],
+            rtol=0.0,
+            atol=2e-8,
         )
         np.testing.assert_allclose(
-            mode_results["r1"][name], mode_results["legacy"][name],
-            rtol=0.0, atol=2e-12,
+            mode_results["r1"][name],
+            mode_results["legacy"][name],
+            rtol=0.0,
+            atol=2e-12,
         )
         np.testing.assert_allclose(
-            mode_results["all"][name], mode_results["legacy"][name],
-            rtol=0.0, atol=2e-12,
+            mode_results["all"][name],
+            mode_results["legacy"][name],
+            rtol=0.0,
+            atol=2e-12,
         )
 
 
-def test_generalized_mh1_kokkos_float32_matches_float64(
-    generalized_mh1_artifact
-):
+def test_generalized_mh1_kokkos_float32_matches_float64(generalized_mh1_artifact):
     if not hasattr(native_symmetrix, "MACENonlinearKokkosFloat"):
         pytest.skip("Symmetrix was built without Kokkos Float32 support")
     _, _, model_path = generalized_mh1_artifact
@@ -249,14 +248,14 @@ def test_generalized_mh1_kokkos_float32_matches_float64(
     assert actual.evaluator.uses_mh1_fast_path
     for name in properties:
         np.testing.assert_allclose(
-            actual.results[name], reference.results[name],
-            rtol=0.0, atol=5e-4,
+            actual.results[name],
+            reference.results[name],
+            rtol=0.0,
+            atol=5e-4,
         )
 
 
-def test_mh1_256_node_64_edge_float32_cuda_end_to_end(
-    mh1_256_64_artifact
-):
+def test_mh1_256_node_64_edge_float32_cuda_end_to_end(mh1_256_64_artifact):
     model, _, model_path = mh1_256_64_artifact
     atoms = _generalized_mh1_atoms()
     properties = ["energy", "energies", "forces", "stress"]
@@ -338,9 +337,9 @@ def test_generalized_mh1_family_rejects_unsupported_semantics(
             "correlation"
         ] = 2
     elif mutation == "tensor_mode":
-        changed["interactions"][0]["conv_tp"]["instructions"][0][
-            "connection_mode"
-        ] = "uuu"
+        changed["interactions"][0]["conv_tp"]["instructions"][0]["connection_mode"] = (
+            "uuu"
+        )
     else:
         changed["l_max"] = 4
     path = tmp_path / f"unsupported-{mutation}.json"
@@ -364,10 +363,14 @@ def test_generalized_mh1_family_rejects_unsupported_semantics(
 
 def test_mh1_rejects_malformed_nonlinear_json(tmp_path):
     path = tmp_path / "malformed-nonlinear.json"
-    path.write_text(json.dumps({
-        "symmetrix_format_version": 3,
-        "model_type": "MACE_Nonlinear",
-    }))
+    path.write_text(
+        json.dumps(
+            {
+                "symmetrix_format_version": 3,
+                "model_type": "MACE_Nonlinear",
+            }
+        )
+    )
     with pytest.raises((RuntimeError, ValueError), match="node_embedding"):
         native_symmetrix.MACENonlinear(str(path))
     if hasattr(native_symmetrix, "MACENonlinearKokkos"):
@@ -380,26 +383,32 @@ def test_mh1_rejects_invalid_species_mapping_before_evaluation(tmp_path, use_kok
     linear = {
         "irreps_in": "1x0e",
         "irreps_out": "1x0e",
-        "instructions": [{
-            "i_in": 0,
-            "i_out": 0,
-            "path_weight": 1.0,
-            "path_shape": [1, 1],
-        }],
+        "instructions": [
+            {
+                "i_in": 0,
+                "i_out": 0,
+                "path_weight": 1.0,
+                "path_shape": [1, 1],
+            }
+        ],
         "weight": {"shape": [1], "values": [1.0]},
         "bias": {"shape": [0], "values": []},
         "output_mask": {"shape": [1], "values": [1.0]},
     }
     path = tmp_path / "invalid-mapping.json"
-    path.write_text(json.dumps({
-        "symmetrix_format_version": 3,
-        "model_type": "MACE_Nonlinear",
-        "node_embedding": linear,
-        "atomic_numbers": [1],
-        "model_atomic_numbers": [1],
-        "model_indices": [2],
-        "num_elements": 1,
-    }))
+    path.write_text(
+        json.dumps(
+            {
+                "symmetrix_format_version": 3,
+                "model_type": "MACE_Nonlinear",
+                "node_embedding": linear,
+                "atomic_numbers": [1],
+                "model_atomic_numbers": [1],
+                "model_indices": [2],
+                "num_elements": 1,
+            }
+        )
+    )
     if use_kokkos:
         if not hasattr(native_symmetrix, "MACENonlinearKokkos"):
             pytest.skip("Symmetrix was built without Kokkos support")
@@ -427,16 +436,23 @@ def test_mh1_subset_schema_preserves_dynamic_architecture(mh1_si_artifact):
         interaction["class"] == "RealAgnosticResidualNonLinearInteractionBlock"
         for interaction in data["interactions"]
     )
-    assert all(interaction["conv_tp_weights"]["layers"] for interaction in data["interactions"])
-    assert all(interaction["density_fn"]["layers"] for interaction in data["interactions"])
+    assert all(
+        interaction["conv_tp_weights"]["layers"] for interaction in data["interactions"]
+    )
+    assert all(
+        interaction["density_fn"]["layers"] for interaction in data["interactions"]
+    )
     hidden_irreps = data["readouts"][-1]["linear_1"]["irreps_out"]
     assert hidden_irreps == data["readouts"][-1]["linear_2"]["irreps_in"]
     assert hidden_irreps.endswith("x0e")
-    assert max(
-        contraction["correlation"]
-        for product in data["products"]
-        for contraction in product["symmetric_contractions"]["contractions"]
-    ) >= 3
+    assert (
+        max(
+            contraction["correlation"]
+            for product in data["products"]
+            for contraction in product["symmetric_contractions"]["contractions"]
+        )
+        >= 3
+    )
 
 
 @pytest.mark.parametrize("use_kokkos", [False, True])
@@ -467,8 +483,7 @@ def test_mh1_streamed_edge_modes_agree(mh1_si_artifact, use_kokkos):
         if hasattr(calculator.evaluator, "edge_workspace_bytes"):
             workspace_bytes[mode] = calculator.evaluator.edge_workspace_bytes
         results[mode] = {
-            name: np.array(calculator.results[name], copy=True)
-            for name in properties
+            name: np.array(calculator.results[name], copy=True) for name in properties
         }
     for mode in ("r1", "all"):
         for name in properties:
@@ -486,9 +501,7 @@ def test_mh1_streamed_edge_modes_agree(mh1_si_artifact, use_kokkos):
 
 
 @pytest.mark.parametrize("dtype", ["float64", "float32"])
-def test_mh1_kokkos_mode_switch_releases_full_edge_workspaces(
-    mh1_si_artifact, dtype
-):
+def test_mh1_kokkos_mode_switch_releases_full_edge_workspaces(mh1_si_artifact, dtype):
     evaluator_name = (
         "MACENonlinearKokkos" if dtype == "float64" else "MACENonlinearKokkosFloat"
     )
@@ -516,9 +529,7 @@ def test_mh1_kokkos_mode_switch_releases_full_edge_workspaces(
 
 
 @pytest.mark.parametrize("dtype", ["float64", "float32"])
-def test_mh1_kokkos_mode_switch_fences_pending_evaluation(
-    mh1_si_artifact, dtype
-):
+def test_mh1_kokkos_mode_switch_fences_pending_evaluation(mh1_si_artifact, dtype):
     evaluator_name = (
         "MACENonlinearKokkos" if dtype == "float64" else "MACENonlinearKokkosFloat"
     )
@@ -570,9 +581,7 @@ def test_mh1_kokkos_mode_switch_fences_pending_evaluation(
     all_energies = np.asarray(calculator.evaluator.node_energies)
     all_forces = np.asarray(calculator.evaluator.node_forces)
     tolerance = 2e-12 if dtype == "float64" else 2e-5
-    np.testing.assert_allclose(
-        all_energies, legacy_energies, rtol=0.0, atol=tolerance
-    )
+    np.testing.assert_allclose(all_energies, legacy_energies, rtol=0.0, atol=tolerance)
     np.testing.assert_allclose(all_forces, legacy_forces, rtol=0.0, atol=tolerance)
 
 
@@ -640,13 +649,17 @@ def test_mh1_extracts_and_evaluates_each_head(head, tmp_path):
         assert actual.results["energy"] == pytest.approx(
             expected.results["energy"], abs=2e-5
         )
-        assert np.allclose(actual.results["forces"], expected.results["forces"], atol=2e-5)
+        assert np.allclose(
+            actual.results["forces"], expected.results["forces"], atol=2e-5
+        )
         native_results[use_kokkos] = {
             name: np.array(actual.results[name], copy=True)
             for name in ("energy", "energies", "forces")
         }
     for name in native_results[False]:
-        assert np.allclose(native_results[False][name], native_results[True][name], atol=2e-12)
+        assert np.allclose(
+            native_results[False][name], native_results[True][name], atol=2e-12
+        )
 
 
 def test_mh1_universal_extraction_preserves_all_species(tmp_path):
@@ -667,9 +680,15 @@ def test_mh1_universal_extraction_preserves_all_species(tmp_path):
         head="matpes_r2scan",
     )
     model_atomic_numbers = data["model_atomic_numbers"]
-    selected_indices = (0, len(model_atomic_numbers) // 2, len(model_atomic_numbers) - 1)
+    selected_indices = (
+        0,
+        len(model_atomic_numbers) // 2,
+        len(model_atomic_numbers) - 1,
+    )
     selected_numbers = [model_atomic_numbers[index] for index in selected_indices]
-    for first, second in zip(selected_numbers, selected_numbers[1:] + selected_numbers[:1]):
+    for first, second in zip(
+        selected_numbers, selected_numbers[1:] + selected_numbers[:1]
+    ):
         atoms = Atoms(
             numbers=[first, second],
             positions=[[0.0, 0.0, 0.0], [1.8, 0.1, 0.0]],
@@ -705,7 +724,9 @@ def test_mh1_raw_checkpoint_dispatches_to_native_kokkos():
     assert type(calculator.evaluator).__name__ == "MACENonlinearKokkos"
 
 
-def test_mh1_json_dispatch_does_not_depend_on_filename_suffix(mh1_si_artifact, tmp_path):
+def test_mh1_json_dispatch_does_not_depend_on_filename_suffix(
+    mh1_si_artifact, tmp_path
+):
     _, model_path = mh1_si_artifact
     suffixless_path = tmp_path / "mh1-model-data"
     suffixless_path.symlink_to(model_path)
@@ -749,7 +770,9 @@ def test_mh1_fast_path_requires_compatible_family_architecture(
     fast = Symmetrix(model_path, use_kokkos=use_kokkos, dtype="float64")
     generic = Symmetrix(path, use_kokkos=use_kokkos, dtype="float64")
     fast.calculate(atoms.copy(), properties=["energy", "energies", "forces", "stress"])
-    generic.calculate(atoms.copy(), properties=["energy", "energies", "forces", "stress"])
+    generic.calculate(
+        atoms.copy(), properties=["energy", "energies", "forces", "stress"]
+    )
     assert fast.evaluator.uses_mh1_fast_path
     assert not generic.evaluator.uses_mh1_fast_path
     for property_name in ("energy", "energies", "forces", "stress"):
@@ -787,14 +810,19 @@ def test_mh1_fast_path_requires_conditionable_edge_mlp(
 ):
     data, _ = mh1_si_artifact
     changed = json.loads(json.dumps(data))
-    width = changed["interactions"][0]["conv_tp_weights"]["layers"][0]["weight"]["shape"][1]
-    changed["interactions"][0]["conv_tp_weights"]["layers"].insert(0, {
-        "type": "layer_norm",
-        "normalized_shape": [width],
-        "eps": 1e-5,
-        "weight": {"shape": [width], "values": [1.0] * width},
-        "bias": {"shape": [width], "values": [0.0] * width},
-    })
+    width = changed["interactions"][0]["conv_tp_weights"]["layers"][0]["weight"][
+        "shape"
+    ][1]
+    changed["interactions"][0]["conv_tp_weights"]["layers"].insert(
+        0,
+        {
+            "type": "layer_norm",
+            "normalized_shape": [width],
+            "eps": 1e-5,
+            "weight": {"shape": [width], "values": [1.0] * width},
+            "bias": {"shape": [width], "values": [0.0] * width},
+        },
+    )
     path = tmp_path / "near-mh1-unconditionable.json"
     path.write_text(json.dumps(changed, separators=(",", ":")))
     if use_kokkos and not native_symmetrix._kokkos_is_initialized():
@@ -828,9 +856,7 @@ def test_mh1_fast_path_requires_exact_conditioned_mlp_input_width(
         output_width, input_width
     )
     first_layer["weight"]["shape"][1] = input_width + 1
-    first_layer["weight"]["values"] = np.pad(
-        weights, ((0, 0), (0, 1))
-    ).ravel().tolist()
+    first_layer["weight"]["values"] = np.pad(weights, ((0, 0), (0, 1))).ravel().tolist()
     path = tmp_path / f"near-mh1-{module_name}-extra-conditioned-column.json"
     path.write_text(json.dumps(changed, separators=(",", ":")))
     if use_kokkos:
@@ -854,6 +880,10 @@ def test_mh1_fast_path_requires_exact_conditioned_mlp_input_width(
             native_symmetrix.MACENonlinearKokkosFloat(str(path))
 
 
+@pytest.mark.skipif(
+    mace_import_error is not None,
+    reason=f"mace-torch is not available: {mace_import_error}",
+)
 def test_mh1_extraction_rejects_unsupported_architecture_features():
     from symmetrix.extract_mace_nonlinear import extract_mace_nonlinear_data
 
@@ -879,6 +909,10 @@ def test_mh1_extraction_rejects_unsupported_architecture_features():
     model.readouts[-1] = original_readout
 
 
+@pytest.mark.skipif(
+    mace_import_error is not None,
+    reason=f"mace-torch is not available: {mace_import_error}",
+)
 def test_mh1_single_head_wigner_tensors_preserve_float64():
     from e3nn import o3
     from symmetrix.extract_mace_nonlinear import extract_mace_nonlinear_data
@@ -921,26 +955,43 @@ def test_mh1_native_serial_and_kokkos_match_upstream(mh1_si_artifact):
         default_dtype="float64",
         head="matpes_r2scan",
     )
-    expected.calculate(atoms.copy(), properties=["energy", "energies", "forces", "stress"])
+    expected.calculate(
+        atoms.copy(), properties=["energy", "energies", "forces", "stress"]
+    )
 
     native_results = {}
-    for use_kokkos, evaluator_name in ((False, "MACENonlinear"), (True, "MACENonlinearKokkos")):
+    for use_kokkos, evaluator_name in (
+        (False, "MACENonlinear"),
+        (True, "MACENonlinearKokkos"),
+    ):
         actual = Symmetrix(model_path, use_kokkos=use_kokkos, dtype="float64")
         assert actual.evaluator.uses_mh1_fast_path
-        actual.calculate(atoms.copy(), properties=["energy", "energies", "forces", "stress"])
+        actual.calculate(
+            atoms.copy(), properties=["energy", "energies", "forces", "stress"]
+        )
         assert type(actual.evaluator).__name__ == evaluator_name
         assert actual.cutoff == pytest.approx(expected.r_max)
-        assert actual.results["energy"] == pytest.approx(expected.results["energy"], abs=2e-5)
-        assert np.allclose(actual.results["energies"], expected.results["energies"], atol=2e-5)
-        assert np.allclose(actual.results["forces"], expected.results["forces"], atol=2e-5)
-        assert np.allclose(actual.results["stress"], expected.results["stress"], atol=2e-5)
+        assert actual.results["energy"] == pytest.approx(
+            expected.results["energy"], abs=2e-5
+        )
+        assert np.allclose(
+            actual.results["energies"], expected.results["energies"], atol=2e-5
+        )
+        assert np.allclose(
+            actual.results["forces"], expected.results["forces"], atol=2e-5
+        )
+        assert np.allclose(
+            actual.results["stress"], expected.results["stress"], atol=2e-5
+        )
         native_results[use_kokkos] = {
             name: np.array(actual.results[name], copy=True)
             for name in ("energy", "energies", "forces", "stress")
         }
 
     for name in native_results[False]:
-        assert np.allclose(native_results[False][name], native_results[True][name], atol=2e-12)
+        assert np.allclose(
+            native_results[False][name], native_results[True][name], atol=2e-12
+        )
 
 
 @pytest.mark.parametrize("dtype", ["float64", "float32"])
@@ -999,9 +1050,7 @@ def test_mh1_kokkos_reuses_workspaces_across_graph_sizes(mh1_si_artifact, dtype)
 
 
 @pytest.mark.parametrize("dtype", ["float64", "float32"])
-def test_mh1_kokkos_handles_changes_in_supported_species(
-    mh1_h_si_artifact, dtype
-):
+def test_mh1_kokkos_handles_changes_in_supported_species(mh1_h_si_artifact, dtype):
     _, model_path = mh1_h_si_artifact
     serial = Symmetrix(model_path, use_kokkos=False, dtype="float64")
     kokkos = Symmetrix(model_path, use_kokkos=True, dtype=dtype)
@@ -1013,7 +1062,11 @@ def test_mh1_kokkos_handles_changes_in_supported_species(
         head="matpes_r2scan",
     )
     for symbols, distance in (
-        ("Si2", 2.2), ("H2", 0.8), ("SiH", 1.5), ("HSi", 1.5), ("Si2", 2.4)
+        ("Si2", 2.2),
+        ("H2", 0.8),
+        ("SiH", 1.5),
+        ("HSi", 1.5),
+        ("Si2", 2.4),
     ):
         atoms = Atoms(
             symbols,
@@ -1024,9 +1077,15 @@ def test_mh1_kokkos_handles_changes_in_supported_species(
         upstream.calculate(atoms.copy(), properties=["energy", "forces", "stress"])
         serial.calculate(atoms, properties=["energy", "forces", "stress"])
         kokkos.calculate(atoms, properties=["energy", "forces", "stress"])
-        assert serial.results["energy"] == pytest.approx(upstream.results["energy"], abs=2e-5)
-        assert np.allclose(serial.results["forces"], upstream.results["forces"], atol=2e-5)
-        assert np.allclose(serial.results["stress"], upstream.results["stress"], atol=2e-5)
+        assert serial.results["energy"] == pytest.approx(
+            upstream.results["energy"], abs=2e-5
+        )
+        assert np.allclose(
+            serial.results["forces"], upstream.results["forces"], atol=2e-5
+        )
+        assert np.allclose(
+            serial.results["stress"], upstream.results["stress"], atol=2e-5
+        )
         assert kokkos.results["energy"] == pytest.approx(
             serial.results["energy"], abs=kokkos_tolerance
         )
@@ -1052,8 +1111,12 @@ def test_mh1_serial_matches_upstream_for_isolated_atom(mh1_si_artifact):
     expected.calculate(atoms.copy(), properties=["energy", "energies", "forces"])
     assert actual.evaluator.uses_mh1_fast_path
     assert len(actual.evaluator.node_forces) == 0
-    assert actual.results["energy"] == pytest.approx(expected.results["energy"], abs=2e-9)
-    assert np.allclose(actual.results["energies"], expected.results["energies"], atol=2e-9)
+    assert actual.results["energy"] == pytest.approx(
+        expected.results["energy"], abs=2e-9
+    )
+    assert np.allclose(
+        actual.results["energies"], expected.results["energies"], atol=2e-9
+    )
     assert np.allclose(actual.results["forces"], expected.results["forces"], atol=2e-9)
 
 
@@ -1061,9 +1124,7 @@ def test_mh1_serial_matches_upstream_for_isolated_atom(mh1_si_artifact):
     ("use_kokkos", "dtype"),
     [(False, "float64"), (True, "float64"), (True, "float32")],
 )
-def test_mh1_native_force_matches_finite_difference(
-    mh1_si_artifact, use_kokkos, dtype
-):
+def test_mh1_native_force_matches_finite_difference(mh1_si_artifact, use_kokkos, dtype):
     _, model_path = mh1_si_artifact
     atoms = Atoms(
         "Si2",
@@ -1087,7 +1148,9 @@ def test_mh1_native_force_matches_finite_difference(
 
 
 @pytest.mark.parametrize("module_name", ["conv_tp_weights", "density_fn"])
-def test_mh1_affine_mlp_forward_and_reverse_match_autograd(mh1_si_artifact, module_name):
+def test_mh1_affine_mlp_forward_and_reverse_match_autograd(
+    mh1_si_artifact, module_name
+):
     data, _ = mh1_si_artifact
     model = torch.load(
         _mh1_model_path(), map_location=torch.device("cpu"), weights_only=False
@@ -1103,8 +1166,12 @@ def test_mh1_affine_mlp_forward_and_reverse_match_autograd(mh1_si_artifact, modu
     torch_values = torch.tensor(values, dtype=torch.float64, requires_grad=True)
     expected = torch_module(torch_values[None, :])[0]
     (expected * torch.tensor(seed, dtype=torch.float64)).sum().backward()
-    assert np.allclose(native_module.evaluate(values), expected.detach().numpy(), atol=2e-11)
-    assert np.allclose(native_module.reverse(values, seed), torch_values.grad.numpy(), atol=2e-10)
+    assert np.allclose(
+        native_module.evaluate(values), expected.detach().numpy(), atol=2e-11
+    )
+    assert np.allclose(
+        native_module.reverse(values, seed), torch_values.grad.numpy(), atol=2e-10
+    )
 
 
 def test_mh1_e3_linear_batch_matches_repeated_scalar_calls():
@@ -1134,9 +1201,18 @@ def test_mh1_e3_linear_batch_matches_repeated_scalar_calls():
         "weight": {
             "shape": [12],
             "values": [
-                0.2, -0.1, 0.5, 0.3,
-                -0.2, 0.4, 0.8, -0.5,
-                -0.4, 0.7, 0.1, 0.6,
+                0.2,
+                -0.1,
+                0.5,
+                0.3,
+                -0.2,
+                0.4,
+                0.8,
+                -0.5,
+                -0.4,
+                0.7,
+                0.1,
+                0.6,
             ],
         },
         "bias": {"shape": [8], "values": [0.1, -0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]},
@@ -1152,7 +1228,9 @@ def test_mh1_e3_linear_batch_matches_repeated_scalar_calls():
     seeds = rng.normal(size=(samples, module.output_dimension))
     expected = np.concatenate([module.evaluate(row) for row in values])
     expected_adjoint = np.concatenate([module.reverse(row) for row in seeds])
-    assert np.allclose(module.evaluate_batch(values.ravel(), samples), expected, atol=2e-14)
+    assert np.allclose(
+        module.evaluate_batch(values.ravel(), samples), expected, atol=2e-14
+    )
     assert np.allclose(
         module.reverse_batch(seeds.ravel(), samples), expected_adjoint, atol=2e-14
     )
@@ -1167,9 +1245,7 @@ def test_mh1_e3_linear_batch_matches_repeated_scalar_calls():
             kokkos.reverse_batch(seeds.ravel(), samples), expected_adjoint, atol=2e-14
         )
     if hasattr(native_symmetrix, "E3LinearKokkosFloat"):
-        float_module = native_symmetrix.E3LinearKokkosFloat(
-            json.dumps(definition)
-        )
+        float_module = native_symmetrix.E3LinearKokkosFloat(json.dumps(definition))
         float_module.set_backend("scalar")
         scalar_values = np.asarray(
             float_module.evaluate_batch(values.astype(np.float32).ravel(), samples)
@@ -1190,9 +1266,7 @@ def test_mh1_e3_linear_batch_matches_repeated_scalar_calls():
 
 
 @pytest.mark.parametrize("layer", [0, 1])
-def test_mh1_float32_linear_backends_match_on_official_shapes(
-    mh1_si_artifact, layer
-):
+def test_mh1_float32_linear_backends_match_on_official_shapes(mh1_si_artifact, layer):
     if not hasattr(native_symmetrix, "E3LinearKokkosFloat"):
         pytest.skip("Symmetrix was built without Float32 Kokkos E3 primitives")
     if not native_symmetrix._kokkos_is_initialized():
@@ -1203,12 +1277,12 @@ def test_mh1_float32_linear_backends_match_on_official_shapes(
     )
     rng = np.random.default_rng(2048 + layer)
     samples = 17
-    values = rng.normal(
-        scale=0.1, size=(samples, module.input_dimension)
-    ).astype(np.float32)
-    seeds = rng.normal(
-        scale=0.1, size=(samples, module.output_dimension)
-    ).astype(np.float32)
+    values = rng.normal(scale=0.1, size=(samples, module.input_dimension)).astype(
+        np.float32
+    )
+    seeds = rng.normal(scale=0.1, size=(samples, module.output_dimension)).astype(
+        np.float32
+    )
     module.set_backend("scalar")
     scalar_values = np.asarray(module.evaluate_batch(values.ravel(), samples))
     scalar_adjoints = np.asarray(module.reverse_batch(seeds.ravel(), samples))
@@ -1222,9 +1296,7 @@ def test_mh1_float32_linear_backends_match_on_official_shapes(
 
 
 @pytest.mark.parametrize("layer", [0, 1])
-def test_mh1_tensor_product_forward_and_reverse_match_autograd(
-    mh1_si_artifact, layer
-):
+def test_mh1_tensor_product_forward_and_reverse_match_autograd(mh1_si_artifact, layer):
     data, _ = mh1_si_artifact
     model = torch.load(
         _mh1_model_path(), map_location=torch.device("cpu"), weights_only=False
@@ -1281,21 +1353,27 @@ def test_mh1_tensor_product_forward_and_reverse_match_autograd(
             [(1.0 - 0.1 * factor) * seed for factor in factors],
             dtype=np.float32,
         )
-        expected_values = np.concatenate([
-            native_module.evaluate(node_x, node_y, node_w)
-            for node_x, node_y, node_w in zip(first, second, batch_weights)
-        ])
+        expected_values = np.concatenate(
+            [
+                native_module.evaluate(node_x, node_y, node_w)
+                for node_x, node_y, node_w in zip(first, second, batch_weights)
+            ]
+        )
         expected_adjoints = [
             native_module.reverse(node_x, node_y, node_w, node_seed)
-            for node_x, node_y, node_w, node_seed
-            in zip(first, second, batch_weights, seeds)
+            for node_x, node_y, node_w, node_seed in zip(
+                first, second, batch_weights, seeds
+            )
         ]
         actual_values = float_module.evaluate_batch(
             first.ravel(), second.ravel(), batch_weights.ravel(), len(factors)
         )
         actual_adjoints = float_module.reverse_batch(
-            first.ravel(), second.ravel(), batch_weights.ravel(),
-            seeds.ravel(), len(factors)
+            first.ravel(),
+            second.ravel(),
+            batch_weights.ravel(),
+            seeds.ravel(),
+            len(factors),
         )
         assert float_module.uses_mh1_fast_path
         assert float_module.backend == "official_kokkos"
@@ -1337,18 +1415,18 @@ def test_mh1_cuda_tensor_reverse_direct_nodes_matches_edge_scatter(
     edge_input_2 = rng.normal(
         scale=0.2, size=(samples, module.input_2_dimension)
     ).astype(np.float32)
-    edge_weights = rng.normal(
-        scale=0.2, size=(samples, module.weight_size)
-    ).astype(np.float32)
+    edge_weights = rng.normal(scale=0.2, size=(samples, module.weight_size)).astype(
+        np.float32
+    )
     target_adjoint = rng.normal(
         scale=0.2, size=(target_nodes, module.output_dimension)
     ).astype(np.float32)
-    initial_source_adjoint = rng.normal(
-        scale=0.1, size=source_values.shape
-    ).astype(np.float32)
+    initial_source_adjoint = rng.normal(scale=0.1, size=source_values.shape).astype(
+        np.float32
+    )
 
-    block_sources = source_indices[first_edge:first_edge + samples]
-    block_targets = target_indices[first_edge:first_edge + samples]
+    block_sources = source_indices[first_edge : first_edge + samples]
+    block_targets = target_indices[first_edge : first_edge + samples]
     edge_source_adjoint, expected_input_2_adjoint, expected_weight_adjoint = (
         module.reverse_batch(
             source_values[block_sources].ravel(),
@@ -1460,25 +1538,25 @@ def test_mh1_cuda_tensor_team_size_tracks_edge_multiplicity(
         "irreps_in1": f"{multiplicity}x0e",
         "irreps_in2": "1x0e",
         "irreps_out": f"{multiplicity}x0e",
-        "instructions": [{
-            "i_in1": 0,
-            "i_in2": 0,
-            "i_out": 0,
-            "connection_mode": "uvu",
-            "has_weight": True,
-            "path_weight": 1.0,
-            "path_shape": [multiplicity, 1],
-            "wigner_3j": {"shape": [1, 1, 1], "values": [1.0]},
-        }],
+        "instructions": [
+            {
+                "i_in1": 0,
+                "i_in2": 0,
+                "i_out": 0,
+                "connection_mode": "uvu",
+                "has_weight": True,
+                "path_weight": 1.0,
+                "path_shape": [multiplicity, 1],
+                "wigner_3j": {"shape": [1, 1, 1], "values": [1.0]},
+            }
+        ],
         "weight": {"shape": [0], "values": []},
         "output_mask": {
             "shape": [multiplicity],
             "values": [1.0] * multiplicity,
         },
     }
-    module = native_symmetrix.E3TensorProductKokkosFloat(
-        json.dumps(definition)
-    )
+    module = native_symmetrix.E3TensorProductKokkosFloat(json.dumps(definition))
     assert module.uses_mh1_fast_path
     if native_symmetrix._kokkos_default_execution_space() == "Cuda":
         assert module.channel_team_size == expected_team_size
@@ -1490,9 +1568,7 @@ def test_mh1_cuda_tensor_team_size_tracks_edge_multiplicity(
     harmonic = np.array([0.7], dtype=np.float32)
     weights = np.linspace(0.3, 0.8, multiplicity, dtype=np.float32)
     seed = np.linspace(-0.4, 0.6, multiplicity, dtype=np.float32)
-    actual = np.asarray(module.evaluate_batch(
-        values, harmonic, weights, 1
-    ))
+    actual = np.asarray(module.evaluate_batch(values, harmonic, weights, 1))
     values_adj, harmonic_adj, weights_adj = module.reverse_batch(
         values, harmonic, weights, seed, 1
     )
@@ -1519,16 +1595,18 @@ def test_mh1_uuu_tensor_product_uses_diagonal_weights(use_kokkos):
         "irreps_in1": "3x0e",
         "irreps_in2": "3x0e",
         "irreps_out": "3x0e",
-        "instructions": [{
-            "i_in1": 0,
-            "i_in2": 0,
-            "i_out": 0,
-            "connection_mode": "uuu",
-            "has_weight": True,
-            "path_weight": 1.0,
-            "path_shape": [3],
-            "wigner_3j": {"shape": [1, 1, 1], "values": [1.0]},
-        }],
+        "instructions": [
+            {
+                "i_in1": 0,
+                "i_in2": 0,
+                "i_out": 0,
+                "connection_mode": "uuu",
+                "has_weight": True,
+                "path_weight": 1.0,
+                "path_shape": [3],
+                "wigner_3j": {"shape": [1, 1, 1], "values": [1.0]},
+            }
+        ],
         "weight": {"shape": [0], "values": []},
         "output_mask": {"shape": [3], "values": [1.0, 1.0, 1.0]},
     }
@@ -1560,16 +1638,18 @@ def test_mh1_kokkos_tensor_product_validates_binding_dimensions():
         "irreps_in1": "1x0e",
         "irreps_in2": "1x0e",
         "irreps_out": "1x0e",
-        "instructions": [{
-            "i_in1": 0,
-            "i_in2": 0,
-            "i_out": 0,
-            "connection_mode": "uvu",
-            "has_weight": True,
-            "path_weight": 1.0,
-            "path_shape": [1, 1],
-            "wigner_3j": {"shape": [1, 1, 1], "values": [1.0]},
-        }],
+        "instructions": [
+            {
+                "i_in1": 0,
+                "i_in2": 0,
+                "i_out": 0,
+                "connection_mode": "uvu",
+                "has_weight": True,
+                "path_weight": 1.0,
+                "path_shape": [1, 1],
+                "wigner_3j": {"shape": [1, 1, 1], "values": [1.0]},
+            }
+        ],
         "weight": {"shape": [1], "values": [2.0]},
         "output_mask": {"shape": [1], "values": [1.0]},
     }
@@ -1610,12 +1690,14 @@ def test_mh1_product_basis_rejects_malformed_tensor_layout(use_kokkos):
     linear = {
         "irreps_in": "1x0e",
         "irreps_out": "1x0e",
-        "instructions": [{
-            "i_in": 0,
-            "i_out": 0,
-            "path_weight": 1.0,
-            "path_shape": [1, 1],
-        }],
+        "instructions": [
+            {
+                "i_in": 0,
+                "i_out": 0,
+                "path_weight": 1.0,
+                "path_shape": [1, 1],
+            }
+        ],
         "weight": {"shape": [1], "values": [1.0]},
         "bias": {"shape": [0], "values": []},
         "output_mask": {"shape": [1], "values": [1.0]},
@@ -1629,12 +1711,14 @@ def test_mh1_product_basis_rejects_malformed_tensor_layout(use_kokkos):
         "symmetric_contractions": {
             "irreps_in": "1x0e",
             "irreps_out": "1x0e",
-            "contractions": [{
-                "correlation": 1,
-                "weights": [],
-                "weights_max": {"shape": [1], "values": [1.0]},
-                "u_tensors": [{"shape": [1, 1], "values": [1.0]}],
-            }],
+            "contractions": [
+                {
+                    "correlation": 1,
+                    "weights": [],
+                    "weights_max": {"shape": [1], "values": [1.0]},
+                    "u_tensors": [{"shape": [1, 1], "values": [1.0]}],
+                }
+            ],
         },
     }
     if use_kokkos:
@@ -1653,12 +1737,14 @@ def test_mh1_generic_product_batch_supports_varying_elements_without_skip():
     linear = {
         "irreps_in": "2x0e",
         "irreps_out": "2x0e",
-        "instructions": [{
-            "i_in": 0,
-            "i_out": 0,
-            "path_weight": 1.0,
-            "path_shape": [2, 2],
-        }],
+        "instructions": [
+            {
+                "i_in": 0,
+                "i_out": 0,
+                "path_weight": 1.0,
+                "path_shape": [2, 2],
+            }
+        ],
         "weight": {"shape": [4], "values": [1.0, 0.0, 0.0, 1.0]},
         "bias": {"shape": [0], "values": []},
         "output_mask": {"shape": [2], "values": [1.0, 1.0]},
@@ -1672,30 +1758,35 @@ def test_mh1_generic_product_batch_supports_varying_elements_without_skip():
         "symmetric_contractions": {
             "irreps_in": "2x0e",
             "irreps_out": "2x0e",
-            "contractions": [{
-                "correlation": 1,
-                "weights": [],
-                "weights_max": {
-                    "shape": [2, 1, 2],
-                    "values": [2.0, 3.0, 5.0, 7.0],
-                },
-                "u_tensors": [{"shape": [1, 1], "values": [1.0]}],
-            }],
+            "contractions": [
+                {
+                    "correlation": 1,
+                    "weights": [],
+                    "weights_max": {
+                        "shape": [2, 1, 2],
+                        "values": [2.0, 3.0, 5.0, 7.0],
+                    },
+                    "u_tensors": [{"shape": [1, 1], "values": [1.0]}],
+                }
+            ],
         },
     }
     product = native_symmetrix.E3ProductBasis(json.dumps(definition))
     features = np.array([[0.2, -0.4], [1.1, 0.3], [-0.7, 0.9]])
     elements = [0, 1, 0]
     seeds = np.array([[0.6, -0.1], [-0.2, 0.8], [0.4, 0.5]])
-    expected_values = np.concatenate([
-        product.evaluate(row, [], element)
-        for row, element in zip(features, elements)
-    ])
-    expected_adjoints = np.concatenate([
-        product.reverse(row, element, seed)[0]
-        for row, element, seed in zip(features, elements, seeds)
-    ])
-    actual_values = product.evaluate_batch(features.ravel(), [], elements, len(elements))
+    expected_values = np.concatenate(
+        [product.evaluate(row, [], element) for row, element in zip(features, elements)]
+    )
+    expected_adjoints = np.concatenate(
+        [
+            product.reverse(row, element, seed)[0]
+            for row, element, seed in zip(features, elements, seeds)
+        ]
+    )
+    actual_values = product.evaluate_batch(
+        features.ravel(), [], elements, len(elements)
+    )
     actual_adjoints, skip_adjoints = product.reverse_batch(
         features.ravel(), elements, seeds.ravel(), len(elements)
     )
@@ -1747,7 +1838,9 @@ def test_mh1_product_basis_forward_and_reverse_match_autograd(
     for multiplicity, irrep in torch_module.symmetric_contractions.irreps_in:
         width = irrep.dim
         size = multiplicity * width
-        pieces.append(torch_features[offset:offset + size].reshape(multiplicity, width))
+        pieces.append(
+            torch_features[offset : offset + size].reshape(multiplicity, width)
+        )
         offset += size
     feature_major = torch.cat(pieces, dim=1)[None, :, :]
     expected = torch_module(feature_major, torch_skip[None, :], attrs)[0]
@@ -1761,10 +1854,12 @@ def test_mh1_product_basis_forward_and_reverse_match_autograd(
     batch_features = np.stack([features, 0.7 * features, -0.4 * features])
     batch_skip = np.stack([skip, -0.2 * skip, 0.5 * skip])
     batch_seed = np.stack([seed, 0.3 * seed, -0.6 * seed])
-    expected_batch = np.concatenate([
-        native_module.evaluate(node, node_skip, 0)
-        for node, node_skip in zip(batch_features, batch_skip)
-    ])
+    expected_batch = np.concatenate(
+        [
+            native_module.evaluate(node, node_skip, 0)
+            for node, node_skip in zip(batch_features, batch_skip)
+        ]
+    )
     expected_feature_adjoints = []
     expected_skip_adjoints = []
     for node, node_seed in zip(batch_features, batch_seed):
@@ -1803,15 +1898,11 @@ def test_mh1_kokkos_compiled_product_matches_serial_batch(
     skips = rng.normal(scale=0.05, size=(samples, serial.output_dimension))
     seeds = rng.normal(scale=0.05, size=(samples, serial.output_dimension))
     elements = [0] * samples
-    expected = serial.evaluate_batch(
-        features.ravel(), skips.ravel(), elements, samples
-    )
+    expected = serial.evaluate_batch(features.ravel(), skips.ravel(), elements, samples)
     expected_feature_adjoints, expected_skip_adjoints = serial.reverse_batch(
         features.ravel(), elements, seeds.ravel(), samples
     )
-    actual = kokkos.evaluate_batch(
-        features.ravel(), skips.ravel(), elements, samples
-    )
+    actual = kokkos.evaluate_batch(features.ravel(), skips.ravel(), elements, samples)
     feature_adjoints, skip_adjoints = kokkos.reverse_batch(
         features.ravel(), elements, seeds.ravel(), samples
     )
@@ -1828,11 +1919,13 @@ def test_mh1_conditioned_affine_mlp_matches_full_input(mh1_si_artifact):
     dynamic_size = len(data["radial_embedding"]["basis"]["weights"]["values"])
     dynamic = rng.normal(scale=0.1, size=dynamic_size)
     source = rng.normal(scale=0.1, size=512)
-    target = rng.normal(scale=0.1, size=full.input_size-dynamic_size-len(source))
+    target = rng.normal(scale=0.1, size=full.input_size - dynamic_size - len(source))
     seed = rng.normal(scale=0.1, size=full.output_size)
     assert full.supports_conditioned_input(dynamic_size)
     source_contribution = full.first_layer_contribution(dynamic_size, source)
-    target_contribution = full.first_layer_contribution(dynamic_size+len(source), target)
+    target_contribution = full.first_layer_contribution(
+        dynamic_size + len(source), target
+    )
     complete = np.concatenate([dynamic, source, target])
     assert np.allclose(
         full.evaluate_conditioned(dynamic, source_contribution, target_contribution),
@@ -1873,7 +1966,9 @@ def test_mh1_conditioned_affine_mlp_batch_matches_scalar_calls(
         second_contributions.append(
             module.first_layer_contribution(dynamic_size + 512, target)
         )
-    row_contributions = np.asarray(first_contributions) + np.asarray(second_contributions)
+    row_contributions = np.asarray(first_contributions) + np.asarray(
+        second_contributions
+    )
     expected_outputs = []
     expected_adjoints = []
     for row, first, second, seed in zip(
@@ -1974,8 +2069,7 @@ def test_mh1_kokkos_float32_streamed_modes_match_float64(mh1_si_artifact):
         assert calculator.evaluator.streamed_edges_mode == mode
         calculator.calculate(atoms.copy(), properties=properties)
         float_results[mode] = {
-            name: np.array(calculator.results[name], copy=True)
-            for name in properties
+            name: np.array(calculator.results[name], copy=True) for name in properties
         }
         if mode == "all":
             float_workspace_bytes = calculator.evaluator.edge_workspace_bytes
@@ -2018,9 +2112,7 @@ def test_mh1_kokkos_exposes_synchronized_linear_controls(mh1_si_artifact):
     assert evaluator.tensor_product_backend == "official_kokkos"
     execution_space = native_symmetrix._kokkos_default_execution_space()
     expected_tensor_execution = (
-        "official_cuda_team"
-        if execution_space == "Cuda"
-        else "official_kokkos_mdrange"
+        "official_cuda_team" if execution_space == "Cuda" else "official_kokkos_mdrange"
     )
     assert evaluator.tensor_product_execution_backend == expected_tensor_execution
     expected_team_size = 128 if execution_space == "Cuda" else 0
@@ -2028,8 +2120,7 @@ def test_mh1_kokkos_exposes_synchronized_linear_controls(mh1_si_artifact):
     assert evaluator.tensor_product_harmonic_team_size == expected_team_size
     expected_fused_reverse = execution_space == "Cuda"
     assert (
-        evaluator.fused_gate_normalization_reverse_available
-        is expected_fused_reverse
+        evaluator.fused_gate_normalization_reverse_available is expected_fused_reverse
     )
     assert evaluator.uses_fused_gate_normalization_reverse is expected_fused_reverse
     assert evaluator.direct_node_tensor_reverse_available is expected_fused_reverse
@@ -2066,8 +2157,7 @@ def test_mh1_kokkos_exposes_synchronized_linear_controls(mh1_si_artifact):
 
     double_evaluator = native_symmetrix.MACENonlinearKokkos(str(model_path))
     assert (
-        double_evaluator.tensor_product_execution_backend
-        == "official_kokkos_mdrange"
+        double_evaluator.tensor_product_execution_backend == "official_kokkos_mdrange"
     )
     assert not double_evaluator.fused_gate_normalization_reverse_available
     assert not double_evaluator.uses_fused_gate_normalization_reverse
@@ -2097,8 +2187,7 @@ def test_mh1_cuda_packed_linear_matches_scalar(mh1_si_artifact):
         calculator.evaluator.set_e3_linear_backend(backend)
         calculator.calculate(atoms.copy(), properties=properties)
         results[backend] = {
-            name: np.array(calculator.results[name], copy=True)
-            for name in properties
+            name: np.array(calculator.results[name], copy=True) for name in properties
         }
     for name in properties:
         np.testing.assert_allclose(
@@ -2136,14 +2225,10 @@ def test_mh1_cuda_fused_reverse_matches_control(mh1_si_artifact):
         assert calculator.evaluator.uses_fused_gate_normalization_reverse is fused_gate
         assert calculator.evaluator.uses_direct_node_tensor_reverse is direct_tensor
         if direct_tensor and fallback_workspace_bytes is not None:
-            assert (
-                calculator.evaluator.edge_workspace_bytes
-                < fallback_workspace_bytes
-            )
+            assert calculator.evaluator.edge_workspace_bytes < fallback_workspace_bytes
         calculator.calculate(atoms.copy(), properties=properties)
         results[(fused_gate, direct_tensor)] = {
-            name: np.array(calculator.results[name], copy=True)
-            for name in properties
+            name: np.array(calculator.results[name], copy=True) for name in properties
         }
         if not direct_tensor and fallback_workspace_bytes is None:
             fallback_workspace_bytes = calculator.evaluator.edge_workspace_bytes

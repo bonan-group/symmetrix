@@ -16,15 +16,15 @@ class DummyFieldSymmetrix(Symmetrix):
         self._electric_field = None
         self._macefield_electric_field = None
         self.implemented_properties = [
-            'energy',
-            'free_energy',
-            'energies',
-            'forces',
-            'stress',
-            'node_energy',
-            'polarization',
-            'becs',
-            'polarizability',
+            "energy",
+            "free_energy",
+            "energies",
+            "forces",
+            "stress",
+            "node_energy",
+            "polarization",
+            "becs",
+            "polarizability",
         ]
         self.calls = []
 
@@ -48,19 +48,21 @@ class DummyFieldSymmetrix(Symmetrix):
             [field[0], field[1], field[2], field[0], field[1], field[2]]
         )
         results = {
-            'energy': total_energy,
-            'free_energy': total_energy,
-            'energies': np.full(num_atoms, total_energy / num_atoms),
-            'forces': forces,
-            'stress': stress,
-            'node_energy': np.full(num_atoms, total_energy / num_atoms),
+            "energy": total_energy,
+            "free_energy": total_energy,
+            "energies": np.full(num_atoms, total_energy / num_atoms),
+            "forces": forces,
+            "stress": stress,
+            "node_energy": np.full(num_atoms, total_energy / num_atoms),
         }
-        if any(prop in properties for prop in ('polarization', 'becs', 'polarizability')):
-            results['polarization'] = field + np.array([1.0, 2.0, 3.0])
-        if 'becs' in properties:
-            results['becs'] = np.full((num_atoms, 9), 4.0)
-        if 'polarizability' in properties:
-            results['polarizability'] = np.arange(9, dtype=float)
+        if any(
+            prop in properties for prop in ("polarization", "becs", "polarizability")
+        ):
+            results["polarization"] = field + np.array([1.0, 2.0, 3.0])
+        if "becs" in properties:
+            results["becs"] = np.full((num_atoms, 9), 4.0)
+        if "polarizability" in properties:
+            results["polarizability"] = np.arange(9, dtype=float)
         return results
 
     def _calculate_macefield_results(
@@ -75,7 +77,7 @@ class DummyFieldSymmetrix(Symmetrix):
 
 
 class DummyBaseCalculator(Calculator):
-    implemented_properties = ['energy', 'free_energy', 'energies', 'forces', 'stress']
+    implemented_properties = ["energy", "free_energy", "energies", "forces", "stress"]
 
     def __init__(
         self,
@@ -93,18 +95,18 @@ class DummyBaseCalculator(Calculator):
         self.sparse_results = sparse_results
         self.reject_attached_calculator = reject_attached_calculator
 
-    def calculate(self, atoms=None, properties=['energy'], system_changes=all_changes):
+    def calculate(self, atoms=None, properties=["energy"], system_changes=all_changes):
         if self.reject_attached_calculator and atoms.calc is not None:
             raise NotImplementedError("attached calculator is not supported")
         Calculator.calculate(self, atoms, properties, system_changes)
         self.calls += 1
         energy = self.energy_offset + np.sum(self.atoms.positions**2)
         available = {
-            'energy': energy,
-            'free_energy': energy,
-            'energies': np.full(len(self.atoms), energy / len(self.atoms)),
-            'forces': -2.0 * self.atoms.positions,
-            'stress': np.eye(3) * 2.0 if self.matrix_stress else np.full(6, 2.0),
+            "energy": energy,
+            "free_energy": energy,
+            "energies": np.full(len(self.atoms), energy / len(self.atoms)),
+            "forces": -2.0 * self.atoms.positions,
+            "stress": np.eye(3) * 2.0 if self.matrix_stress else np.full(6, 2.0),
         }
         self.results = {
             prop: value
@@ -117,26 +119,26 @@ class DummyBaseCalculator(Calculator):
 @pytest.fixture
 def atoms():
     atoms = Atoms(
-        'H2',
+        "H2",
         positions=[[0.1, 0.0, 0.0], [0.8, 0.2, 0.0]],
         cell=[4.0, 4.0, 4.0],
         pbc=True,
     )
-    atoms.info['electric_field'] = np.array([0.2, -0.1, 0.05])
+    atoms.info["electric_field"] = np.array([0.2, -0.1, 0.05])
     return atoms
 
 
 def test_field_contribution_matches_requested_minus_zero_field(atoms):
     field_calculator = DummyFieldSymmetrix()
     contribution = FieldContributionCalculator(field_calculator)
-    requested = atoms.info['electric_field']
+    requested = atoms.info["electric_field"]
     expected_field = field_calculator.model_results(atoms, requested, [])
     expected_zero = field_calculator.model_results(atoms, np.zeros(3), [])
 
     atoms.calc = contribution
     atoms.get_potential_energy()
 
-    for prop in ('energy', 'free_energy', 'energies', 'forces', 'stress'):
+    for prop in ("energy", "free_energy", "energies", "forces", "stress"):
         expected = np.asarray(expected_field[prop]) - np.asarray(expected_zero[prop])
         assert np.allclose(contribution.get_property(prop, atoms), expected)
     assert np.allclose(field_calculator.calls, [np.zeros(3), requested])
@@ -147,20 +149,20 @@ def test_field_contribution_passes_through_response_properties(atoms):
     contribution = FieldContributionCalculator(field_calculator)
     atoms.calc = contribution
 
-    requested = ['polarization', 'becs', 'polarizability']
+    requested = ["polarization", "becs", "polarizability"]
     contribution.calculate(atoms, requested, all_changes)
     actual = contribution.results
     expected = field_calculator.model_results(
         atoms,
-        atoms.info['electric_field'],
+        atoms.info["electric_field"],
         requested,
     )
 
-    assert np.allclose(actual['polarization'], expected['polarization'])
-    assert np.allclose(actual['becs'], expected['becs'])
-    assert np.allclose(actual['polarizability'], expected['polarizability'])
+    assert np.allclose(actual["polarization"], expected["polarization"])
+    assert np.allclose(actual["becs"], expected["becs"])
+    assert np.allclose(actual["polarizability"], expected["polarizability"])
     assert len(field_calculator.calls) == 1
-    assert np.allclose(field_calculator.calls[0], atoms.info['electric_field'])
+    assert np.allclose(field_calculator.calls[0], atoms.info["electric_field"])
 
 
 def test_field_contribution_reuses_zero_reference_for_field_only_changes(atoms):
@@ -171,10 +173,10 @@ def test_field_contribution_reuses_zero_reference_for_field_only_changes(atoms):
     atoms.get_potential_energy()
     assert len(field_calculator.calls) == 2
 
-    atoms.info['electric_field'][0] = 0.3
+    atoms.info["electric_field"][0] = 0.3
     atoms.get_potential_energy()
     assert len(field_calculator.calls) == 3
-    assert np.allclose(field_calculator.calls[-1], atoms.info['electric_field'])
+    assert np.allclose(field_calculator.calls[-1], atoms.info["electric_field"])
 
     atoms.positions[0, 0] += 0.1
     atoms.get_potential_energy()
@@ -200,7 +202,7 @@ def test_field_contribution_force_is_energy_derivative(atoms):
 def test_zero_field_additive_properties_skip_field_model(atoms):
     field_calculator = DummyFieldSymmetrix()
     contribution = FieldContributionCalculator(field_calculator)
-    atoms.info['electric_field'] = np.zeros(3)
+    atoms.info["electric_field"] = np.zeros(3)
     atoms.calc = contribution
 
     assert atoms.get_potential_energy() == 0.0
@@ -208,7 +210,7 @@ def test_zero_field_additive_properties_skip_field_model(atoms):
     assert np.array_equal(atoms.get_stress(), np.zeros(6))
     assert field_calculator.calls == []
 
-    assert contribution.get_property('polarization', atoms).shape == (3,)
+    assert contribution.get_property("polarization", atoms).shape == (3,)
     assert len(field_calculator.calls) == 1
 
 
@@ -219,11 +221,13 @@ def test_field_aware_calculator_combines_base_and_field_contribution(atoms):
     contribution = calculator.field_contribution
     atoms.calc = calculator
 
-    requested = ['energy', 'free_energy', 'energies', 'forces', 'stress']
+    requested = ["energy", "free_energy", "energies", "forces", "stress"]
     properties = atoms.get_properties(requested)
     for prop in requested:
         actual = properties[prop]
-        expected = base.get_property(prop, atoms) + contribution.get_property(prop, atoms)
+        expected = base.get_property(prop, atoms) + contribution.get_property(
+            prop, atoms
+        )
         assert np.allclose(actual, expected)
 
 
@@ -231,29 +235,29 @@ def test_field_aware_calculator_reduces_exactly_to_base_at_zero_field(atoms):
     base = DummyBaseCalculator()
     field_calculator = DummyFieldSymmetrix()
     calculator = FieldAwareCalculator(base, field_calculator)
-    atoms.info['electric_field'] = np.zeros(3)
+    atoms.info["electric_field"] = np.zeros(3)
     atoms.calc = calculator
 
-    assert atoms.get_potential_energy() == base.get_property('energy', atoms)
-    assert np.array_equal(atoms.get_forces(), base.get_property('forces', atoms))
+    assert atoms.get_potential_energy() == base.get_property("energy", atoms)
+    assert np.array_equal(atoms.get_forces(), base.get_property("forces", atoms))
     assert field_calculator.calls == []
 
 
 def test_field_aware_property_negotiation_and_response_only_request(atoms):
-    base = DummyBaseCalculator(implemented_properties=['energy', 'forces'])
+    base = DummyBaseCalculator(implemented_properties=["energy", "forces"])
     field_calculator = DummyFieldSymmetrix()
     calculator = FieldAwareCalculator(base, field_calculator)
 
     assert calculator.implemented_properties == [
-        'energy',
-        'forces',
-        'polarization',
-        'becs',
-        'polarizability',
+        "energy",
+        "forces",
+        "polarization",
+        "becs",
+        "polarizability",
     ]
 
     atoms.calc = calculator
-    polarization = calculator.get_property('polarization', atoms)
+    polarization = calculator.get_property("polarization", atoms)
     assert polarization.shape == (3,)
     assert base.calls == 0
     assert len(field_calculator.calls) == 1
@@ -266,7 +270,7 @@ def test_field_aware_accepts_matrix_stress_from_base(atoms):
 
     actual = atoms.get_stress()
     expected = np.array([2.0, 2.0, 2.0, 0.0, 0.0, 0.0])
-    expected += calculator.field_contribution.get_property('stress', atoms)
+    expected += calculator.field_contribution.get_property("stress", atoms)
     assert np.allclose(actual, expected)
 
 
@@ -341,10 +345,10 @@ def test_calculator_field_override_takes_precedence(atoms):
 
 
 def test_field_contribution_requires_field_aware_symmetrix():
-    with pytest.raises(TypeError, match='must be a Symmetrix'):
+    with pytest.raises(TypeError, match="must be a Symmetrix"):
         FieldContributionCalculator(DummyBaseCalculator())
 
     plain = DummyFieldSymmetrix()
     plain.evaluator.has_field_coupling = False
-    with pytest.raises(ValueError, match='field-aware'):
+    with pytest.raises(ValueError, match="field-aware"):
         FieldContributionCalculator(plain)

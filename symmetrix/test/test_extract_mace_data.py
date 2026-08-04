@@ -13,7 +13,10 @@ else:
     extract_mace_data_import_error = None
 
 
-@pytest.mark.skipif(extract_mace_data is None, reason=f"extract_mace_data is not available: {extract_mace_data_import_error}")
+@pytest.mark.skipif(
+    extract_mace_data is None,
+    reason=f"extract_mace_data is not available: {extract_mace_data_import_error}",
+)
 def test_macefield_extractor_includes_field_schema(macefield_model_path):
     data = extract_mace_data(
         macefield_model_path,
@@ -61,7 +64,10 @@ def test_macefield_extractor_includes_field_schema(macefield_model_path):
     assert radial["networks"]["A1"]["postprocess"] == "tanh-square"
 
 
-@pytest.mark.skipif(extract_mace_data is None, reason=f"extract_mace_data is not available: {extract_mace_data_import_error}")
+@pytest.mark.skipif(
+    extract_mace_data is None,
+    reason=f"extract_mace_data is not available: {extract_mace_data_import_error}",
+)
 def test_macefield_extractor_retains_legacy_pair_splines(
     macefield_model_path,
     caplog,
@@ -87,7 +93,10 @@ def test_macefield_extractor_retains_legacy_pair_splines(
     assert "Generating legacy Symmetrix format-v1" in caplog.text
 
 
-@pytest.mark.skipif(extract_mace_data is None, reason=f"extract_mace_data is not available: {extract_mace_data_import_error}")
+@pytest.mark.skipif(
+    extract_mace_data is None,
+    reason=f"extract_mace_data is not available: {extract_mace_data_import_error}",
+)
 def test_legacy_pair_splines_retain_low_node_count_support(macefield_model_path):
     for num_spline_points in (2, 3):
         data = extract_mace_data(
@@ -104,7 +113,10 @@ def test_legacy_pair_splines_retain_low_node_count_support(macefield_model_path)
         assert len(data["A1_spline_values"][0]) == num_spline_points
 
 
-@pytest.mark.skipif(extract_mace_data is None, reason=f"extract_mace_data is not available: {extract_mace_data_import_error}")
+@pytest.mark.skipif(
+    extract_mace_data is None,
+    reason=f"extract_mace_data is not available: {extract_mace_data_import_error}",
+)
 def test_macefield_extractor_defaults_to_all_checkpoint_elements(macefield_model_path):
     data = extract_mace_data(
         macefield_model_path,
@@ -120,7 +132,10 @@ def test_macefield_extractor_defaults_to_all_checkpoint_elements(macefield_model
     assert "radial_spline_values_1" not in data
 
 
-@pytest.mark.skipif(extract_mace_data is None, reason=f"extract_mace_data is not available: {extract_mace_data_import_error}")
+@pytest.mark.skipif(
+    extract_mace_data is None,
+    reason=f"extract_mace_data is not available: {extract_mace_data_import_error}",
+)
 def test_compact_radial_values_and_derivatives_match_pair_splines(
     macefield_model_path,
     tmp_path,
@@ -154,16 +169,20 @@ def test_compact_radial_values_and_derivatives_match_pair_splines(
     grid_min = compact["compact_radial"]["spline_grid_min"]
     h = legacy["radial_spline_h"]
     rng = np.random.default_rng(17)
-    radii = np.concatenate((
-        grid_min + h * np.arange(32),
-        rng.uniform(grid_min, compact_model.r_cut - h, size=17),
-    ))
+    radii = np.concatenate(
+        (
+            grid_min + h * np.arange(32),
+            rng.uniform(grid_min, compact_model.r_cut - h, size=17),
+        )
+    )
     node_types = np.asarray([0, 1], dtype=np.int32)
     num_neigh = np.asarray([len(radii), len(radii)], dtype=np.int32)
-    neigh_types = np.concatenate((
-        np.full(len(radii), 1, dtype=np.int32),
-        np.full(len(radii), 0, dtype=np.int32),
-    ))
+    neigh_types = np.concatenate(
+        (
+            np.full(len(radii), 1, dtype=np.int32),
+            np.full(len(radii), 0, dtype=np.int32),
+        )
+    )
     pair_radii = np.tile(radii, 2)
 
     for method_name, values_name, derivatives_name in (

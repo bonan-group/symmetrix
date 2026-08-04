@@ -2,7 +2,9 @@ from pathlib import Path
 import hashlib
 
 
-def test_cached_model_path_uses_external_cache_and_reuses_download(monkeypatch, tmp_path):
+def test_cached_model_path_uses_external_cache_and_reuses_download(
+    monkeypatch, tmp_path
+):
     from model_downloads import cached_model_path
 
     cache_dir = tmp_path / "cache"
@@ -23,7 +25,9 @@ def test_cached_model_path_uses_external_cache_and_reuses_download(monkeypatch, 
     assert first == cache_dir / "example.model"
     assert second == first
     assert first.read_text() == "model"
-    assert calls == [("https://example.invalid/example.model", cache_dir / "example.model")]
+    assert calls == [
+        ("https://example.invalid/example.model", cache_dir / "example.model")
+    ]
     assert repo_cache not in first.parents
 
 

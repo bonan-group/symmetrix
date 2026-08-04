@@ -11,7 +11,9 @@ import pytest
 try:
     from lammps import lammps
 except ImportError as exc:
-    pytest.skip(f"LAMMPS Python module is not available: {exc}", allow_module_level=True)
+    pytest.skip(
+        f"LAMMPS Python module is not available: {exc}", allow_module_level=True
+    )
 
 try:
     from ase.build import bulk
@@ -19,13 +21,14 @@ try:
     from symmetrix import symmetrix as native_symmetrix
     from symmetrix.extract_mace_data import extract_mace_data
 except ImportError as exc:
-    pytest.skip(f"MACEField test dependencies are not available: {exc}", allow_module_level=True)
+    pytest.skip(
+        f"MACEField test dependencies are not available: {exc}", allow_module_level=True
+    )
 
 
 MODEL_FILENAME = "MACEField-MH-0-omat-dielectric.model"
 MODEL_URL = (
-    "https://github.com/mdi-group/mace-field/releases/download/1.0.2/"
-    + MODEL_FILENAME
+    "https://github.com/mdi-group/mace-field/releases/download/1.0.2/" + MODEL_FILENAME
 )
 MODEL_SHA256 = "f92e043aaf2cd8879919db8452503553fe7b608cb749d8d169dd96d4aa094aa2"
 
@@ -93,7 +96,13 @@ def macefield_json_path(tmp_path_factory):
 @pytest.mark.parametrize(
     "formula, crystal, lattice_kwargs, symbols, masses",
     [
-        ("AlN", "wurtzite", {"a": 3.112, "c": 4.982}, ("Al", "N"), (26.9815385, 14.0067)),
+        (
+            "AlN",
+            "wurtzite",
+            {"a": 3.112, "c": 4.982},
+            ("Al", "N"),
+            (26.9815385, 14.0067),
+        ),
         ("MgO", "rocksalt", {"a": 4.21}, ("Mg", "O"), (24.305, 15.999)),
     ],
     ids=("AlN", "MgO"),
@@ -117,9 +126,14 @@ def test_lammps_kokkos_macefield_energy_forces_match_native(
     mace_atomic_numbers = native.atomic_numbers
     i_list, j_list, r, xyz = neighbor_list("ijdD", atoms, native.r_cut)
     num_nodes = len(atoms)
-    node_types = np.asarray([mace_atomic_numbers.index(atomic_numbers[i]) for i in range(num_nodes)], dtype=np.int32)
+    node_types = np.asarray(
+        [mace_atomic_numbers.index(atomic_numbers[i]) for i in range(num_nodes)],
+        dtype=np.int32,
+    )
     num_neigh = np.asarray(np.bincount(j_list, minlength=num_nodes), dtype=np.int32)
-    neigh_types = np.asarray([mace_atomic_numbers.index(atomic_numbers[j]) for j in j_list], dtype=np.int32)
+    neigh_types = np.asarray(
+        [mace_atomic_numbers.index(atomic_numbers[j]) for j in j_list], dtype=np.int32
+    )
     neigh_indices = np.asarray(j_list, dtype=np.int32)
     native.compute_node_energies_forces_field(
         num_nodes,
@@ -136,10 +150,9 @@ def test_lammps_kokkos_macefield_energy_forces_match_native(
     pair_forces = np.asarray(native.node_forces).reshape((-1, 3))[: len(i_list), :]
     expected_forces = np.zeros((num_nodes, 3))
     for component in range(3):
-        expected_forces[:, component] = (
-            np.bincount(j_list, weights=pair_forces[:, component], minlength=num_nodes)
-            - np.bincount(i_list, weights=pair_forces[:, component], minlength=num_nodes)
-        )
+        expected_forces[:, component] = np.bincount(
+            j_list, weights=pair_forces[:, component], minlength=num_nodes
+        ) - np.bincount(i_list, weights=pair_forces[:, component], minlength=num_nodes)
 
     cell_lengths = atoms.cell.lengths()
     create_atoms = "\n".join(

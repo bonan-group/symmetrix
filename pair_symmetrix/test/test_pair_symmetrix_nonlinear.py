@@ -6,7 +6,9 @@ import pytest
 try:
     from lammps import lammps
 except ImportError as exc:
-    pytest.skip(f"LAMMPS Python module is not available: {exc}", allow_module_level=True)
+    pytest.skip(
+        f"LAMMPS Python module is not available: {exc}", allow_module_level=True
+    )
 
 
 @pytest.mark.parametrize(
@@ -22,10 +24,14 @@ def test_lammps_rejects_nonlinear_mace_before_legacy_parsing(
     pair_style,
 ):
     model_path = tmp_path / "nonlinear.json"
-    model_path.write_text(json.dumps({
-        "symmetrix_format_version": 3,
-        "model_type": "MACE_Nonlinear",
-    }))
+    model_path.write_text(
+        json.dumps(
+            {
+                "symmetrix_format_version": 3,
+                "model_type": "MACE_Nonlinear",
+            }
+        )
+    )
     lmp = lammps(cmdargs=["-screen", "none", *cmdargs])
     try:
         lmp.commands_string(

@@ -10,7 +10,9 @@ MODEL_URLS = {
     "mace-mp-0b3-medium-1-8.json": "https://www.dropbox.com/scl/fi/3lydfgta1lijymq98pgal/mace-mp-0b3-medium-1-8.json?rlkey=7wofp9gznqt5b3wmk5ybbj76z&st=w7cd09x6&dl=1",
     "MACEField-MH-0-omat-dielectric.model": "https://github.com/mdi-group/mace-field/releases/download/1.0.2/MACEField-MH-0-omat-dielectric.model",
 }
-MACEFIELD_MODEL_SHA256 = "f92e043aaf2cd8879919db8452503553fe7b608cb749d8d169dd96d4aa094aa2"
+MACEFIELD_MODEL_SHA256 = (
+    "f92e043aaf2cd8879919db8452503553fe7b608cb749d8d169dd96d4aa094aa2"
+)
 
 
 def test_model_cache_dir():
@@ -39,7 +41,9 @@ def cached_model_path(filename, url, env_var=None, sha256=None):
         if override:
             path = Path(override).expanduser()
             if not path.exists():
-                raise FileNotFoundError(f"{env_var} points to a missing model file: {path}")
+                raise FileNotFoundError(
+                    f"{env_var} points to a missing model file: {path}"
+                )
             return path
 
     cache_dir = test_model_cache_dir()
@@ -55,10 +59,14 @@ def cached_model_path(filename, url, env_var=None, sha256=None):
     except (OSError, URLError) as exc:
         if destination.exists():
             destination.unlink()
-        raise RuntimeError(f"Could not download test model {filename} from {url}") from exc
+        raise RuntimeError(
+            f"Could not download test model {filename} from {url}"
+        ) from exc
     if sha256 is not None and file_sha256(destination) != sha256:
         destination.unlink()
-        raise RuntimeError(f"Downloaded test model {filename} failed SHA-256 verification")
+        raise RuntimeError(
+            f"Downloaded test model {filename} failed SHA-256 verification"
+        )
     return destination
 
 

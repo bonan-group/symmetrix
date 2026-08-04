@@ -35,7 +35,7 @@ void ordered_kokkos_deep_copy(Destination destination,Source source)
 // Template function to convert a std::vector to a Kokkos::View
 template<typename T>
 Kokkos::View<T*> toKokkosView(const char* name,const std::vector<T>& stdVector) {
-    
+
     std::string label(name);
     // Create a Kokkos::View with the same size as the std::vector
     Kokkos::View<T*,Kokkos::SharedSpace> kokkosView(label, stdVector.size());

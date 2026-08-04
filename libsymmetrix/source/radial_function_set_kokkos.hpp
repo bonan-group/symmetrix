@@ -15,7 +15,7 @@ public:
         double xx;
         double xxx;
     };
-    
+
     RadialFunctionSetKokkos();
     RadialFunctionSetKokkos(
         double h,
@@ -104,9 +104,9 @@ public:
         evaluate_function(
             edge_type, evaluation_point(radius), function, value, derivative);
     }
-    
+
 private:
-    
+
     double h;
     double x0;
     int num_edge_types;

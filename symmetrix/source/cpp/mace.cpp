@@ -123,7 +123,7 @@ void bind_mace_cpu(py::module_ &m, const char* class_name)
                            ContiguousDoubleArray r) {
                 prepare_active_types(self, node_types, neigh_types);
                 self.compute_node_energies_forces(
-                           num_nodes, 
+                           num_nodes,
                            std::span<const int>(node_types.data(), node_types.size()),
                            std::span<const int>(num_neigh.data(), num_neigh.size()),
                            std::span<const int>(neigh_indices.data(), neigh_indices.size()),
@@ -244,7 +244,7 @@ void bind_mace_cpu(py::module_ &m, const char* class_name)
                            ContiguousIntArray neigh_types,
                            ContiguousDoubleArray xyz,
                            ContiguousDoubleArray r) {
-                self.reverse_A0(num_nodes, 
+                self.reverse_A0(num_nodes,
                                 std::span<const int>(node_types.data(), node_types.size()),
                                 std::span<const int>(num_neigh.data(), num_neigh.size()),
                                 std::span<const int>(neigh_types.data(), neigh_types.size()),
@@ -286,7 +286,7 @@ void bind_mace_cpu(py::module_ &m, const char* class_name)
         .def("compute_M0",
             [](Evaluator& self, const int num_nodes,
                            ContiguousIntArray node_types) {
-                self.compute_M0(num_nodes, 
+                self.compute_M0(num_nodes,
                                 std::span<const int>(node_types.data(), node_types.size()));
             })
         .def("reverse_M0",
@@ -313,7 +313,7 @@ void bind_mace_cpu(py::module_ &m, const char* class_name)
             [](Evaluator& self, const int num_nodes,
                            ContiguousIntArray num_neigh,
                            ContiguousIntArray neigh_indices) {
-                self.compute_Phi1(num_nodes, 
+                self.compute_Phi1(num_nodes,
                                   std::span<const int>(num_neigh.data(), num_neigh.size()),
                                   std::span<const int>(neigh_indices.data(), neigh_indices.size()));
             })
@@ -325,7 +325,7 @@ void bind_mace_cpu(py::module_ &m, const char* class_name)
                            ContiguousDoubleArray r,
                            bool zero_dxyz,
                            bool zero_H1_adj) {
-                self.reverse_Phi1(num_nodes, 
+                self.reverse_Phi1(num_nodes,
                                   std::span<const int>(num_neigh.data(), num_neigh.size()),
                                   std::span<const int>(neigh_indices.data(), neigh_indices.size()),
                                   std::span<const double>(xyz.data(), xyz.size()),
@@ -370,7 +370,7 @@ void bind_mace_cpu(py::module_ &m, const char* class_name)
         .def("compute_M1",
             [](Evaluator& self, const int num_nodes,
                            ContiguousIntArray node_types) {
-                self.compute_M1(num_nodes, 
+                self.compute_M1(num_nodes,
                                 std::span<const int>(node_types.data(), node_types.size()));
             })
 
@@ -383,21 +383,21 @@ void bind_mace_cpu(py::module_ &m, const char* class_name)
         .def("compute_H2",
             [](Evaluator& self, const int num_nodes,
                            ContiguousIntArray node_types) {
-                self.compute_H2(num_nodes, 
+                self.compute_H2(num_nodes,
                                 std::span<const int>(node_types.data(), node_types.size()));
             })
         .def("reverse_H2",
             [](Evaluator& self, const int num_nodes,
                            ContiguousIntArray node_types,
                            bool zero_H1_adj) {
-                self.reverse_H2(num_nodes, 
+                self.reverse_H2(num_nodes,
                                 std::span<const int>(node_types.data(), node_types.size()),
                                 zero_H1_adj);
             })
         .def("compute_readouts",
             [](Evaluator& self, const int num_nodes,
                            ContiguousIntArray node_types) {
-                self.compute_readouts(num_nodes, 
+                self.compute_readouts(num_nodes,
                                       std::span<const int>(node_types.data(), node_types.size()));
             });
 }

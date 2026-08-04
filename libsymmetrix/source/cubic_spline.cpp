@@ -1,5 +1,6 @@
 #include <cmath>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "cubic_spline.hpp"
@@ -20,10 +21,12 @@ template <typename Precision>
 Precision CubicSplineT<Precision>::evaluate(Precision r)
 {
     const int num_intervals = c.size()/4;
+    const Precision upper_bound = x0+h*num_intervals;
+    if (std::isnan(r) || (x0 == 0.0 && (r < x0 || r > upper_bound)))
+        throw std::invalid_argument(
+            "Out of bounds in CubicSpline::evaluate. r=" + std::to_string(r));
     int i = static_cast<int>(std::floor((r-x0)/h));
     Precision x = r-x0-h*i;
-    if ((i < 0 || i >= num_intervals) && x0 == 0.0)
-        throw std::invalid_argument("Out of bounds in CubicSpline::evaluate.");
     if (i < 0) {
         i = 0;
         x = 0.0;
@@ -42,10 +45,12 @@ template <typename Precision>
 std::tuple<Precision,Precision> CubicSplineT<Precision>::evaluate_deriv(Precision r)
 {
     const int num_intervals = c.size()/4;
+    const Precision upper_bound = x0+h*num_intervals;
+    if (std::isnan(r) || (x0 == 0.0 && (r < x0 || r > upper_bound)))
+        throw std::invalid_argument(
+            "Out of bounds in CubicSpline::evaluate_deriv. r=" + std::to_string(r));
     int i = static_cast<int>(std::floor((r-x0)/h));
     Precision x = r-x0-h*i;
-    if ((i < 0 || i >= num_intervals) && x0 == 0.0)
-        throw std::invalid_argument("Out of bounds in CubicSpline::evaluate_deriv.");
     if (i < 0) {
         i = 0;
         x = 0.0;
@@ -64,10 +69,12 @@ template <typename Precision>
 std::tuple<Precision,Precision> CubicSplineT<Precision>::evaluate_deriv_divided(Precision r)
 {
     const int num_intervals = c.size()/4;
+    const Precision upper_bound = x0+h*num_intervals;
+    if (std::isnan(r) || r <= 0.0 || (x0 == 0.0 && r > upper_bound))
+        throw std::invalid_argument(
+            "Out of bounds in CubicSpline::evaluate_deriv_divided. r=" + std::to_string(r));
     int i = static_cast<int>(std::floor((r-x0)/h));
     Precision x = r-x0-h*i;
-    if ((i < 0 || i >= num_intervals) && x0 == 0.0)
-        throw std::invalid_argument("Out of bounds in CubicSpline::evaluate_deriv.");
     if (i < 0) {
         i = 0;
         x = 0.0;
@@ -89,6 +96,12 @@ auto CubicSplineT<Precision>::generate_coefficients(
     std::vector<Precision> nodal_derivs)
     -> std::vector<Precision>
 {
+    if (h <= 0 || !std::isfinite(h))
+        throw std::invalid_argument("CubicSpline requires positive finite spacing.");
+    if (nodal_values.size() < 2 || nodal_values.size() != nodal_derivs.size())
+        throw std::invalid_argument(
+            "CubicSpline requires at least two values and matching derivatives.");
+
     auto c = std::vector<Precision>(4*(nodal_values.size()-1), 0.0);
     for (int i=0; i<nodal_values.size()-1; ++i) {
         c[4*i] = nodal_values[i];

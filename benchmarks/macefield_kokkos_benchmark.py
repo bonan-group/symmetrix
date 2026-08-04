@@ -26,11 +26,11 @@ for variable in (
 os.environ.setdefault("OMP_PROC_BIND", "close")
 os.environ.setdefault("OMP_PLACES", "cores")
 
-import numpy as np
-from ase.build import bulk
+import numpy as np  # noqa: E402
+from ase.build import bulk  # noqa: E402
 
-from symmetrix import Symmetrix
-from symmetrix import symmetrix as native_symmetrix
+from symmetrix import Symmetrix  # noqa: E402
+from symmetrix import symmetrix as native_symmetrix  # noqa: E402
 
 
 ATOM_COUNT_TO_REPEAT = {256: 4, 864: 6, 4000: 10}
@@ -138,7 +138,9 @@ class _GpuMemorySampler:
         while not self._stop.is_set():
             value = _gpu_process_memory_mib()
             if value is not None:
-                self.peak_mib = value if self.peak_mib is None else max(self.peak_mib, value)
+                self.peak_mib = (
+                    value if self.peak_mib is None else max(self.peak_mib, value)
+                )
             self._stop.wait(self.interval)
 
     def __enter__(self):
@@ -209,7 +211,9 @@ def _evaluate(
         calculator.evaluator.compute_node_energies_forces_field(*native_args)
 
     results = calculator._collect_mace_results(atoms, inputs)
-    field_adjoint = np.asarray(calculator.evaluator.electric_field_adj, dtype=np.float64)
+    field_adjoint = np.asarray(
+        calculator.evaluator.electric_field_adj, dtype=np.float64
+    )
     r0_elements = int(calculator.evaluator.R0_storage_size)
     r1_elements = int(calculator.evaluator.R1_storage_size)
 
@@ -245,14 +249,13 @@ def _evaluate(
             dtype=np.float64,
         ).copy()
     if finite_difference_control:
+
         def run_finite_difference_control():
             base_forces = np.asarray(
                 calculator.evaluator.node_forces, dtype=np.float64
             ).copy()
             if finite_difference_scheme == "forward":
-                calculator.evaluator.compute_node_energies_forces_field(
-                    *native_args
-                )
+                calculator.evaluator.compute_node_energies_forces_field(*native_args)
                 base_adj = np.asarray(
                     calculator.evaluator.electric_field_adj,
                     dtype=np.float64,
@@ -260,9 +263,7 @@ def _evaluate(
                 base_forces = np.asarray(
                     calculator.evaluator.node_forces, dtype=np.float64
                 ).copy()
-                np.asarray(
-                    calculator.evaluator.node_energies, dtype=np.float64
-                ).copy()
+                np.asarray(calculator.evaluator.node_energies, dtype=np.float64).copy()
             else:
                 base_adj = None
             hessian = np.empty(9, dtype=np.float64)
@@ -305,6 +306,7 @@ def _evaluate(
                     seed * base_forces.size : (seed + 1) * base_forces.size
                 ] = (forces_plus - forces_minus) / denominator
             return hessian, force_derivative
+
         response_gpu_before = _gpu_process_memory_mib()
         start = time.perf_counter()
         fd_hessian, fd_force_derivative = run_finite_difference_control()
@@ -326,9 +328,7 @@ def _evaluate(
                     analytic_hessian, fd_hessian
                 ),
                 "force_derivative_analytic_vs_finite_difference": (
-                    _difference_summary(
-                        analytic_force_derivative, fd_force_derivative
-                    )
+                    _difference_summary(analytic_force_derivative, fd_force_derivative)
                 ),
             }
 
@@ -442,7 +442,9 @@ def main():
 
     for atom_count in sizes:
         repeat = ATOM_COUNT_TO_REPEAT[atom_count]
-        atoms = bulk("AlN", "wurtzite", a=3.112, c=4.982).repeat((repeat, repeat, repeat))
+        atoms = bulk("AlN", "wurtzite", a=3.112, c=4.982).repeat(
+            (repeat, repeat, repeat)
+        )
         if len(atoms) != atom_count:
             raise RuntimeError(f"expected {atom_count} atoms, built {len(atoms)}")
         records = []

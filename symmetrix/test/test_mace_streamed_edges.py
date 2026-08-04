@@ -181,17 +181,20 @@ def test_field_streamed_modes_match_legacy(
         calculator.calculate(
             atoms,
             properties=[
-                "energy", "forces", "stress", "polarization", "polarizability",
+                "energy",
+                "forces",
+                "stress",
+                "polarization",
+                "polarizability",
                 "becs",
             ],
         )
         results = calculator.results
-        field_adjoint = np.asarray(
-            calculator.evaluator.electric_field_adj).copy()
-        field_hessian = np.asarray(
-            calculator.evaluator.electric_field_hessian).copy()
+        field_adjoint = np.asarray(calculator.evaluator.electric_field_adj).copy()
+        field_hessian = np.asarray(calculator.evaluator.electric_field_hessian).copy()
         field_force_derivative = np.asarray(
-            calculator.evaluator.electric_field_force_derivative).copy()
+            calculator.evaluator.electric_field_force_derivative
+        ).copy()
         outputs[mode] = (
             results["energy"],
             results["forces"],
@@ -231,26 +234,26 @@ def test_field_streamed_modes_match_legacy(
             field_hessian,
             field_force_derivative,
         ) = outputs[mode]
-        assert energy == pytest.approx(
-            reference_energy, rel=0.0, abs=first_order_atol)
+        assert energy == pytest.approx(reference_energy, rel=0.0, abs=first_order_atol)
         np.testing.assert_allclose(
-            forces, reference_forces, rtol=0.0, atol=first_order_atol)
+            forces, reference_forces, rtol=0.0, atol=first_order_atol
+        )
         np.testing.assert_allclose(
-            stress, reference_stress, rtol=0.0, atol=first_order_atol)
+            stress, reference_stress, rtol=0.0, atol=first_order_atol
+        )
         np.testing.assert_allclose(
-            polarization, reference_polarization,
-            rtol=0.0, atol=first_order_atol)
+            polarization, reference_polarization, rtol=0.0, atol=first_order_atol
+        )
         np.testing.assert_allclose(
-            polarizability, reference_polarizability,
-            rtol=0.0, atol=response_atol)
+            polarizability, reference_polarizability, rtol=0.0, atol=response_atol
+        )
+        np.testing.assert_allclose(becs, reference_becs, rtol=0.0, atol=response_atol)
         np.testing.assert_allclose(
-            becs, reference_becs, rtol=0.0, atol=response_atol)
+            field_adj, reference_field_adj, rtol=0.0, atol=first_order_atol
+        )
         np.testing.assert_allclose(
-            field_adj, reference_field_adj,
-            rtol=0.0, atol=first_order_atol)
-        np.testing.assert_allclose(
-            field_hessian, reference_field_hessian,
-            rtol=0.0, atol=response_atol)
+            field_hessian, reference_field_hessian, rtol=0.0, atol=response_atol
+        )
         np.testing.assert_allclose(
             field_force_derivative,
             reference_field_force_derivative,
@@ -282,7 +285,8 @@ def test_native_float32_matches_native_float64(streamed_model_paths):
             native_symmetrix.MACEFloat if dtype == "float32" else native_symmetrix.MACE,
         )
         assert calculator.evaluator.scalar_size_bytes == (
-            4 if dtype == "float32" else 8)
+            4 if dtype == "float32" else 8
+        )
         calculator.calculate(
             atoms,
             properties=(
@@ -296,21 +300,24 @@ def test_native_float32_matches_native_float64(streamed_model_paths):
     standard64 = evaluate(standard_path, "float64")
     standard32 = evaluate(standard_path, "float32")
     assert standard32["energy"] == pytest.approx(
-        standard64["energy"], rel=0.0, abs=2e-4)
+        standard64["energy"], rel=0.0, abs=2e-4
+    )
     np.testing.assert_allclose(
-        standard32["forces"], standard64["forces"], rtol=0.0, atol=2e-4)
+        standard32["forces"], standard64["forces"], rtol=0.0, atol=2e-4
+    )
 
     electric_field = np.array([0.01, -0.02, 0.03])
     field64 = evaluate(field_path, "float64", electric_field)
     field32 = evaluate(field_path, "float32", electric_field)
-    assert field32["energy"] == pytest.approx(
-        field64["energy"], rel=0.0, abs=2e-4)
+    assert field32["energy"] == pytest.approx(field64["energy"], rel=0.0, abs=2e-4)
     for property_name in ("forces", "polarization"):
         np.testing.assert_allclose(
-            field32[property_name], field64[property_name], rtol=0.0, atol=2e-4)
+            field32[property_name], field64[property_name], rtol=0.0, atol=2e-4
+        )
     for property_name in ("polarizability", "becs"):
         np.testing.assert_allclose(
-            field32[property_name], field64[property_name], rtol=0.0, atol=2e-3)
+            field32[property_name], field64[property_name], rtol=0.0, atol=2e-3
+        )
 
 
 def test_kokkos_rejects_out_of_range_phi1_hidden_degree(
@@ -385,13 +392,16 @@ def test_legacy_pair_spline_float32_matches_float64(
                 dtype=dtype,
             )
         assert atoms.calc.evaluator.scalar_size_bytes == (
-            8 if dtype == "float64" else 4)
+            8 if dtype == "float64" else 4
+        )
         outputs[dtype] = (atoms.get_potential_energy(), atoms.get_forces())
 
     assert outputs["float32"][0] == pytest.approx(
-        outputs["float64"][0], rel=0.0, abs=2e-4)
+        outputs["float64"][0], rel=0.0, abs=2e-4
+    )
     np.testing.assert_allclose(
-        outputs["float32"][1], outputs["float64"][1], rtol=0.0, atol=2e-4)
+        outputs["float32"][1], outputs["float64"][1], rtol=0.0, atol=2e-4
+    )
 
 
 def test_kokkos_streamed_path_offsets_match_model_layout(streamed_model_paths):

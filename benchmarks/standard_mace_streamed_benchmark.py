@@ -26,11 +26,11 @@ for variable in (
 os.environ.setdefault("OMP_PROC_BIND", "close")
 os.environ.setdefault("OMP_PLACES", "cores")
 
-import numpy as np
-from ase.build import bulk
+import numpy as np  # noqa: E402
+from ase.build import bulk  # noqa: E402
 
-from symmetrix import Symmetrix
-from symmetrix import symmetrix as native_symmetrix
+from symmetrix import Symmetrix  # noqa: E402
+from symmetrix import symmetrix as native_symmetrix  # noqa: E402
 
 
 def _sha256(path):
@@ -137,16 +137,15 @@ def _evaluate(
     calculator=None,
 ):
     process_memory_before_mib = _process_memory_mib()
-    gpu_memory_before_mib = (
-        _gpu_process_memory_mib() if backend == "kokkos" else None
-    )
+    gpu_memory_before_mib = _gpu_process_memory_mib() if backend == "kokkos" else None
     if calculator is None:
         calculator = _make_calculator(model, backend, dtype, mode)
     scalar_bytes = 4 if dtype == "float32" else 8
     evaluator_scalar_bytes = calculator.evaluator.scalar_size_bytes
     if evaluator_scalar_bytes != scalar_bytes:
         raise RuntimeError(
-            f"evaluator uses {evaluator_scalar_bytes}-byte scalars, expected {scalar_bytes}")
+            f"evaluator uses {evaluator_scalar_bytes}-byte scalars, expected {scalar_bytes}"
+        )
     inputs = calculator._mace_inputs(atoms)
     native_args = (*inputs[:5], inputs[5].flatten(), inputs[6])
     for _ in range(warmups):
@@ -155,13 +154,11 @@ def _evaluate(
     for _ in range(repeats):
         start = time.perf_counter()
         calculator.evaluator.compute_node_energies_forces(*native_args)
-        samples.append(1000.0*(time.perf_counter()-start))
+        samples.append(1000.0 * (time.perf_counter() - start))
     results = calculator._collect_mace_results(atoms, inputs)
     r0_elements = int(calculator.evaluator.R0_storage_size)
     r1_elements = int(calculator.evaluator.R1_storage_size)
-    gpu_memory_after_mib = (
-        _gpu_process_memory_mib() if backend == "kokkos" else None
-    )
+    gpu_memory_after_mib = _gpu_process_memory_mib() if backend == "kokkos" else None
     process_memory_after_mib = _process_memory_mib()
     return {
         "mode": mode,
@@ -174,7 +171,7 @@ def _evaluate(
         "edge_radial_storage": {
             "R0_elements": r0_elements,
             "R1_elements": r1_elements,
-            "bytes": scalar_bytes*(r0_elements+r1_elements),
+            "bytes": scalar_bytes * (r0_elements + r1_elements),
         },
         "gpu_process_memory_mib": {
             "before": gpu_memory_before_mib,
@@ -246,9 +243,7 @@ def main():
     failed = False
     reused_calculator = None
     if args.reuse_evaluator:
-        reused_calculator = _make_calculator(
-            model, args.backend, args.dtype, modes[0]
-        )
+        reused_calculator = _make_calculator(model, args.backend, args.dtype, modes[0])
     for size in sizes:
         atoms = bulk("AlN", "wurtzite", a=3.112, c=4.982).repeat((size, size, size))
         records = {
@@ -271,13 +266,13 @@ def main():
         for mode, record in records.items():
             forces = np.asarray(record.pop("forces_eV_per_A"))
             record.pop("directed_edges")
-            record["energy_error_eV"] = abs(record["energy_eV"]-reference["energy_eV"])
+            record["energy_error_eV"] = abs(
+                record["energy_eV"] - reference["energy_eV"]
+            )
             record["force_max_error_eV_per_A"] = float(
-                np.max(np.abs(forces-reference_forces))
+                np.max(np.abs(forces - reference_forces))
             )
-            speedup = (
-                reference["timing"]["median_ms"]/record["timing"]["median_ms"]
-            )
+            speedup = reference["timing"]["median_ms"] / record["timing"]["median_ms"]
             record["speedup_vs_reference"] = speedup
             if reference_mode == "legacy":
                 record["speedup_vs_legacy"] = speedup
@@ -297,7 +292,7 @@ def main():
     serialized = json.dumps(report, indent=2)
     print(serialized)
     if args.output:
-        args.output.write_text(serialized+"\n")
+        args.output.write_text(serialized + "\n")
     return int(failed)
 
 

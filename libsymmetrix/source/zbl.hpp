@@ -42,7 +42,7 @@ Precision a_prefactor;
 std::vector<Precision> c;
 std::vector<Precision> covalent_radii;
 int p;
-    
+
 // values taken from mace/modules/radial.py
 static constexpr Precision c_exps_0 = -3.2;
 static constexpr Precision c_exps_1 = -0.9423;

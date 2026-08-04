@@ -31,16 +31,20 @@ for variable in BLAS_THREAD_VARIABLES:
     os.environ[variable] = BLAS_THREAD_COUNT
 os.environ.setdefault("OMP_PROC_BIND", "close")
 os.environ.setdefault("OMP_PLACES", "cores")
-THREAD_VARIABLES = KOKKOS_THREAD_VARIABLES + BLAS_THREAD_VARIABLES + (
-    "OMP_PROC_BIND",
-    "OMP_PLACES",
+THREAD_VARIABLES = (
+    KOKKOS_THREAD_VARIABLES
+    + BLAS_THREAD_VARIABLES
+    + (
+        "OMP_PROC_BIND",
+        "OMP_PLACES",
+    )
 )
 
-import numpy as np
-from ase.build import bulk
+import numpy as np  # noqa: E402
+from ase.build import bulk  # noqa: E402
 
-from symmetrix import Symmetrix
-from symmetrix import symmetrix as native_symmetrix
+from symmetrix import Symmetrix  # noqa: E402
+from symmetrix import symmetrix as native_symmetrix  # noqa: E402
 
 
 def _sha256(path):
@@ -233,9 +237,7 @@ def _benchmark(calculator, atoms, warmups, repeats, include_ase):
             synchronize()
             ase_samples.append(1000.0 * (time.perf_counter() - start))
 
-    edge_workspace_bytes = getattr(
-        calculator.evaluator, "edge_workspace_bytes", None
-    )
+    edge_workspace_bytes = getattr(calculator.evaluator, "edge_workspace_bytes", None)
     selected_e3_linear_backend = getattr(
         calculator.evaluator, "selected_e3_linear_backend", None
     )
@@ -254,15 +256,13 @@ def _benchmark(calculator, atoms, warmups, repeats, include_ase):
         "edge_workspace_rows": calculator.evaluator.edge_workspace_rows,
         "edge_workspace_bytes": edge_workspace_bytes,
         "edge_workspace_mib": (
-            edge_workspace_bytes / 2**20
-            if edge_workspace_bytes is not None else None
+            edge_workspace_bytes / 2**20 if edge_workspace_bytes is not None else None
         ),
-        "e3_linear_backend": getattr(
-            calculator.evaluator, "e3_linear_backend", None
-        ),
+        "e3_linear_backend": getattr(calculator.evaluator, "e3_linear_backend", None),
         "selected_e3_linear_backend": (
             selected_e3_linear_backend(len(atoms))
-            if selected_e3_linear_backend is not None else None
+            if selected_e3_linear_backend is not None
+            else None
         ),
         "tensor_product_backend": getattr(
             calculator.evaluator, "tensor_product_backend", None
@@ -314,11 +314,15 @@ def _lifecycle(calculator, sizes, cycles):
     systems = [bulk("Si", "diamond", a=5.43).repeat((size,) * 3) for size in sizes]
     for _ in range(3):
         for atoms in systems:
-            calculator.calculate(atoms.copy(), properties=["energy", "forces", "stress"])
+            calculator.calculate(
+                atoms.copy(), properties=["energy", "forces", "stress"]
+            )
     rss_bytes = []
     for _ in range(cycles):
         for atoms in systems:
-            calculator.calculate(atoms.copy(), properties=["energy", "forces", "stress"])
+            calculator.calculate(
+                atoms.copy(), properties=["energy", "forces", "stress"]
+            )
         rss_bytes.append(_current_rss_bytes())
     return {
         "sizes": sizes,
@@ -334,10 +338,14 @@ def _lifecycle(calculator, sizes, cycles):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("model", type=pathlib.Path, help="Extracted MACE-MH-1 JSON model")
+    parser.add_argument(
+        "model", type=pathlib.Path, help="Extracted MACE-MH-1 JSON model"
+    )
     parser.add_argument("--backend", choices=("serial", "kokkos"), default="serial")
     parser.add_argument("--dtype", choices=("float32", "float64"), default="float64")
-    parser.add_argument("--reference-model", type=pathlib.Path, help="Optional native MH-0 JSON")
+    parser.add_argument(
+        "--reference-model", type=pathlib.Path, help="Optional native MH-0 JSON"
+    )
     parser.add_argument("--max-reference-ratio", type=float)
     parser.add_argument(
         "--cpu",
@@ -408,16 +416,9 @@ def main():
         args.fused_gate_normalization_reverse != "auto"
         or args.direct_node_tensor_reverse != "auto"
     ):
-        parser.error(
-            "fused reverse controls require --backend kokkos"
-        )
-    if (
-        args.direct_node_tensor_reverse == "on"
-        and args.streamed_edges != "all"
-    ):
-        parser.error(
-            "--direct-node-tensor-reverse on requires --streamed-edges all"
-        )
+        parser.error("fused reverse controls require --backend kokkos")
+    if args.direct_node_tensor_reverse == "on" and args.streamed_edges != "all":
+        parser.error("--direct-node-tensor-reverse on requires --streamed-edges all")
     if hasattr(os, "sched_getaffinity"):
         available_cpus = os.sched_getaffinity(0)
         requested_cpus = None
@@ -471,20 +472,18 @@ def main():
                 continue
             setter = getattr(calculator.evaluator, setter_name, None)
             if setter is None:
-                raise RuntimeError(
-                    f"Native evaluator does not expose {setter_name}"
-                )
+                raise RuntimeError(f"Native evaluator does not expose {setter_name}")
             setter(requested == "on")
-    if (
-        not args.allow_generic
-        and not getattr(calculator.evaluator, "uses_mh1_fast_path", False)
+    if not args.allow_generic and not getattr(
+        calculator.evaluator, "uses_mh1_fast_path", False
     ):
         raise RuntimeError(
             f"Model does not match the specialized MACE-MH-1 {args.backend} architecture"
         )
     reference = (
         Symmetrix(args.reference_model, use_kokkos=use_kokkos, dtype=args.dtype)
-        if args.reference_model else None
+        if args.reference_model
+        else None
     )
 
     extension_path = pathlib.Path(native_symmetrix.__file__).resolve()
@@ -497,23 +496,17 @@ def main():
         "machine": platform.machine(),
         "processor": _cpu_model(),
         "logical_cpu_count": os.cpu_count(),
-        "cpu_affinity": sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None,
+        "cpu_affinity": sorted(os.sched_getaffinity(0))
+        if hasattr(os, "sched_getaffinity")
+        else None,
         "thread_affinities": _thread_affinities(),
         "backend": args.backend,
         "dtype": args.dtype,
         "scalar_size_bytes": getattr(calculator.evaluator, "scalar_size_bytes", 8),
-        "is_mh1_family": bool(
-            getattr(calculator.evaluator, "is_mh1_family", False)
-        ),
-        "mh1_node_channels": getattr(
-            calculator.evaluator, "mh1_node_channels", None
-        ),
-        "mh1_edge_channels": getattr(
-            calculator.evaluator, "mh1_edge_channels", None
-        ),
-        "mh1_radial_size": getattr(
-            calculator.evaluator, "mh1_radial_size", None
-        ),
+        "is_mh1_family": bool(getattr(calculator.evaluator, "is_mh1_family", False)),
+        "mh1_node_channels": getattr(calculator.evaluator, "mh1_node_channels", None),
+        "mh1_edge_channels": getattr(calculator.evaluator, "mh1_edge_channels", None),
+        "mh1_radial_size": getattr(calculator.evaluator, "mh1_radial_size", None),
         "mh1_l_max": getattr(calculator.evaluator, "mh1_l_max", None),
         "mh1_family_rejection_reason": getattr(
             calculator.evaluator, "mh1_family_rejection_reason", None
@@ -532,9 +525,7 @@ def main():
         ),
         "uses_mh1_fast_path": bool(calculator.evaluator.uses_mh1_fast_path),
         "streamed_edges": calculator.streamed_edges,
-        "e3_linear_backend": getattr(
-            calculator.evaluator, "e3_linear_backend", None
-        ),
+        "e3_linear_backend": getattr(calculator.evaluator, "e3_linear_backend", None),
         "tensor_product_execution_backend": getattr(
             calculator.evaluator, "tensor_product_execution_backend", None
         ),
@@ -568,7 +559,9 @@ def main():
         "native_extension": str(extension_path),
         "native_build": _native_build_metadata(extension_path),
         "model": _model_metadata(args.model),
-        "reference_model": _model_metadata(args.reference_model) if args.reference_model else None,
+        "reference_model": _model_metadata(args.reference_model)
+        if args.reference_model
+        else None,
         "timing_scope": {
             "evaluator": "prebuilt graph; native energy and analytic-force kernel only",
             "ase": "Symmetrix.calculate including graph construction and result collection",
@@ -609,7 +602,8 @@ def main():
             )
             record["ase_reference_ratio"] = (
                 record["ase"]["median_ms"] / reference_record["ase"]["median_ms"]
-                if record["ase"] is not None else None
+                if record["ase"] is not None
+                else None
             )
             if (
                 args.max_reference_ratio is not None

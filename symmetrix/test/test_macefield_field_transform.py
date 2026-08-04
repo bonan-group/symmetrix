@@ -8,12 +8,17 @@ try:
     torch.serialization.add_safe_globals([slice])
     from mace.tools.scripts_utils import remove_pt_head
 except ImportError as exc:
-    pytest.skip(f"mace-field tensor test dependencies are not available: {exc}", allow_module_level=True)
+    pytest.skip(
+        f"mace-field tensor test dependencies are not available: {exc}",
+        allow_module_level=True,
+    )
 
 
 @pytest.fixture(scope="module")
 def macefield_modules(macefield_model_path):
-    model = torch.load(macefield_model_path, map_location=torch.device("cpu"), weights_only=False).to(torch.float64)
+    model = torch.load(
+        macefield_model_path, map_location=torch.device("cpu"), weights_only=False
+    ).to(torch.float64)
     if hasattr(model, "heads") and len(model.heads) != 1:
         torch.set_default_dtype(next(model.parameters()).dtype)
         model = remove_pt_head(model, "mp-dielectric")
@@ -36,7 +41,11 @@ def _weight_views(module):
         numel = 1
         for size in instruction.path_shape:
             numel *= size
-        views.append(module.weight.detach().narrow(0, offset, numel).reshape(instruction.path_shape))
+        views.append(
+            module.weight.detach()
+            .narrow(0, offset, numel)
+            .reshape(instruction.path_shape)
+        )
         offset += numel
     assert offset == module.weight.numel()
     return views
@@ -59,7 +68,9 @@ def _compact_field_coupling(field_feats, field_linear):
                     "path_weight": instruction.path_weight,
                     "weight": weight.clone(),
                 }
-                for instruction, weight in zip(field_feats.instructions, _weight_views(field_feats))
+                for instruction, weight in zip(
+                    field_feats.instructions, _weight_views(field_feats)
+                )
             ],
         },
         "field_linear": {
@@ -75,7 +86,9 @@ def _compact_field_coupling(field_feats, field_linear):
                     "path_weight": instruction.path_weight,
                     "weight": weight.clone(),
                 }
-                for instruction, weight in zip(field_linear.instructions, _weight_views(field_linear))
+                for instruction, weight in zip(
+                    field_linear.instructions, _weight_views(field_linear)
+                )
             ],
         },
     }
@@ -99,19 +112,35 @@ def _standalone_field_feats(coupling, h1_pre, electric_field):
         assert instruction["connection_mode"] == "uvw"
         assert instruction["path_shape"] == (128, 1, 128)
 
-        if (instruction["i_in1"], instruction["i_in2"], instruction["i_out"]) == (0, 0, 1):
-            vector_out += instruction["path_weight"] * torch.einsum(
-                "uvw,...u,...vj->...wj", weight, scalar_in, field
-            ) / sqrt(3.0)
-        elif (instruction["i_in1"], instruction["i_in2"], instruction["i_out"]) == (1, 0, 0):
-            scalar_out += instruction["path_weight"] * torch.einsum(
-                "uvw,...ui,...vi->...w", weight, vector_in, field
-            ) / sqrt(3.0)
+        if (instruction["i_in1"], instruction["i_in2"], instruction["i_out"]) == (
+            0,
+            0,
+            1,
+        ):
+            vector_out += (
+                instruction["path_weight"]
+                * torch.einsum("uvw,...u,...vj->...wj", weight, scalar_in, field)
+                / sqrt(3.0)
+            )
+        elif (instruction["i_in1"], instruction["i_in2"], instruction["i_out"]) == (
+            1,
+            0,
+            0,
+        ):
+            scalar_out += (
+                instruction["path_weight"]
+                * torch.einsum("uvw,...ui,...vi->...w", weight, vector_in, field)
+                / sqrt(3.0)
+            )
         else:
             raise AssertionError(f"Unsupported field_feats instruction: {instruction}")
 
-    output = torch.cat([scalar_out, vector_out.reshape(*h1_pre.shape[:-1], 384)], dim=-1)
-    return output * field_feats["output_mask"].to(dtype=output.dtype, device=output.device)
+    output = torch.cat(
+        [scalar_out, vector_out.reshape(*h1_pre.shape[:-1], 384)], dim=-1
+    )
+    return output * field_feats["output_mask"].to(
+        dtype=output.dtype, device=output.device
+    )
 
 
 def _standalone_field_linear(coupling, delta_feats):
@@ -127,18 +156,28 @@ def _standalone_field_linear(coupling, delta_feats):
     vector_out = torch.zeros_like(vector_in)
 
     for instruction in field_linear["instructions"]:
-        weight = instruction["weight"].to(dtype=delta_feats.dtype, device=delta_feats.device)
+        weight = instruction["weight"].to(
+            dtype=delta_feats.dtype, device=delta_feats.device
+        )
         assert instruction["path_shape"] == (128, 128)
 
         if (instruction["i_in"], instruction["i_out"]) == (0, 0):
-            scalar_out += instruction["path_weight"] * torch.einsum("uw,...u->...w", weight, scalar_in)
+            scalar_out += instruction["path_weight"] * torch.einsum(
+                "uw,...u->...w", weight, scalar_in
+            )
         elif (instruction["i_in"], instruction["i_out"]) == (1, 1):
-            vector_out += instruction["path_weight"] * torch.einsum("uw,...ui->...wi", weight, vector_in)
+            vector_out += instruction["path_weight"] * torch.einsum(
+                "uw,...ui->...wi", weight, vector_in
+            )
         else:
             raise AssertionError(f"Unsupported field_linear instruction: {instruction}")
 
-    output = torch.cat([scalar_out, vector_out.reshape(*delta_feats.shape[:-1], 384)], dim=-1)
-    return output * field_linear["output_mask"].to(dtype=output.dtype, device=output.device)
+    output = torch.cat(
+        [scalar_out, vector_out.reshape(*delta_feats.shape[:-1], 384)], dim=-1
+    )
+    return output * field_linear["output_mask"].to(
+        dtype=output.dtype, device=output.device
+    )
 
 
 def _standalone_field_transform(coupling, h1_pre, electric_field):
